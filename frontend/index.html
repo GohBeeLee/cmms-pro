@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>CMMS Pro</title>
+<script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.10/babel.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
+<style>
+  *{box-sizing:border-box;}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#f8fafc;margin:0;}
+  .sidebar{width:220px;min-height:100vh;background:#1e293b;position:fixed;top:0;left:0;z-index:40;display:flex;flex-direction:column;}
+  .main-content{margin-left:220px;padding:28px;}
+  .nav-link{display:flex;align-items:center;gap:10px;padding:10px 14px;color:#94a3b8;border-radius:8px;margin:2px 8px;cursor:pointer;font-size:14px;transition:all 0.15s;}
+  .nav-link:hover,.nav-link.active{background:#2563eb;color:#fff;}
+  .card{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.07);border:1px solid #f1f5f9;padding:20px;}
+  .btn{padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-size:14px;font-weight:500;transition:all 0.15s;}
+  .btn-primary{background:#2563eb;color:#fff;}
+  .btn-primary:hover{background:#1d4ed8;}
+  .btn-secondary{background:#fff;color:#374151;border:1px solid #e5e7eb;}
+  .btn-secondary:hover{background:#f9fafb;}
+  .inp{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:14px;outline:none;font-family:inherit;}
+  .inp:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,0.1);}
+  .lbl{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:4px;}
+  .badge{display:inline-flex;align-items:center;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;}
+  .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:center;justify-content:center;}
+  .modal-box{background:#fff;border-radius:16px;width:100%;max-width:500px;max-height:90vh;overflow-y:auto;margin:16px;}
+  table{width:100%;border-collapse:collapse;}
+  th{background:#f8fafc;color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:11px 16px;text-align:left;white-space:nowrap;}
+  td{padding:11px 16px;font-size:13px;color:#374151;border-bottom:1px solid #f1f5f9;}
+  tr:last-child td{border-bottom:none;}
+  tr:hover td{background:#fafafa;}
+  .spinner{border:3px solid #e2e8f0;border-top:3px solid #3b82f6;border-radius:50%;width:32px;height:32px;animation:spin 0.8s linear infinite;margin:48px auto;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .toast-wrap{position:fixed;top:20px;right:20px;z-index:999;display:flex;flex-direction:column;gap:8px;}
+  .toast{padding:12px 18px;border-radius:10px;font-size:13px;font-weight:600;color:#fff;max-width:320px;animation:tin 0.2s ease;}
+  .t-ok{background:#16a34a;} .t-err{background:#dc2626;}
+  @keyframes tin{from{transform:translateX(110%);opacity:0;}to{transform:translateX(0);opacity:1;}}
+  .kpi{background:#fff;border-radius:12px;padding:18px;display:flex;align-items:center;gap:14px;box-shadow:0 1px 3px rgba(0,0,0,0.07);border:1px solid #f1f5f9;}
+  .kpi-icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
+  .ovf{overflow-x:auto;}
+  select.inp{appearance:auto;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div class="toast-wrap" id="toasts"></div>
+<script>
+// Fix WebSocket URL before Babel runs
+window.WS_BASE = 'ws://' + location.host;
+window.API_BASE = '';
+</script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type === 'error' ? 't-err' : 't-ok');
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  const token = localStorage.getItem('cmms_token');
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}, opts.headers || {});
+  const res = await fetch(window.API_BASE + path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) { localStorage.removeItem('cmms_token'); location.reload(); }
+  if (!res.ok) {
+    const e = await res.json().catch(function() { return {}; });
+    throw new Error(e.detail || 'Request failed');
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+// ── Badge ──────────────────────────────────────────────────────────────────
+const BCOLS = {
+  operational:'#dcfce7;#166534', under_maintenance:'#fef9c3;#854d0e',
+  out_of_service:'#fee2e2;#991b1b', decommissioned:'#f1f5f9;#475569',
+  open:'#dbeafe;#1e40af', in_progress:'#ede9fe;#5b21b6',
+  on_hold:'#ffedd5;#9a3412', completed:'#dcfce7;#166534',
+  cancelled:'#f1f5f9;#475569', low:'#f1f5f9;#374151',
+  medium:'#fef9c3;#854d0e', high:'#ffedd5;#9a3412',
+  critical:'#fee2e2;#991b1b', active:'#dcfce7;#166534',
+  inactive:'#f1f5f9;#475569', pending:'#f1f5f9;#374151',
+  accepted:'#dbeafe;#1e40af',
+};
+function Badge(props) {
+  const v = props.value || '';
+  const cols = (BCOLS[v] || '#f1f5f9;#374151').split(';');
+  return React.createElement('span', {
+    className: 'badge',
+    style: { background: cols[0], color: cols[1] }
+  }, (v.replace(/_/g, ' ') || '').replace(/^\w/, function(c) { return c.toUpperCase(); }));
+}
+
+// ── Modal ──────────────────────────────────────────────────────────────────
+function Modal(props) {
+  return React.createElement('div', { className: 'modal-bg', onClick: function(e) { if (e.target === e.currentTarget) props.onClose(); } },
+    React.createElement('div', { className: 'modal-box' },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 22px', borderBottom: '1px solid #f1f5f9' } },
+        React.createElement('h2', { style: { margin: 0, fontSize: '16px', fontWeight: 700, color: '#1e293b' } }, props.title),
+        React.createElement('button', { onClick: props.onClose, style: { background: 'none', border: 'none', fontSize: '22px', cursor: 'pointer', color: '#94a3b8', lineHeight: 1 } }, '×')
+      ),
+      React.createElement('div', { style: { padding: '18px 22px' } }, props.children)
+    )
+  );
+}
+
+function Spinner() { return React.createElement('div', { className: 'spinner' }); }
+function Empty(props) { return React.createElement('div', { style: { textAlign: 'center', padding: '40px', color: '#94a3b8', fontSize: '14px' } }, props.msg); }
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+function useWS(room, onEvent) {
+  const ref = useRef(null);
+  useEffect(function() {
+    const token = localStorage.getItem('cmms_token');
+    if (!token || !room) return;
+    let ws, timer;
+    function connect() {
+      ws = new WebSocket(window.WS_BASE + '/ws/' + room + '?token=' + token);
+      ref.current = ws;
+      ws.onmessage = function(e) { try { onEvent && onEvent(JSON.parse(e.data)); } catch(x) {} };
+      ws.onclose = function(e) { if (e.code !== 4001) timer = setTimeout(connect, 3000); };
+    }
+    connect();
+    const ping = setInterval(function() { if (ws && ws.readyState === 1) ws.send('ping'); }, 30000);
+    return function() { clearInterval(ping); clearTimeout(timer); if (ws) ws.close(); };
+  }, [room]);
+}
+
+// ── Login ──────────────────────────────────────────────────────────────────
+function Login(props) {
+  const [email, setEmail] = useState('');
+  const [pw, setPw] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function submit(e) {
+    e.preventDefault(); setLoading(true); setErr('');
+    try {
+      const body = new URLSearchParams({ username: email, password: pw });
+      const res = await fetch(window.API_BASE + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+      if (!res.ok) { const d = await res.json(); throw new Error(d.detail || 'Login failed'); }
+      const data = await res.json();
+      localStorage.setItem('cmms_token', data.access_token);
+      const me = await api('/auth/me');
+      props.onLogin(me);
+    } catch(ex) { setErr(ex.message); }
+    finally { setLoading(false); }
+  }
+
+  return React.createElement('div', { style: { minHeight: '100vh', background: '#1e293b', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+    React.createElement('div', { style: { background: '#fff', borderRadius: '20px', padding: '40px', width: '100%', maxWidth: '400px', margin: '16px' } },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '32px' } },
+        React.createElement('div', { style: { width: '44px', height: '44px', background: '#2563eb', borderRadius: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '22px' } }, '🔧'),
+        React.createElement('div', null,
+          React.createElement('div', { style: { fontWeight: 800, fontSize: '18px', color: '#1e293b' } }, 'CMMS Pro'),
+          React.createElement('div', { style: { fontSize: '12px', color: '#94a3b8' } }, 'Maintenance Management System')
+        )
+      ),
+      React.createElement('form', { onSubmit: submit },
+        React.createElement('div', { style: { marginBottom: '14px' } },
+          React.createElement('label', { className: 'lbl' }, 'Email'),
+          React.createElement('input', { className: 'inp', type: 'email', value: email, onChange: function(e) { setEmail(e.target.value); }, placeholder: 'admin@cmms.com', required: true })
+        ),
+        React.createElement('div', { style: { marginBottom: '18px' } },
+          React.createElement('label', { className: 'lbl' }, 'Password'),
+          React.createElement('input', { className: 'inp', type: 'password', value: pw, onChange: function(e) { setPw(e.target.value); }, placeholder: '••••••••', required: true })
+        ),
+        err && React.createElement('div', { style: { background: '#fee2e2', color: '#991b1b', padding: '10px 14px', borderRadius: '8px', fontSize: '13px', marginBottom: '14px' } }, err),
+        React.createElement('button', { className: 'btn btn-primary', type: 'submit', disabled: loading, style: { width: '100%', padding: '10px' } }, loading ? 'Signing in…' : 'Sign in')
+      ),
+      React.createElement('div', { style: { marginTop: '18px', padding: '14px', background: '#f8fafc', borderRadius: '10px', fontSize: '12px', color: '#64748b' } },
+        React.createElement('strong', null, 'Demo: '), 'admin@cmms.com / password123'
+      )
+    )
+  );
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+function Dashboard() {
+  const [kpi, setKpi] = useState(null);
+  const [wos, setWos] = useState([]);
+
+  async function load() {
+    try {
+      const results = await Promise.all([api('/dashboard/kpi'), api('/work-orders/?limit=200')]);
+      setKpi(results[0]); setWos(results[1]);
+    } catch(e) { toast(e.message, 'error'); }
+  }
+  useEffect(function() { load(); }, []);
+  useWS('work_orders', load);
+  useWS('assets', load);
+
+  const COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#8b5cf6'];
+  const statusData = {};
+  const priorityData = {};
+  wos.forEach(function(w) {
+    statusData[w.status] = (statusData[w.status] || 0) + 1;
+    priorityData[w.priority] = (priorityData[w.priority] || 0) + 1;
+  });
+  const chartS = Object.entries(statusData).map(function(e) { return { name: e[0], value: e[1] }; });
+  const chartP = Object.entries(priorityData).map(function(e) { return { name: e[0], value: e[1] }; });
+
+  const kpiCards = kpi ? [
+    { icon: '🏭', label: 'Total Assets', value: kpi.total_assets, bg: '#eff6ff' },
+    { icon: '⚠️', label: 'Under Maintenance', value: kpi.assets_under_maintenance, bg: '#fefce8', alert: kpi.assets_under_maintenance > 0 },
+    { icon: '📋', label: 'Open Work Orders', value: kpi.open_work_orders, bg: '#eef2ff' },
+    { icon: '🔴', label: 'Overdue WOs', value: kpi.overdue_work_orders, bg: '#fef2f2', alert: kpi.overdue_work_orders > 0 },
+    { icon: '✅', label: 'Completed Today', value: kpi.work_orders_completed_today, bg: '#f0fdf4' },
+    { icon: '📅', label: 'PM Due (7 days)', value: kpi.pm_schedules_due_soon, bg: '#faf5ff', alert: kpi.pm_schedules_due_soon > 0 },
+    { icon: '📦', label: 'Low Stock Parts', value: kpi.low_stock_parts, bg: '#fff7ed', alert: kpi.low_stock_parts > 0 },
+    { icon: '👥', label: 'Active Users', value: kpi.total_technicians, bg: '#f0fdfa' },
+  ] : [];
+
+  const RC = window.Recharts;
+
+  return React.createElement('div', null,
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '24px' } },
+      React.createElement('div', null,
+        React.createElement('h1', { style: { fontSize: '22px', fontWeight: 800, color: '#1e293b', margin: 0 } }, 'Dashboard'),
+        React.createElement('p', { style: { color: '#94a3b8', fontSize: '13px', margin: '4px 0 0' } }, 'Live system overview')
+      ),
+      React.createElement('span', { style: { background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0', padding: '6px 14px', borderRadius: '999px', fontSize: '12px', fontWeight: 600 } }, '● Live')
+    ),
+    !kpi ? React.createElement(Spinner, null) : React.createElement('div', null,
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(190px,1fr))', gap: '14px', marginBottom: '24px' } },
+        kpiCards.map(function(k, i) {
+          return React.createElement('div', { key: i, className: 'kpi', style: k.alert ? { borderColor: '#fca5a5' } : {} },
+            React.createElement('div', { className: 'kpi-icon', style: { background: k.bg } }, k.icon),
+            React.createElement('div', null,
+              React.createElement('div', { style: { fontSize: '28px', fontWeight: 800, color: '#1e293b', lineHeight: 1 } }, k.value),
+              React.createElement('div', { style: { fontSize: '12px', color: '#94a3b8', marginTop: '4px' } }, k.label)
+            )
+          );
+        })
+      ),
+      RC ? React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '18px' } },
+        React.createElement('div', { className: 'card' },
+          React.createElement('h3', { style: { fontWeight: 700, color: '#1e293b', marginBottom: '14px', fontSize: '14px' } }, 'Work Orders by Status'),
+          chartS.length > 0 ? React.createElement(RC.ResponsiveContainer, { width: '100%', height: 200 },
+            React.createElement(RC.PieChart, null,
+              React.createElement(RC.Pie, { data: chartS, dataKey: 'value', nameKey: 'name', cx: '50%', cy: '50%', outerRadius: 75 },
+                chartS.map(function(_, i) { return React.createElement(RC.Cell, { key: i, fill: COLORS[i % COLORS.length] }); })
+              ),
+              React.createElement(RC.Tooltip, null),
+              React.createElement(RC.Legend, null)
+            )
+          ) : React.createElement(Empty, { msg: 'No data yet' })
+        ),
+        React.createElement('div', { className: 'card' },
+          React.createElement('h3', { style: { fontWeight: 700, color: '#1e293b', marginBottom: '14px', fontSize: '14px' } }, 'Work Orders by Priority'),
+          chartP.length > 0 ? React.createElement(RC.ResponsiveContainer, { width: '100%', height: 200 },
+            React.createElement(RC.BarChart, { data: chartP },
+              React.createElement(RC.XAxis, { dataKey: 'name', tick: { fontSize: 12 } }),
+              React.createElement(RC.YAxis, { allowDecimals: false, tick: { fontSize: 12 } }),
+              React.createElement(RC.Tooltip, null),
+              React.createElement(RC.Bar, { dataKey: 'value', radius: [6, 6, 0, 0] },
+                chartP.map(function(_, i) { return React.createElement(RC.Cell, { key: i, fill: COLORS[i % COLORS.length] }); })
+              )
+            )
+          ) : React.createElement(Empty, { msg: 'No data yet' })
+        )
+      ) : React.createElement('div', { style: { color: '#94a3b8', fontSize: '13px' } }, 'Charts loading…')
+    )
+  );
+}
+
+// ── Assets ─────────────────────────────────────────────────────────────────
+function Assets() {
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [modal, setModal] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const emptyForm = { asset_code: '', name: '', category: '', location: '', manufacturer: '', model: '', serial_number: '', status: 'operational', notes: '' };
+  const [form, setForm] = useState(emptyForm);
+  const CATS = ['Pump', 'Motor', 'Compressor', 'Conveyor', 'HVAC', 'Generator', 'Other'];
+  const STATS = ['operational', 'under_maintenance', 'out_of_service', 'decommissioned'];
+
+  async function load() { try { setAssets(await api('/assets/')); } catch(e) { toast(e.message, 'error'); } finally { setLoading(false); } }
+  useEffect(function() { load(); }, []);
+  useWS('assets', load);
+
+  async function save() {
+    try {
+      if (editing) await api('/assets/' + editing.id, { method: 'PATCH', body: JSON.stringify(form) });
+      else await api('/assets/', { method: 'POST', body: JSON.stringify(form) });
+      toast(editing ? 'Asset updated' : 'Asset created'); setModal(false); setEditing(null); load();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+  async function del(id) {
+    if (!confirm('Delete this asset?')) return;
+    try { await api('/assets/' + id, { method: 'DELETE' }); toast('Deleted'); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+
+  const filtered = assets.filter(function(a) { return a.name.toLowerCase().includes(search.toLowerCase()) || a.asset_code.toLowerCase().includes(search.toLowerCase()); });
+
+  function field(k, lbl, dis) {
+    return React.createElement('div', { key: k },
+      React.createElement('label', { className: 'lbl' }, lbl),
+      React.createElement('input', { className: 'inp', disabled: !!dis, value: form[k] || '', onChange: function(e) { setForm(Object.assign({}, form, { [k]: e.target.value })); } })
+    );
+  }
+
+  return React.createElement('div', null,
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' } },
+      React.createElement('div', null,
+        React.createElement('h1', { style: { fontSize: '22px', fontWeight: 800, color: '#1e293b', margin: 0 } }, 'Assets'),
+        React.createElement('p', { style: { color: '#94a3b8', fontSize: '13px', margin: '4px 0 0' } }, 'Machines & equipment')
+      ),
+      React.createElement('button', { className: 'btn btn-primary', onClick: function() { setEditing(null); setForm(emptyForm); setModal(true); } }, '+ Add Asset')
+    ),
+    React.createElement('input', { className: 'inp', style: { maxWidth: '280px', marginBottom: '16px' }, placeholder: 'Search…', value: search, onChange: function(e) { setSearch(e.target.value); } }),
+    React.createElement('div', { className: 'card', style: { padding: 0 } },
+      loading ? React.createElement(Spinner, null) : filtered.length === 0 ? React.createElement(Empty, { msg: 'No assets found' }) :
+      React.createElement('div', { className: 'ovf' },
+        React.createElement('table', null,
+          React.createElement('thead', null, React.createElement('tr', null, ['Code', 'Name', 'Category', 'Location', 'Status', 'Actions'].map(function(h) { return React.createElement('th', { key: h }, h); }))),
+          React.createElement('tbody', null, filtered.map(function(a) {
+            return React.createElement('tr', { key: a.id },
+              React.createElement('td', null, React.createElement('span', { style: { fontFamily: 'monospace', color: '#2563eb', fontSize: '12px' } }, a.asset_code)),
+              React.createElement('td', { style: { fontWeight: 600 } }, a.name),
+              React.createElement('td', { style: { color: '#64748b' } }, a.category),
+              React.createElement('td', { style: { color: '#64748b' } }, a.location),
+              React.createElement('td', null, React.createElement(Badge, { value: a.status })),
+              React.createElement('td', null,
+                React.createElement('button', { onClick: function() { setEditing(a); setForm(Object.assign({}, emptyForm, a)); setModal(true); }, style: { color: '#2563eb', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', marginRight: '12px' } }, 'Edit'),
+                React.createElement('button', { onClick: function() { del(a.id); }, style: { color: '#dc2626', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px' } }, 'Delete')
+              )
+            );
+          }))
+        )
+      )
+    ),
+    modal && React.createElement(Modal, { title: editing ? 'Edit Asset' : 'Add Asset', onClose: function() { setModal(false); } },
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        field('asset_code', 'Asset Code *', !!editing),
+        field('name', 'Name *'),
+        field('location', 'Location *'),
+        field('manufacturer', 'Manufacturer'),
+        field('model', 'Model'),
+        field('serial_number', 'Serial Number'),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Category'),
+          React.createElement('select', { className: 'inp', value: form.category, onChange: function(e) { setForm(Object.assign({}, form, { category: e.target.value })); } },
+            React.createElement('option', { value: '' }, 'Select…'),
+            CATS.map(function(c) { return React.createElement('option', { key: c, value: c }, c); })
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Status'),
+          React.createElement('select', { className: 'inp', value: form.status, onChange: function(e) { setForm(Object.assign({}, form, { status: e.target.value })); } },
+            STATS.map(function(s) { return React.createElement('option', { key: s, value: s }, s.replace(/_/g, ' ')); })
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Notes'),
+          React.createElement('textarea', { className: 'inp', rows: 3, value: form.notes || '', onChange: function(e) { setForm(Object.assign({}, form, { notes: e.target.value })); } })
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: '10px', marginTop: '8px' } },
+          React.createElement('button', { className: 'btn btn-primary', style: { flex: 1 }, onClick: save }, 'Save'),
+          React.createElement('button', { className: 'btn btn-secondary', style: { flex: 1 }, onClick: function() { setModal(false); } }, 'Cancel')
+        )
+      )
+    )
+  );
+}
+
+// ── Work Orders ────────────────────────────────────────────────────────────
+function WorkOrders() {
+  const [wos, setWos] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState(false);
+  const [filter, setFilter] = useState('');
+  const emptyForm = { asset_id: '', type: 'corrective', priority: 'medium', title: '', description: '', due_date: '', estimated_hours: '' };
+  const [form, setForm] = useState(emptyForm);
+  const TYPES = ['corrective', 'preventive', 'inspection', 'emergency'];
+  const PRIS = ['low', 'medium', 'high', 'critical'];
+  const STATS = ['open', 'in_progress', 'on_hold', 'completed', 'cancelled'];
+
+  async function load() {
+    try {
+      const results = await Promise.all([api('/work-orders/' + (filter ? '?status=' + filter : '')), api('/assets/')]);
+      setWos(results[0]); setAssets(results[1]);
+    } catch(e) { toast(e.message, 'error'); } finally { setLoading(false); }
+  }
+  useEffect(function() { load(); }, [filter]);
+  useWS('work_orders', load);
+
+  async function create() {
+    try {
+      const p = Object.assign({}, form);
+      if (p.due_date) p.due_date = new Date(p.due_date).toISOString();
+      if (p.estimated_hours) p.estimated_hours = parseFloat(p.estimated_hours);
+      await api('/work-orders/', { method: 'POST', body: JSON.stringify(p) });
+      toast('Work order created'); setModal(false); setForm(emptyForm); load();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+  async function updateStatus(id, status) {
+    try { await api('/work-orders/' + id, { method: 'PATCH', body: JSON.stringify({ status }) }); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+  function fmtDate(d) { return d ? new Date(d).toLocaleDateString('en-MY', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'; }
+
+  return React.createElement('div', null,
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' } },
+      React.createElement('div', null,
+        React.createElement('h1', { style: { fontSize: '22px', fontWeight: 800, color: '#1e293b', margin: 0 } }, 'Work Orders'),
+        React.createElement('p', { style: { color: '#94a3b8', fontSize: '13px', margin: '4px 0 0' } }, 'Track maintenance tasks')
+      ),
+      React.createElement('button', { className: 'btn btn-primary', onClick: function() { setModal(true); } }, '+ New Work Order')
+    ),
+    React.createElement('div', { style: { display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' } },
+      ['', ...STATS].map(function(s) {
+        return React.createElement('button', { key: s, onClick: function() { setFilter(s); },
+          style: { padding: '5px 14px', borderRadius: '999px', fontSize: '12px', fontWeight: 600, border: '1px solid', cursor: 'pointer',
+            borderColor: filter === s ? '#2563eb' : '#e2e8f0', background: filter === s ? '#2563eb' : '#fff', color: filter === s ? '#fff' : '#64748b' } },
+          s === '' ? 'All' : s.replace(/_/g, ' ')
+        );
+      })
+    ),
+    React.createElement('div', { className: 'card', style: { padding: 0 } },
+      loading ? React.createElement(Spinner, null) : wos.length === 0 ? React.createElement(Empty, { msg: 'No work orders' }) :
+      React.createElement('div', { className: 'ovf' },
+        React.createElement('table', null,
+          React.createElement('thead', null, React.createElement('tr', null, ['WO #', 'Title', 'Asset', 'Type', 'Priority', 'Status', 'Due Date', 'Change Status'].map(function(h) { return React.createElement('th', { key: h }, h); }))),
+          React.createElement('tbody', null, wos.map(function(w) {
+            return React.createElement('tr', { key: w.id },
+              React.createElement('td', null, React.createElement('span', { style: { fontFamily: 'monospace', color: '#2563eb', fontSize: '12px' } }, w.wo_number)),
+              React.createElement('td', { style: { fontWeight: 600, maxWidth: '160px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, w.title),
+              React.createElement('td', { style: { color: '#64748b', fontSize: '12px' } }, w.asset ? w.asset.name : '—'),
+              React.createElement('td', null, React.createElement(Badge, { value: w.type })),
+              React.createElement('td', null, React.createElement(Badge, { value: w.priority })),
+              React.createElement('td', null, React.createElement(Badge, { value: w.status })),
+              React.createElement('td', { style: { color: '#64748b', fontSize: '12px' } }, fmtDate(w.due_date)),
+              React.createElement('td', null,
+                React.createElement('select', { className: 'inp', style: { fontSize: '12px', padding: '4px 8px', width: 'auto' }, value: w.status,
+                  onChange: function(e) { updateStatus(w.id, e.target.value); } },
+                  STATS.map(function(s) { return React.createElement('option', { key: s, value: s }, s.replace(/_/g, ' ')); })
+                )
+              )
+            );
+          }))
+        )
+      )
+    ),
+    modal && React.createElement(Modal, { title: 'New Work Order', onClose: function() { setModal(false); } },
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Asset *'),
+          React.createElement('select', { className: 'inp', value: form.asset_id, onChange: function(e) { setForm(Object.assign({}, form, { asset_id: e.target.value })); } },
+            React.createElement('option', { value: '' }, 'Select asset…'),
+            assets.map(function(a) { return React.createElement('option', { key: a.id, value: a.id }, a.name + ' (' + a.asset_code + ')'); })
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Title *'),
+          React.createElement('input', { className: 'inp', value: form.title, onChange: function(e) { setForm(Object.assign({}, form, { title: e.target.value })); } })
+        ),
+        React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Type'),
+            React.createElement('select', { className: 'inp', value: form.type, onChange: function(e) { setForm(Object.assign({}, form, { type: e.target.value })); } },
+              TYPES.map(function(t) { return React.createElement('option', { key: t, value: t }, t); })
+            )
+          ),
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Priority'),
+            React.createElement('select', { className: 'inp', value: form.priority, onChange: function(e) { setForm(Object.assign({}, form, { priority: e.target.value })); } },
+              PRIS.map(function(p) { return React.createElement('option', { key: p, value: p }, p); })
+            )
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Description'),
+          React.createElement('textarea', { className: 'inp', rows: 3, value: form.description, onChange: function(e) { setForm(Object.assign({}, form, { description: e.target.value })); } })
+        ),
+        React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Due Date'),
+            React.createElement('input', { type: 'datetime-local', className: 'inp', value: form.due_date, onChange: function(e) { setForm(Object.assign({}, form, { due_date: e.target.value })); } })
+          ),
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Est. Hours'),
+            React.createElement('input', { type: 'number', className: 'inp', value: form.estimated_hours, onChange: function(e) { setForm(Object.assign({}, form, { estimated_hours: e.target.value })); } })
+          )
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: '10px', marginTop: '8px' } },
+          React.createElement('button', { className: 'btn btn-primary', style: { flex: 1 }, onClick: create }, 'Create'),
+          React.createElement('button', { className: 'btn btn-secondary', style: { flex: 1 }, onClick: function() { setModal(false); } }, 'Cancel')
+        )
+      )
+    )
+  );
+}
+
+// ── Inventory ──────────────────────────────────────────────────────────────
+function Inventory() {
+  const [parts, setParts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [lowOnly, setLowOnly] = useState(false);
+  const [modal, setModal] = useState(false);
+  const [restockId, setRestockId] = useState(null);
+  const [restockQty, setRestockQty] = useState(1);
+  const emptyForm = { part_code: '', name: '', category: '', unit: 'pcs', quantity_on_hand: 0, reorder_level: 5, unit_cost: '', supplier: '', location: '' };
+  const [form, setForm] = useState(emptyForm);
+
+  async function load() { try { setParts(await api('/inventory/?low_stock=' + lowOnly)); } catch(e) { toast(e.message, 'error'); } finally { setLoading(false); } }
+  useEffect(function() { load(); }, [lowOnly]);
+  useWS('inventory', load);
+
+  async function save() {
+    try {
+      const p = Object.assign({}, form, { quantity_on_hand: parseInt(form.quantity_on_hand), reorder_level: parseInt(form.reorder_level) });
+      if (p.unit_cost) p.unit_cost = parseFloat(p.unit_cost);
+      await api('/inventory/', { method: 'POST', body: JSON.stringify(p) });
+      toast('Part added'); setModal(false); setForm(emptyForm); load();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+  async function restock() {
+    try { await api('/inventory/' + restockId + '/restock?quantity=' + restockQty, { method: 'POST' }); toast('Restocked!'); setRestockId(null); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+  async function del(id) {
+    if (!confirm('Delete?')) return;
+    try { await api('/inventory/' + id, { method: 'DELETE' }); toast('Deleted'); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+  const filtered = parts.filter(function(p) { return p.name.toLowerCase().includes(search.toLowerCase()) || p.part_code.toLowerCase().includes(search.toLowerCase()); });
+
+  return React.createElement('div', null,
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' } },
+      React.createElement('div', null,
+        React.createElement('h1', { style: { fontSize: '22px', fontWeight: 800, color: '#1e293b', margin: 0 } }, 'Inventory'),
+        React.createElement('p', { style: { color: '#94a3b8', fontSize: '13px', margin: '4px 0 0' } }, 'Spare parts management')
+      ),
+      React.createElement('button', { className: 'btn btn-primary', onClick: function() { setModal(true); } }, '+ Add Part')
+    ),
+    React.createElement('div', { style: { display: 'flex', gap: '12px', marginBottom: '16px', alignItems: 'center' } },
+      React.createElement('input', { className: 'inp', style: { maxWidth: '260px' }, placeholder: 'Search parts…', value: search, onChange: function(e) { setSearch(e.target.value); } }),
+      React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#64748b', cursor: 'pointer' } },
+        React.createElement('input', { type: 'checkbox', checked: lowOnly, onChange: function(e) { setLowOnly(e.target.checked); } }),
+        '⚠️ Low stock only'
+      )
+    ),
+    React.createElement('div', { className: 'card', style: { padding: 0 } },
+      loading ? React.createElement(Spinner, null) : filtered.length === 0 ? React.createElement(Empty, { msg: 'No parts found' }) :
+      React.createElement('div', { className: 'ovf' },
+        React.createElement('table', null,
+          React.createElement('thead', null, React.createElement('tr', null, ['Part Code', 'Name', 'Category', 'In Stock', 'Reorder Lvl', 'Unit Cost', 'Supplier', 'Actions'].map(function(h) { return React.createElement('th', { key: h }, h); }))),
+          React.createElement('tbody', null, filtered.map(function(p) {
+            const isLow = p.quantity_on_hand <= p.reorder_level;
+            return React.createElement('tr', { key: p.id, style: isLow ? { background: '#fff7ed' } : {} },
+              React.createElement('td', null, React.createElement('span', { style: { fontFamily: 'monospace', color: '#2563eb', fontSize: '12px' } }, p.part_code)),
+              React.createElement('td', { style: { fontWeight: 600 } }, p.name, isLow && ' ⚠️'),
+              React.createElement('td', { style: { color: '#64748b' } }, p.category || '—'),
+              React.createElement('td', { style: { fontWeight: 700, color: isLow ? '#ea580c' : '#1e293b' } }, p.quantity_on_hand + ' ' + p.unit),
+              React.createElement('td', { style: { color: '#64748b' } }, p.reorder_level),
+              React.createElement('td', { style: { color: '#64748b' } }, p.unit_cost ? 'RM ' + p.unit_cost.toFixed(2) : '—'),
+              React.createElement('td', { style: { color: '#64748b' } }, p.supplier || '—'),
+              React.createElement('td', null,
+                React.createElement('button', { onClick: function() { setRestockId(p.id); setRestockQty(1); }, style: { color: '#16a34a', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', marginRight: '10px' } }, 'Restock'),
+                React.createElement('button', { onClick: function() { del(p.id); }, style: { color: '#dc2626', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px' } }, 'Delete')
+              )
+            );
+          }))
+        )
+      )
+    ),
+    modal && React.createElement(Modal, { title: 'Add Spare Part', onClose: function() { setModal(false); } },
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        [['part_code', 'Part Code *'], ['name', 'Name *'], ['category', 'Category'], ['supplier', 'Supplier'], ['location', 'Storage Location']].map(function(pair) {
+          return React.createElement('div', { key: pair[0] },
+            React.createElement('label', { className: 'lbl' }, pair[1]),
+            React.createElement('input', { className: 'inp', value: form[pair[0]] || '', onChange: function(e) { setForm(Object.assign({}, form, { [pair[0]]: e.target.value })); } })
+          );
+        }),
+        React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px' } },
+          React.createElement('div', null, React.createElement('label', { className: 'lbl' }, 'Qty'), React.createElement('input', { type: 'number', className: 'inp', value: form.quantity_on_hand, onChange: function(e) { setForm(Object.assign({}, form, { quantity_on_hand: e.target.value })); } })),
+          React.createElement('div', null, React.createElement('label', { className: 'lbl' }, 'Reorder Lvl'), React.createElement('input', { type: 'number', className: 'inp', value: form.reorder_level, onChange: function(e) { setForm(Object.assign({}, form, { reorder_level: e.target.value })); } })),
+          React.createElement('div', null, React.createElement('label', { className: 'lbl' }, 'Cost (RM)'), React.createElement('input', { type: 'number', className: 'inp', value: form.unit_cost, onChange: function(e) { setForm(Object.assign({}, form, { unit_cost: e.target.value })); } }))
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: '10px', marginTop: '8px' } },
+          React.createElement('button', { className: 'btn btn-primary', style: { flex: 1 }, onClick: save }, 'Save'),
+          React.createElement('button', { className: 'btn btn-secondary', style: { flex: 1 }, onClick: function() { setModal(false); } }, 'Cancel')
+        )
+      )
+    ),
+    restockId && React.createElement(Modal, { title: 'Restock Part', onClose: function() { setRestockId(null); } },
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Quantity to Add'),
+          React.createElement('input', { type: 'number', className: 'inp', min: 1, value: restockQty, onChange: function(e) { setRestockQty(+e.target.value); } })
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: '10px' } },
+          React.createElement('button', { className: 'btn btn-primary', style: { flex: 1 }, onClick: restock, disabled: restockQty < 1 }, 'Confirm Restock'),
+          React.createElement('button', { className: 'btn btn-secondary', style: { flex: 1 }, onClick: function() { setRestockId(null); } }, 'Cancel')
+        )
+      )
+    )
+  );
+}
+
+// ── PM Schedules ───────────────────────────────────────────────────────────
+function PMSchedules() {
+  const [schedules, setSchedules] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState(false);
+  const emptyForm = { asset_id: '', title: '', description: '', frequency: 'monthly', interval_days: 30, estimated_hours: '', next_due: '' };
+  const [form, setForm] = useState(emptyForm);
+  const FREQS = ['daily', 'weekly', 'monthly', 'quarterly', 'biannual', 'annual', 'custom'];
+
+  async function load() {
+    try { const results = await Promise.all([api('/pm-schedules/'), api('/assets/')]); setSchedules(results[0]); setAssets(results[1]); }
+    catch(e) { toast(e.message, 'error'); } finally { setLoading(false); }
+  }
+  useEffect(function() { load(); }, []);
+
+  async function create() {
+    try {
+      const p = Object.assign({}, form, { interval_days: parseInt(form.interval_days) });
+      if (p.next_due) p.next_due = new Date(p.next_due).toISOString();
+      if (p.estimated_hours) p.estimated_hours = parseFloat(p.estimated_hours);
+      await api('/pm-schedules/', { method: 'POST', body: JSON.stringify(p) });
+      toast('PM Schedule created'); setModal(false); setForm(emptyForm); load();
+    } catch(e) { toast(e.message, 'error'); }
+  }
+  async function trigger(id) {
+    try { await api('/pm-schedules/' + id + '/trigger', { method: 'POST' }); toast('Work order generated!'); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+  async function toggle(pm) {
+    try { await api('/pm-schedules/' + pm.id, { method: 'PATCH', body: JSON.stringify({ is_active: !pm.is_active }) }); load(); } catch(e) { toast(e.message, 'error'); }
+  }
+  function fmtDate(d) { return d ? new Date(d).toLocaleDateString('en-MY', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'; }
+  function isOverdue(d) { return d && new Date(d) < new Date(); }
+  function isDueSoon(d) { if (!d) return false; const diff = (new Date(d) - new Date()) / (1000 * 60 * 60 * 24); return diff >= 0 && diff <= 7; }
+
+  return React.createElement('div', null,
+    React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' } },
+      React.createElement('div', null,
+        React.createElement('h1', { style: { fontSize: '22px', fontWeight: 800, color: '#1e293b', margin: 0 } }, 'PM Schedules'),
+        React.createElement('p', { style: { color: '#94a3b8', fontSize: '13px', margin: '4px 0 0' } }, 'Preventive maintenance planning')
+      ),
+      React.createElement('button', { className: 'btn btn-primary', onClick: function() { setModal(true); } }, '+ New Schedule')
+    ),
+    React.createElement('div', { className: 'card', style: { padding: 0 } },
+      loading ? React.createElement(Spinner, null) : schedules.length === 0 ? React.createElement(Empty, { msg: 'No PM schedules' }) :
+      React.createElement('div', { className: 'ovf' },
+        React.createElement('table', null,
+          React.createElement('thead', null, React.createElement('tr', null, ['Title', 'Asset', 'Frequency', 'Next Due', 'Est. Hours', 'Status', 'Actions'].map(function(h) { return React.createElement('th', { key: h }, h); }))),
+          React.createElement('tbody', null, schedules.map(function(pm) {
+            const ov = isOverdue(pm.next_due), soon = isDueSoon(pm.next_due);
+            return React.createElement('tr', { key: pm.id, style: ov ? { background: '#fef2f2', borderLeft: '3px solid #ef4444' } : soon ? { background: '#fefce8', borderLeft: '3px solid #f59e0b' } : {} },
+              React.createElement('td', { style: { fontWeight: 600 } }, pm.title),
+              React.createElement('td', { style: { color: '#64748b', fontSize: '12px' } }, pm.asset ? pm.asset.name : '—'),
+              React.createElement('td', { style: { color: '#64748b', textTransform: 'capitalize' } }, pm.frequency),
+              React.createElement('td', { style: { fontWeight: 600, color: ov ? '#dc2626' : soon ? '#d97706' : '#1e293b' } }, fmtDate(pm.next_due), ov && ' ⚠️'),
+              React.createElement('td', { style: { color: '#64748b' } }, pm.estimated_hours ? pm.estimated_hours + 'h' : '—'),
+              React.createElement('td', null, React.createElement(Badge, { value: pm.is_active ? 'active' : 'inactive' })),
+              React.createElement('td', null,
+                React.createElement('button', { onClick: function() { trigger(pm.id); }, style: { color: '#7c3aed', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px', marginRight: '10px' } }, '⚡ Trigger'),
+                React.createElement('button', { onClick: function() { toggle(pm); }, style: { color: '#64748b', background: 'none', border: 'none', cursor: 'pointer', fontSize: '13px' } }, pm.is_active ? 'Deactivate' : 'Activate')
+              )
+            );
+          }))
+        )
+      )
+    ),
+    modal && React.createElement(Modal, { title: 'New PM Schedule', onClose: function() { setModal(false); } },
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Asset *'),
+          React.createElement('select', { className: 'inp', value: form.asset_id, onChange: function(e) { setForm(Object.assign({}, form, { asset_id: e.target.value })); } },
+            React.createElement('option', { value: '' }, 'Select asset…'),
+            assets.map(function(a) { return React.createElement('option', { key: a.id, value: a.id }, a.name + ' (' + a.asset_code + ')'); })
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Title *'),
+          React.createElement('input', { className: 'inp', value: form.title, onChange: function(e) { setForm(Object.assign({}, form, { title: e.target.value })); } })
+        ),
+        React.createElement('div', null,
+          React.createElement('label', { className: 'lbl' }, 'Description'),
+          React.createElement('textarea', { className: 'inp', rows: 2, value: form.description, onChange: function(e) { setForm(Object.assign({}, form, { description: e.target.value })); } })
+        ),
+        React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Frequency'),
+            React.createElement('select', { className: 'inp', value: form.frequency, onChange: function(e) { setForm(Object.assign({}, form, { frequency: e.target.value })); } },
+              FREQS.map(function(f) { return React.createElement('option', { key: f, value: f }, f); })
+            )
+          ),
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Interval (days)'),
+            React.createElement('input', { type: 'number', className: 'inp', value: form.interval_days, onChange: function(e) { setForm(Object.assign({}, form, { interval_days: e.target.value })); } })
+          )
+        ),
+        React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' } },
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'First Due Date *'),
+            React.createElement('input', { type: 'datetime-local', className: 'inp', value: form.next_due, onChange: function(e) { setForm(Object.assign({}, form, { next_due: e.target.value })); } })
+          ),
+          React.createElement('div', null,
+            React.createElement('label', { className: 'lbl' }, 'Est. Hours'),
+            React.createElement('input', { type: 'number', className: 'inp', value: form.estimated_hours, onChange: function(e) { setForm(Object.assign({}, form, { estimated_hours: e.target.value })); } })
+          )
+        ),
+        React.createElement('div', { style: { display: 'flex', gap: '10px', marginTop: '8px' } },
+          React.createElement('button', { className: 'btn btn-primary', style: { flex: 1 }, onClick: create }, 'Create Schedule'),
+          React.createElement('button', { className: 'btn btn-secondary', style: { flex: 1 }, onClick: function() { setModal(false); } }, 'Cancel')
+        )
+      )
+    )
+  );
+}
+
+// ── App Shell ──────────────────────────────────────────────────────────────
+const NAV = [
+  { key: 'dashboard', label: 'Dashboard', icon: '📊' },
+  { key: 'assets',    label: 'Assets',    icon: '🏭' },
+  { key: 'workorders',label: 'Work Orders',icon: '📋' },
+  { key: 'inventory', label: 'Inventory', icon: '📦' },
+  { key: 'pm',        label: 'PM Schedules',icon: '📅' },
+];
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [page, setPage] = useState('dashboard');
+
+  useEffect(function() {
+    const token = localStorage.getItem('cmms_token');
+    if (token) api('/auth/me').then(setUser).catch(function() { localStorage.removeItem('cmms_token'); });
+  }, []);
+
+  if (!user) return React.createElement(Login, { onLogin: setUser });
+
+  const pages = { dashboard: Dashboard, assets: Assets, workorders: WorkOrders, inventory: Inventory, pm: PMSchedules };
+  const PageComp = pages[page] || Dashboard;
+
+  return React.createElement('div', null,
+    React.createElement('div', { className: 'sidebar' },
+      React.createElement('div', { style: { padding: '20px 16px', borderBottom: '1px solid #334155' } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          React.createElement('div', { style: { width: '36px', height: '36px', background: '#2563eb', borderRadius: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px' } }, '🔧'),
+          React.createElement('div', null,
+            React.createElement('div', { style: { color: '#fff', fontWeight: 800, fontSize: '14px' } }, 'CMMS Pro'),
+            React.createElement('div', { style: { color: '#64748b', fontSize: '11px' } }, 'Maintenance System')
+          )
+        )
+      ),
+      React.createElement('nav', { style: { flex: 1, padding: '12px 8px' } },
+        NAV.map(function(n) {
+          return React.createElement('div', { key: n.key, className: 'nav-link' + (page === n.key ? ' active' : ''), onClick: function() { setPage(n.key); } },
+            React.createElement('span', null, n.icon),
+            React.createElement('span', null, n.label)
+          );
+        })
+      ),
+      React.createElement('div', { style: { padding: '16px', borderTop: '1px solid #334155' } },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px' } },
+          React.createElement('div', { style: { width: '32px', height: '32px', background: '#2563eb', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: '13px' } },
+            user.name ? user.name.charAt(0).toUpperCase() : 'U'
+          ),
+          React.createElement('div', null,
+            React.createElement('div', { style: { color: '#fff', fontSize: '12px', fontWeight: 600 } }, user.name),
+            React.createElement('div', { style: { color: '#64748b', fontSize: '11px', textTransform: 'capitalize' } }, user.role)
+          )
+        ),
+        React.createElement('button', { onClick: function() { localStorage.removeItem('cmms_token'); setUser(null); },
+          style: { width: '100%', background: 'none', border: '1px solid #334155', color: '#94a3b8', padding: '7px', borderRadius: '8px', cursor: 'pointer', fontSize: '12px' } },
+          'Sign out'
+        )
+      )
+    ),
+    React.createElement('div', { className: 'main-content' },
+      React.createElement(PageComp, null)
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App, null));
+</script>
+</body>
+</html>
+ENDOFFILE
+echo "done"

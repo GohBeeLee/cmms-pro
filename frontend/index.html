@@ -695,117 +695,6 @@ function PMSchedules() {
   );
 }
 
-/* Analysis Function for Work Order*/
-function Analysis() {
-  const [data, setData] = useState(null);
-  const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6'];
-  const RC = window.Recharts;
-
-  async function load() {
-    try { setData(await api('/work-orders/analytics')); }
-    catch(e) { toast(e.message, 'error'); }
-  }
-  useEffect(() => { load(); }, []);
-
-  return (
-    <div>
-      <div style={{marginBottom:'24px'}}>
-        <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Work Order Analysis</h1>
-        <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Performance insights and trends</p>
-      </div>
-
-      {!data ? <Spinner/> : <>
-        {/* Summary cards */}
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:'14px',marginBottom:'24px'}}>
-          <div className="kpi">
-            <div className="kpi-icon" style={{background:'#eff6ff'}}>📋</div>
-            <div>
-              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.total}</div>
-              <div style={{fontSize:'12px',color:'#94a3b8'}}>Total Work Orders</div>
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-icon" style={{background:'#f0fdf4'}}>✅</div>
-            <div>
-              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.completed}</div>
-              <div style={{fontSize:'12px',color:'#94a3b8'}}>Completed</div>
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="kpi-icon" style={{background:'#faf5ff'}}>📊</div>
-            <div>
-              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.completion_rate}%</div>
-              <div style={{fontSize:'12px',color:'#94a3b8'}}>Completion Rate</div>
-            </div>
-          </div>
-        </div>
-
-        {/* Charts grid */}
-        {RC && <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px'}}>
-
-          {/* By Status */}
-          <div className="card">
-            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Status</h3>
-            <RC.ResponsiveContainer width="100%" height={220}>
-              <RC.BarChart data={data.by_status}>
-                <RC.XAxis dataKey="status" tick={{fontSize:11}}/>
-                <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
-                <RC.Tooltip/>
-                <RC.Bar dataKey="count" radius={[6,6,0,0]}>
-                  {data.by_status.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                </RC.Bar>
-              </RC.BarChart>
-            </RC.ResponsiveContainer>
-          </div>
-
-          {/* By Priority */}
-          <div className="card">
-            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Priority</h3>
-            <RC.ResponsiveContainer width="100%" height={220}>
-              <RC.PieChart>
-                <RC.Pie data={data.by_priority} dataKey="count" nameKey="priority" cx="50%" cy="50%" outerRadius={80}>
-                  {data.by_priority.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                </RC.Pie>
-                <RC.Tooltip/><RC.Legend/>
-              </RC.PieChart>
-            </RC.ResponsiveContainer>
-          </div>
-
-          {/* By Type */}
-          <div className="card">
-            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Type</h3>
-            <RC.ResponsiveContainer width="100%" height={220}>
-              <RC.BarChart data={data.by_type}>
-                <RC.XAxis dataKey="type" tick={{fontSize:11}}/>
-                <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
-                <RC.Tooltip/>
-                <RC.Bar dataKey="count" radius={[6,6,0,0]}>
-                  {data.by_type.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                </RC.Bar>
-              </RC.BarChart>
-            </RC.ResponsiveContainer>
-          </div>
-
-          {/* Top assets */}
-          <div className="card">
-            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>Top 5 Assets by Work Orders</h3>
-            <RC.ResponsiveContainer width="100%" height={220}>
-              <RC.BarChart data={data.by_asset} layout="vertical">
-                <RC.XAxis type="number" allowDecimals={false} tick={{fontSize:11}}/>
-                <RC.YAxis dataKey="asset" type="category" tick={{fontSize:11}} width={120}/>
-                <RC.Tooltip/>
-                <RC.Bar dataKey="count" radius={[0,6,6,0]}>
-                  {data.by_asset.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                </RC.Bar>
-              </RC.BarChart>
-            </RC.ResponsiveContainer>
-          </div>
-
-        </div>}
-      </>}
-    </div>
-  );
-}
 
 const NAV=[
   {key:'dashboard',label:'Dashboard',icon:'📊'},
@@ -813,7 +702,6 @@ const NAV=[
   {key:'workorders',label:'Work Orders',icon:'📋'},
   {key:'inventory',label:'Inventory',icon:'📦'},
   {key:'pm',label:'PM Schedules',icon:'📅'},
-  {key:'analysis',label:'Analysis',icon:'📈'},  //for analysis function
 ];
 
 function App() {
@@ -826,7 +714,7 @@ function App() {
   },[]);
 
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules,analysis:Analysis};
+  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules};
   const PageComp=pages[page]||Dashboard;
 
   return (

@@ -211,7 +211,6 @@ function Dashboard() {
     {icon:'📅',label:'PM Due (7 days)',value:kpi.pm_schedules_due_soon,bg:'#faf5ff',alert:kpi.pm_schedules_due_soon>0},
     {icon:'📦',label:'Low Stock Parts',value:kpi.low_stock_parts,bg:'#fff7ed',alert:kpi.low_stock_parts>0},
     {icon:'👥',label:'Active Users',value:kpi.total_technicians,bg:'#f0fdfa'},
-    {icon:'🔧',label:'Total PM Schedules',value:kpi.total_pm, bg:'#f0fdf4'},
   ] : [];
 
   return (
@@ -264,20 +263,6 @@ function Dashboard() {
                   </RC.BarChart>
                 </RC.ResponsiveContainer>
               ) : <Empty msg="No data yet"/>}
-            </div>
-            {/* New chart — Work Orders by Asset */}
-            <div className="card">
-              <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>
-                Work Orders by Asset
-              </h3>
-              <RC.ResponsiveContainer width="100%" height={200}>
-                <RC.BarChart data={byAsset}>
-                  <RC.XAxis dataKey="name" tick={{fontSize:11}}/>
-                  <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
-                  <RC.Tooltip/>
-                  <RC.Bar dataKey="count" fill="#3b82f6" radius={[6,6,0,0]}/>
-                </RC.BarChart>
-              </RC.ResponsiveContainer>
             </div>
           </div>
         )}

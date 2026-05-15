@@ -22,6 +22,7 @@
   .btn-primary{background:#2563eb;color:#fff;}
   .btn-primary:hover{background:#1d4ed8;}
   .btn-secondary{background:#fff;color:#374151;border:1px solid #e5e7eb;}
+  .btn-secondary:hover{background:#f9fafb;}
   .inp{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 12px;font-size:14px;outline:none;font-family:inherit;}
   .inp:focus{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,0.1);}
   .lbl{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:4px;}
@@ -29,7 +30,8 @@
   .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:center;justify-content:center;}
   .modal-box{background:#fff;border-radius:16px;width:100%;max-width:500px;max-height:90vh;overflow-y:auto;margin:16px;}
   table{width:100%;border-collapse:collapse;}
-  th{background:#f8fafc;color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:11px 16px;text-align:left;white-space:nowrap;}
+  th{background:#f8fafc;color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:11px 16px;text-align:left;white-space:nowrap;cursor:pointer;}
+  th:hover{background:#f1f5f9;}
   td{padding:11px 16px;font-size:13px;color:#374151;border-bottom:1px solid #f1f5f9;}
   tr:last-child td{border-bottom:none;}
   tr:hover td{background:#fafafa;}
@@ -43,6 +45,13 @@
   .kpi-icon{width:46px;height:46px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;}
   .ovf{overflow-x:auto;}
   select.inp{appearance:auto;}
+  .tab-btn{padding:8px 18px;border-radius:8px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:all 0.15s;}
+  .tab-btn.active{background:#2563eb;color:#fff;}
+  .tab-btn:not(.active){background:#f1f5f9;color:#64748b;}
+  .tab-btn:not(.active):hover{background:#e2e8f0;}
+  .filter-bar{background:#fff;border-radius:12px;padding:18px;border:1px solid #f1f5f9;margin-bottom:20px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;}
+  .sort-arrow{font-size:10px;margin-left:4px;opacity:0.5;}
+  .sort-arrow.active{opacity:1;color:#2563eb;}
 </style>
 </head>
 <body>
@@ -53,7 +62,7 @@ window.WS_BASE = 'ws://' + location.host;
 window.API_BASE = '';
 </script>
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 function toast(msg, type) {
   const el = document.createElement('div');
@@ -81,18 +90,16 @@ const BCOLS = {
   on_hold:'#ffedd5;#9a3412',completed:'#dcfce7;#166534',
   cancelled:'#f1f5f9;#475569',low:'#f1f5f9;#374151',
   medium:'#fef9c3;#854d0e',high:'#ffedd5;#9a3412',
-  critical:'#fee2e2;#991b1b',active:'#dcfce7;#166534',
+  critical:'#fee2e2;#991b1b',active:'#dcfce7;#166634',
   inactive:'#f1f5f9;#475569',pending:'#f1f5f9;#374151',
   accepted:'#dbeafe;#1e40af',corrective:'#dbeafe;#1e40af',
   preventive:'#dcfce7;#166534',inspection:'#fef9c3;#854d0e',
   emergency:'#fee2e2;#991b1b',
 };
-
 function Badge({value}) {
   const v = value || '';
   const cols = (BCOLS[v]||'#f1f5f9;#374151').split(';');
-  const text = v.replace(/_/g,' ').replace(/^\w/,c=>c.toUpperCase());
-  return <span className="badge" style={{background:cols[0],color:cols[1]}}>{text}</span>;
+  return <span className="badge" style={{background:cols[0],color:cols[1]}}>{v.replace(/_/g,' ').replace(/^\w/,c=>c.toUpperCase())}</span>;
 }
 
 function Modal({title, onClose, children}) {
@@ -132,12 +139,12 @@ function useWS(room, onEvent) {
   },[room]);
 }
 
+// ── Login ──────────────────────────────────────────────────────────────────
 function Login({onLogin}) {
   const [email,setEmail] = useState('');
   const [pw,setPw] = useState('');
   const [loading,setLoading] = useState(false);
   const [err,setErr] = useState('');
-
   async function submit(e) {
     e.preventDefault(); setLoading(true); setErr('');
     try {
@@ -151,7 +158,6 @@ function Login({onLogin}) {
     } catch(ex){setErr(ex.message);}
     finally{setLoading(false);}
   }
-
   return (
     <div style={{minHeight:'100vh',background:'#1e293b',display:'flex',alignItems:'center',justifyContent:'center'}}>
       <div style={{background:'#fff',borderRadius:'20px',padding:'40px',width:'100%',maxWidth:'400px',margin:'16px'}}>
@@ -163,45 +169,33 @@ function Login({onLogin}) {
           </div>
         </div>
         <form onSubmit={submit}>
-          <div style={{marginBottom:'14px'}}>
-            <label className="lbl">Email</label>
-            <input className="inp" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="admin@cmms.com" required/>
-          </div>
-          <div style={{marginBottom:'18px'}}>
-            <label className="lbl">Password</label>
-            <input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password123" required/>
-          </div>
+          <div style={{marginBottom:'14px'}}><label className="lbl">Email</label><input className="inp" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="admin@cmms.com" required/></div>
+          <div style={{marginBottom:'18px'}}><label className="lbl">Password</label><input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password123" required/></div>
           {err && <div style={{background:'#fee2e2',color:'#991b1b',padding:'10px 14px',borderRadius:'8px',fontSize:'13px',marginBottom:'14px'}}>{err}</div>}
           <button className="btn btn-primary" type="submit" disabled={loading} style={{width:'100%',padding:'10px'}}>{loading?'Signing in…':'Sign in'}</button>
         </form>
-        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}>
-          <strong>Demo:</strong> admin@cmms.com / password123
-        </div>
+        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}><strong>Demo:</strong> admin@cmms.com / password123</div>
       </div>
     </div>
   );
 }
 
+// ── Dashboard ──────────────────────────────────────────────────────────────
 function Dashboard() {
   const [kpi,setKpi] = useState(null);
   const [wos,setWos] = useState([]);
   async function load() {
-    try {
-      const [k,w] = await Promise.all([api('/dashboard/kpi'),api('/work-orders/?limit=200')]);
-      setKpi(k); setWos(w);
-    } catch(e){toast(e.message,'error');}
+    try { const [k,w]=await Promise.all([api('/dashboard/kpi'),api('/work-orders/?limit=200')]); setKpi(k); setWos(w); }
+    catch(e){toast(e.message,'error');}
   }
   useEffect(()=>{load();},[]);
-  useWS('work_orders',load);
-  useWS('assets',load);
-
+  useWS('work_orders',load); useWS('assets',load);
   const COLORS=['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6'];
-  const statusData={}, priorityData={};
+  const statusData={},priorityData={};
   wos.forEach(w=>{statusData[w.status]=(statusData[w.status]||0)+1;priorityData[w.priority]=(priorityData[w.priority]||0)+1;});
   const chartS=Object.entries(statusData).map(([name,value])=>({name,value}));
   const chartP=Object.entries(priorityData).map(([name,value])=>({name,value}));
   const RC=window.Recharts;
-
   const kpiCards = kpi ? [
     {icon:'🏭',label:'Total Assets',value:kpi.total_assets,bg:'#eff6ff'},
     {icon:'⚠️',label:'Under Maintenance',value:kpi.assets_under_maintenance,bg:'#fefce8',alert:kpi.assets_under_maintenance>0},
@@ -212,14 +206,10 @@ function Dashboard() {
     {icon:'📦',label:'Low Stock Parts',value:kpi.low_stock_parts,bg:'#fff7ed',alert:kpi.low_stock_parts>0},
     {icon:'👥',label:'Active Users',value:kpi.total_technicians,bg:'#f0fdfa'},
   ] : [];
-
   return (
     <div>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'24px'}}>
-        <div>
-          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Dashboard</h1>
-          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Live system overview</p>
-        </div>
+        <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Dashboard</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Live system overview</p></div>
         <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'6px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:600}}>● Live</span>
       </div>
       {!kpi ? <Spinner/> : <>
@@ -227,50 +217,26 @@ function Dashboard() {
           {kpiCards.map((k,i)=>(
             <div key={i} className="kpi" style={k.alert?{borderColor:'#fca5a5'}:{}}>
               <div className="kpi-icon" style={{background:k.bg}}>{k.icon}</div>
-              <div>
-                <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b',lineHeight:1}}>{k.value}</div>
-                <div style={{fontSize:'12px',color:'#94a3b8',marginTop:'4px'}}>{k.label}</div>
-              </div>
+              <div><div style={{fontSize:'28px',fontWeight:800,color:'#1e293b',lineHeight:1}}>{k.value}</div><div style={{fontSize:'12px',color:'#94a3b8',marginTop:'4px'}}>{k.label}</div></div>
             </div>
           ))}
         </div>
-        {RC && (
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px'}}>
-            <div className="card">
-              <h3 style={{fontWeight:700,color:'#1e293b',marginBottom:'14px',fontSize:'14px'}}>Work Orders by Status</h3>
-              {chartS.length>0 ? (
-                <RC.ResponsiveContainer width="100%" height={200}>
-                  <RC.PieChart>
-                    <RC.Pie data={chartS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={75}>
-                      {chartS.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                    </RC.Pie>
-                    <RC.Tooltip/><RC.Legend/>
-                  </RC.PieChart>
-                </RC.ResponsiveContainer>
-              ) : <Empty msg="No data yet"/>}
-            </div>
-            <div className="card">
-              <h3 style={{fontWeight:700,color:'#1e293b',marginBottom:'14px',fontSize:'14px'}}>Work Orders by Priority</h3>
-              {chartP.length>0 ? (
-                <RC.ResponsiveContainer width="100%" height={200}>
-                  <RC.BarChart data={chartP}>
-                    <RC.XAxis dataKey="name" tick={{fontSize:12}}/>
-                    <RC.YAxis allowDecimals={false} tick={{fontSize:12}}/>
-                    <RC.Tooltip/>
-                    <RC.Bar dataKey="value" radius={[6,6,0,0]}>
-                      {chartP.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
-                    </RC.Bar>
-                  </RC.BarChart>
-                </RC.ResponsiveContainer>
-              ) : <Empty msg="No data yet"/>}
-            </div>
+        {RC && <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px'}}>
+          <div className="card">
+            <h3 style={{fontWeight:700,color:'#1e293b',marginBottom:'14px',fontSize:'14px'}}>Work Orders by Status</h3>
+            {chartS.length>0?(<RC.ResponsiveContainer width="100%" height={200}><RC.PieChart><RC.Pie data={chartS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={75}>{chartS.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</RC.Pie><RC.Tooltip/><RC.Legend/></RC.PieChart></RC.ResponsiveContainer>):<Empty msg="No data yet"/>}
           </div>
-        )}
+          <div className="card">
+            <h3 style={{fontWeight:700,color:'#1e293b',marginBottom:'14px',fontSize:'14px'}}>Work Orders by Priority</h3>
+            {chartP.length>0?(<RC.ResponsiveContainer width="100%" height={200}><RC.BarChart data={chartP}><RC.XAxis dataKey="name" tick={{fontSize:12}}/><RC.YAxis allowDecimals={false} tick={{fontSize:12}}/><RC.Tooltip/><RC.Bar dataKey="value" radius={[6,6,0,0]}>{chartP.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</RC.Bar></RC.BarChart></RC.ResponsiveContainer>):<Empty msg="No data yet"/>}
+          </div>
+        </div>}
       </>}
     </div>
   );
 }
 
+// ── Assets ─────────────────────────────────────────────────────────────────
 function Assets() {
   const [assets,setAssets] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -281,24 +247,18 @@ function Assets() {
   const [form,setForm] = useState(emptyForm);
   const CATS=['Pump','Motor','Compressor','Conveyor','HVAC','Generator','Other'];
   const STATS=['operational','under_maintenance','out_of_service','decommissioned'];
-
   async function load(){try{setAssets(await api('/assets/'));}catch(e){toast(e.message,'error');}finally{setLoading(false);}}
   useEffect(()=>{load();},[]);
   useWS('assets',load);
-
   async function save(){
     try{
       if(editing) await api('/assets/'+editing.id,{method:'PATCH',body:JSON.stringify(form)});
       else await api('/assets/',{method:'POST',body:JSON.stringify(form)});
-      toast(editing?'Asset updated':'Asset created'); setModal(false); setEditing(null); load();
+      toast(editing?'Asset updated':'Asset created');setModal(false);setEditing(null);load();
     }catch(e){toast(e.message,'error');}
   }
-  async function del(id){
-    if(!confirm('Delete this asset?')) return;
-    try{await api('/assets/'+id,{method:'DELETE'});toast('Deleted');load();}catch(e){toast(e.message,'error');}
-  }
+  async function del(id){if(!confirm('Delete?'))return;try{await api('/assets/'+id,{method:'DELETE'});toast('Deleted');load();}catch(e){toast(e.message,'error');}}
   const filtered=assets.filter(a=>a.name.toLowerCase().includes(search.toLowerCase())||a.asset_code.toLowerCase().includes(search.toLowerCase()));
-
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
@@ -308,26 +268,20 @@ function Assets() {
       <input className="inp" style={{maxWidth:'280px',marginBottom:'16px'}} placeholder="Search assets…" value={search} onChange={e=>setSearch(e.target.value)}/>
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No assets found"/>:(
-          <div className="ovf">
-            <table>
-              <thead><tr>{['Code','Name','Category','Location','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-              <tbody>
-                {filtered.map(a=>(
-                  <tr key={a.id}>
-                    <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{a.asset_code}</span></td>
-                    <td style={{fontWeight:600}}>{a.name}</td>
-                    <td style={{color:'#64748b'}}>{a.category}</td>
-                    <td style={{color:'#64748b'}}>{a.location}</td>
-                    <td><Badge value={a.status}/></td>
-                    <td>
-                      <button onClick={()=>{setEditing(a);setForm({...emptyForm,...a});setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'12px'}}>Edit</button>
-                      <button onClick={()=>del(a.id)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>Delete</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <div className="ovf"><table>
+            <thead><tr>{['Code','Name','Category','Location','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{filtered.map(a=>(
+              <tr key={a.id}>
+                <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{a.asset_code}</span></td>
+                <td style={{fontWeight:600}}>{a.name}</td><td style={{color:'#64748b'}}>{a.category}</td><td style={{color:'#64748b'}}>{a.location}</td>
+                <td><Badge value={a.status}/></td>
+                <td>
+                  <button onClick={()=>{setEditing(a);setForm({...emptyForm,...a});setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'12px'}}>Edit</button>
+                  <button onClick={()=>del(a.id)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>Delete</button>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table></div>
         )}
       </div>
       {modal&&(
@@ -336,16 +290,8 @@ function Assets() {
             {[['asset_code','Asset Code *',!!editing],['name','Name *'],['location','Location *'],['manufacturer','Manufacturer'],['model','Model'],['serial_number','Serial Number']].map(([k,lbl,dis])=>(
               <div key={k}><label className="lbl">{lbl}</label><input className="inp" disabled={!!dis} value={form[k]||''} onChange={e=>setForm({...form,[k]:e.target.value})}/></div>
             ))}
-            <div><label className="lbl">Category</label>
-              <select className="inp" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}>
-                <option value="">Select…</option>{CATS.map(c=><option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div><label className="lbl">Status</label>
-              <select className="inp" value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>
-                {STATS.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
-              </select>
-            </div>
+            <div><label className="lbl">Category</label><select className="inp" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}><option value="">Select…</option>{CATS.map(c=><option key={c} value={c}>{c}</option>)}</select></div>
+            <div><label className="lbl">Status</label><select className="inp" value={form.status} onChange={e=>setForm({...form,status:e.target.value})}>{STATS.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></div>
             <div><label className="lbl">Notes</label><textarea className="inp" rows={3} value={form.notes||''} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
@@ -358,6 +304,7 @@ function Assets() {
   );
 }
 
+// ── Work Orders ────────────────────────────────────────────────────────────
 function WorkOrders() {
   const [wos,setWos] = useState([]);
   const [assets,setAssets] = useState([]);
@@ -369,16 +316,12 @@ function WorkOrders() {
   const TYPES=['corrective','preventive','inspection','emergency'];
   const PRIS=['low','medium','high','critical'];
   const STATS=['open','in_progress','on_hold','completed','cancelled'];
-
   async function load(){
-    try{
-      const [w,a]=await Promise.all([api('/work-orders/'+(filter?'?status='+filter:'')),api('/assets/')]);
-      setWos(w);setAssets(a);
-    }catch(e){toast(e.message,'error');}finally{setLoading(false);}
+    try{const [w,a]=await Promise.all([api('/work-orders/'+(filter?'?status='+filter:'')),api('/assets/')]);setWos(w);setAssets(a);}
+    catch(e){toast(e.message,'error');}finally{setLoading(false);}
   }
   useEffect(()=>{load();},[filter]);
   useWS('work_orders',load);
-
   async function create(){
     try{
       const p={...form};
@@ -388,11 +331,8 @@ function WorkOrders() {
       toast('Work order created');setModal(false);setForm(emptyForm);load();
     }catch(e){toast(e.message,'error');}
   }
-  async function updateStatus(id,status){
-    try{await api('/work-orders/'+id,{method:'PATCH',body:JSON.stringify({status})});load();}catch(e){toast(e.message,'error');}
-  }
+  async function updateStatus(id,status){try{await api('/work-orders/'+id,{method:'PATCH',body:JSON.stringify({status})});load();}catch(e){toast(e.message,'error');}}
   function fmtDate(d){return d?new Date(d).toLocaleDateString('en-MY',{day:'2-digit',month:'short',year:'numeric'}):'—';}
-
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
@@ -401,61 +341,38 @@ function WorkOrders() {
       </div>
       <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexWrap:'wrap'}}>
         {['',...STATS].map(s=>(
-          <button key={s} onClick={()=>setFilter(s)} style={{padding:'5px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:600,border:'1px solid',cursor:'pointer',
-            borderColor:filter===s?'#2563eb':'#e2e8f0',background:filter===s?'#2563eb':'#fff',color:filter===s?'#fff':'#64748b'}}>
+          <button key={s} onClick={()=>setFilter(s)} style={{padding:'5px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:600,border:'1px solid',cursor:'pointer',borderColor:filter===s?'#2563eb':'#e2e8f0',background:filter===s?'#2563eb':'#fff',color:filter===s?'#fff':'#64748b'}}>
             {s===''?'All':s.replace(/_/g,' ')}
           </button>
         ))}
       </div>
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:wos.length===0?<Empty msg="No work orders"/>:(
-          <div className="ovf">
-            <table>
-              <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Change Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-              <tbody>
-                {wos.map(w=>(
-                  <tr key={w.id}>
-                    <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{w.wo_number}</span></td>
-                    <td style={{fontWeight:600,maxWidth:'160px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.title}</td>
-                    <td style={{color:'#64748b',fontSize:'12px'}}>{w.asset?w.asset.name:'—'}</td>
-                    <td><Badge value={w.type}/></td>
-                    <td><Badge value={w.priority}/></td>
-                    <td><Badge value={w.status}/></td>
-                    <td style={{color:'#64748b',fontSize:'12px'}}>{fmtDate(w.due_date)}</td>
-                    <td>
-                      <select className="inp" style={{fontSize:'12px',padding:'4px 8px',width:'auto'}} value={w.status} onChange={e=>updateStatus(w.id,e.target.value)}>
-                        {STATS.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <div className="ovf"><table>
+            <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Change Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{wos.map(w=>(
+              <tr key={w.id}>
+                <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{w.wo_number}</span></td>
+                <td style={{fontWeight:600,maxWidth:'160px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.title}</td>
+                <td style={{color:'#64748b',fontSize:'12px'}}>{w.asset?w.asset.name:'—'}</td>
+                <td><Badge value={w.type}/></td><td><Badge value={w.priority}/></td><td><Badge value={w.status}/></td>
+                <td style={{color:'#64748b',fontSize:'12px'}}>{fmtDate(w.due_date)}</td>
+                <td><select className="inp" style={{fontSize:'12px',padding:'4px 8px',width:'auto'}} value={w.status} onChange={e=>updateStatus(w.id,e.target.value)}>{STATS.map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}</select></td>
+              </tr>
+            ))}</tbody>
+          </table></div>
         )}
       </div>
       {modal&&(
         <Modal title="New Work Order" onClose={()=>setModal(false)}>
           <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-            <div><label className="lbl">Asset *</label>
-              <select className="inp" value={form.asset_id} onChange={e=>setForm({...form,asset_id:e.target.value})}>
-                <option value="">Select asset…</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}
-              </select>
-            </div>
+            <div><label className="lbl">Asset *</label><select className="inp" value={form.asset_id} onChange={e=>setForm({...form,asset_id:e.target.value})}><option value="">Select asset…</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}</select></div>
             <div><label className="lbl">Title *</label><input className="inp" value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">Type</label>
-                <select className="inp" value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
-                  {TYPES.map(t=><option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div><label className="lbl">Priority</label>
-                <select className="inp" value={form.priority} onChange={e=>setForm({...form,priority:e.target.value})}>
-                  {PRIS.map(p=><option key={p} value={p}>{p}</option>)}
-                </select>
-              </div>
+              <div><label className="lbl">Type</label><select className="inp" value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{TYPES.map(t=><option key={t} value={t}>{t}</option>)}</select></div>
+              <div><label className="lbl">Priority</label><select className="inp" value={form.priority} onChange={e=>setForm({...form,priority:e.target.value})}>{PRIS.map(p=><option key={p} value={p}>{p}</option>)}</select></div>
             </div>
-            <div><label className="lbl">Description</label><textarea className="inp" rows={3} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></div>
+            <div><label className="lbl">Description / Root Cause</label><textarea className="inp" rows={3} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">Due Date</label><input type="datetime-local" className="inp" value={form.due_date} onChange={e=>setForm({...form,due_date:e.target.value})}/></div>
               <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
@@ -471,6 +388,7 @@ function WorkOrders() {
   );
 }
 
+// ── Inventory ──────────────────────────────────────────────────────────────
 function Inventory() {
   const [parts,setParts] = useState([]);
   const [loading,setLoading] = useState(true);
@@ -479,13 +397,11 @@ function Inventory() {
   const [modal,setModal] = useState(false);
   const [restockId,setRestockId] = useState(null);
   const [restockQty,setRestockQty] = useState(1);
-  const emptyForm = {part_code:'',name:'',category:'',unit:'pcs',quantity_on_hand:0,reorder_level:5,unit_cost:'',supplier:'',location:''};
+  const emptyForm={part_code:'',name:'',category:'',unit:'pcs',quantity_on_hand:0,reorder_level:5,unit_cost:'',supplier:'',location:''};
   const [form,setForm] = useState(emptyForm);
-
   async function load(){try{setParts(await api('/inventory/?low_stock='+lowOnly));}catch(e){toast(e.message,'error');}finally{setLoading(false);}}
   useEffect(()=>{load();},[lowOnly]);
   useWS('inventory',load);
-
   async function save(){
     try{
       const p={...form,quantity_on_hand:parseInt(form.quantity_on_hand),reorder_level:parseInt(form.reorder_level)};
@@ -494,15 +410,9 @@ function Inventory() {
       toast('Part added');setModal(false);setForm(emptyForm);load();
     }catch(e){toast(e.message,'error');}
   }
-  async function restock(){
-    try{await api('/inventory/'+restockId+'/restock?quantity='+restockQty,{method:'POST'});toast('Restocked!');setRestockId(null);load();}catch(e){toast(e.message,'error');}
-  }
-  async function del(id){
-    if(!confirm('Delete?')) return;
-    try{await api('/inventory/'+id,{method:'DELETE'});toast('Deleted');load();}catch(e){toast(e.message,'error');}
-  }
+  async function restock(){try{await api('/inventory/'+restockId+'/restock?quantity='+restockQty,{method:'POST'});toast('Restocked!');setRestockId(null);load();}catch(e){toast(e.message,'error');}}
+  async function del(id){if(!confirm('Delete?'))return;try{await api('/inventory/'+id,{method:'DELETE'});toast('Deleted');load();}catch(e){toast(e.message,'error');}}
   const filtered=parts.filter(p=>p.name.toLowerCase().includes(search.toLowerCase())||p.part_code.toLowerCase().includes(search.toLowerCase()));
-
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
@@ -511,87 +421,74 @@ function Inventory() {
       </div>
       <div style={{display:'flex',gap:'12px',marginBottom:'16px',alignItems:'center'}}>
         <input className="inp" style={{maxWidth:'260px'}} placeholder="Search parts…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer'}}>
-          <input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/> Low stock only
-        </label>
+        <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer'}}><input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/> Low stock only</label>
       </div>
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No parts found"/>:(
-          <div className="ovf">
-            <table>
-              <thead><tr>{['Part Code','Name','Category','In Stock','Reorder Lvl','Unit Cost','Supplier','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-              <tbody>
-                {filtered.map(p=>{
-                  const isLow=p.quantity_on_hand<=p.reorder_level;
-                  return (
-                    <tr key={p.id} style={isLow?{background:'#fff7ed'}:{}}>
-                      <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{p.part_code}</span></td>
-                      <td style={{fontWeight:600}}>{p.name}{isLow&&' ⚠️'}</td>
-                      <td style={{color:'#64748b'}}>{p.category||'—'}</td>
-                      <td style={{fontWeight:700,color:isLow?'#ea580c':'#1e293b'}}>{p.quantity_on_hand} {p.unit}</td>
-                      <td style={{color:'#64748b'}}>{p.reorder_level}</td>
-                      <td style={{color:'#64748b'}}>{p.unit_cost?'RM '+p.unit_cost.toFixed(2):'—'}</td>
-                      <td style={{color:'#64748b'}}>{p.supplier||'—'}</td>
-                      <td>
-                        <button onClick={()=>{setRestockId(p.id);setRestockQty(1);}} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'10px'}}>Restock</button>
-                        <button onClick={()=>del(p.id)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>Delete</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <div className="ovf"><table>
+            <thead><tr>{['Part Code','Name','Category','In Stock','Reorder Lvl','Unit Cost','Supplier','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{filtered.map(p=>{
+              const isLow=p.quantity_on_hand<=p.reorder_level;
+              return(<tr key={p.id} style={isLow?{background:'#fff7ed'}:{}}>
+                <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{p.part_code}</span></td>
+                <td style={{fontWeight:600}}>{p.name}{isLow&&' ⚠️'}</td>
+                <td style={{color:'#64748b'}}>{p.category||'—'}</td>
+                <td style={{fontWeight:700,color:isLow?'#ea580c':'#1e293b'}}>{p.quantity_on_hand} {p.unit}</td>
+                <td style={{color:'#64748b'}}>{p.reorder_level}</td>
+                <td style={{color:'#64748b'}}>{p.unit_cost?'RM '+p.unit_cost.toFixed(2):'—'}</td>
+                <td style={{color:'#64748b'}}>{p.supplier||'—'}</td>
+                <td>
+                  <button onClick={()=>{setRestockId(p.id);setRestockQty(1);}} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'10px'}}>Restock</button>
+                  <button onClick={()=>del(p.id)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>Delete</button>
+                </td>
+              </tr>);
+            })}</tbody>
+          </table></div>
         )}
       </div>
-      {modal&&(
-        <Modal title="Add Spare Part" onClose={()=>setModal(false)}>
-          <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-            {[['part_code','Part Code *'],['name','Name *'],['category','Category'],['supplier','Supplier'],['location','Storage Location']].map(([k,lbl])=>(
-              <div key={k}><label className="lbl">{lbl}</label><input className="inp" value={form[k]||''} onChange={e=>setForm({...form,[k]:e.target.value})}/></div>
-            ))}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">Qty</label><input type="number" className="inp" value={form.quantity_on_hand} onChange={e=>setForm({...form,quantity_on_hand:e.target.value})}/></div>
-              <div><label className="lbl">Reorder Lvl</label><input type="number" className="inp" value={form.reorder_level} onChange={e=>setForm({...form,reorder_level:e.target.value})}/></div>
-              <div><label className="lbl">Cost (RM)</label><input type="number" className="inp" value={form.unit_cost} onChange={e=>setForm({...form,unit_cost:e.target.value})}/></div>
-            </div>
-            <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
-              <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
-              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
-            </div>
+      {modal&&(<Modal title="Add Spare Part" onClose={()=>setModal(false)}>
+        <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+          {[['part_code','Part Code *'],['name','Name *'],['category','Category'],['supplier','Supplier'],['location','Storage Location']].map(([k,lbl])=>(
+            <div key={k}><label className="lbl">{lbl}</label><input className="inp" value={form[k]||''} onChange={e=>setForm({...form,[k]:e.target.value})}/></div>
+          ))}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px'}}>
+            <div><label className="lbl">Qty</label><input type="number" className="inp" value={form.quantity_on_hand} onChange={e=>setForm({...form,quantity_on_hand:e.target.value})}/></div>
+            <div><label className="lbl">Reorder Lvl</label><input type="number" className="inp" value={form.reorder_level} onChange={e=>setForm({...form,reorder_level:e.target.value})}/></div>
+            <div><label className="lbl">Cost (RM)</label><input type="number" className="inp" value={form.unit_cost} onChange={e=>setForm({...form,unit_cost:e.target.value})}/></div>
           </div>
-        </Modal>
-      )}
-      {restockId&&(
-        <Modal title="Restock Part" onClose={()=>setRestockId(null)}>
-          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-            <div><label className="lbl">Quantity to Add</label><input type="number" className="inp" min={1} value={restockQty} onChange={e=>setRestockQty(+e.target.value)}/></div>
-            <div style={{display:'flex',gap:'10px'}}>
-              <button className="btn btn-primary" style={{flex:1}} onClick={restock} disabled={restockQty<1}>Confirm Restock</button>
-              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setRestockId(null)}>Cancel</button>
-            </div>
+          <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
           </div>
-        </Modal>
-      )}
+        </div>
+      </Modal>)}
+      {restockId&&(<Modal title="Restock Part" onClose={()=>setRestockId(null)}>
+        <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+          <div><label className="lbl">Quantity to Add</label><input type="number" className="inp" min={1} value={restockQty} onChange={e=>setRestockQty(+e.target.value)}/></div>
+          <div style={{display:'flex',gap:'10px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={restock} disabled={restockQty<1}>Confirm Restock</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setRestockId(null)}>Cancel</button>
+          </div>
+        </div>
+      </Modal>)}
     </div>
   );
 }
 
+// ── PM Schedules ───────────────────────────────────────────────────────────
 function PMSchedules() {
   const [schedules,setSchedules] = useState([]);
   const [assets,setAssets] = useState([]);
   const [loading,setLoading] = useState(true);
   const [modal,setModal] = useState(false);
-  const emptyForm = {asset_id:'',title:'',description:'',frequency:'monthly',interval_days:30,estimated_hours:'',next_due:''};
+  const emptyForm={asset_id:'',title:'',description:'',frequency:'monthly',interval_days:30,estimated_hours:'',next_due:''};
   const [form,setForm] = useState(emptyForm);
   const FREQS=['daily','weekly','monthly','quarterly','biannual','annual','custom'];
-
   async function load(){
     try{const [s,a]=await Promise.all([api('/pm-schedules/'),api('/assets/')]);setSchedules(s);setAssets(a);}
     catch(e){toast(e.message,'error');}finally{setLoading(false);}
   }
   useEffect(()=>{load();},[]);
-
   async function create(){
     try{
       const p={...form,interval_days:parseInt(form.interval_days)};
@@ -601,16 +498,11 @@ function PMSchedules() {
       toast('PM Schedule created');setModal(false);setForm(emptyForm);load();
     }catch(e){toast(e.message,'error');}
   }
-  async function trigger(id){
-    try{await api('/pm-schedules/'+id+'/trigger',{method:'POST'});toast('Work order generated!');load();}catch(e){toast(e.message,'error');}
-  }
-  async function toggle(pm){
-    try{await api('/pm-schedules/'+pm.id,{method:'PATCH',body:JSON.stringify({is_active:!pm.is_active})});load();}catch(e){toast(e.message,'error');}
-  }
+  async function trigger(id){try{await api('/pm-schedules/'+id+'/trigger',{method:'POST'});toast('Work order generated!');load();}catch(e){toast(e.message,'error');}}
+  async function toggle(pm){try{await api('/pm-schedules/'+pm.id,{method:'PATCH',body:JSON.stringify({is_active:!pm.is_active})});load();}catch(e){toast(e.message,'error');}}
   function fmtDate(d){return d?new Date(d).toLocaleDateString('en-MY',{day:'2-digit',month:'short',year:'numeric'}):'—';}
   function isOverdue(d){return d&&new Date(d)<new Date();}
   function isDueSoon(d){if(!d)return false;const diff=(new Date(d)-new Date())/(1000*60*60*24);return diff>=0&&diff<=7;}
-
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
@@ -619,97 +511,397 @@ function PMSchedules() {
       </div>
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:schedules.length===0?<Empty msg="No PM schedules"/>:(
-          <div className="ovf">
-            <table>
-              <thead><tr>{['Title','Asset','Frequency','Next Due','Est. Hours','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-              <tbody>
-                {schedules.map(pm=>{
-                  const ov=isOverdue(pm.next_due),soon=isDueSoon(pm.next_due);
-                  return (
-                    <tr key={pm.id} style={ov?{background:'#fef2f2',borderLeft:'3px solid #ef4444'}:soon?{background:'#fefce8',borderLeft:'3px solid #f59e0b'}:{}}>
-                      <td style={{fontWeight:600}}>{pm.title}</td>
-                      <td style={{color:'#64748b',fontSize:'12px'}}>{pm.asset?pm.asset.name:'—'}</td>
-                      <td style={{color:'#64748b',textTransform:'capitalize'}}>{pm.frequency}</td>
-                      <td style={{fontWeight:600,color:ov?'#dc2626':soon?'#d97706':'#1e293b'}}>{fmtDate(pm.next_due)}{ov&&' ⚠️'}</td>
-                      <td style={{color:'#64748b'}}>{pm.estimated_hours?pm.estimated_hours+'h':'—'}</td>
-                      <td><Badge value={pm.is_active?'active':'inactive'}/></td>
-                      <td>
-                        <button onClick={()=>trigger(pm.id)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'10px'}}>⚡ Trigger</button>
-                        <button onClick={()=>toggle(pm)} style={{color:'#64748b',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>{pm.is_active?'Deactivate':'Activate'}</button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <div className="ovf"><table>
+            <thead><tr>{['Title','Asset','Frequency','Next Due','Est. Hours','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+            <tbody>{schedules.map(pm=>{
+              const ov=isOverdue(pm.next_due),soon=isDueSoon(pm.next_due);
+              return(<tr key={pm.id} style={ov?{background:'#fef2f2',borderLeft:'3px solid #ef4444'}:soon?{background:'#fefce8',borderLeft:'3px solid #f59e0b'}:{}}>
+                <td style={{fontWeight:600}}>{pm.title}</td>
+                <td style={{color:'#64748b',fontSize:'12px'}}>{pm.asset?pm.asset.name:'—'}</td>
+                <td style={{color:'#64748b',textTransform:'capitalize'}}>{pm.frequency}</td>
+                <td style={{fontWeight:600,color:ov?'#dc2626':soon?'#d97706':'#1e293b'}}>{fmtDate(pm.next_due)}{ov&&' ⚠️'}</td>
+                <td style={{color:'#64748b'}}>{pm.estimated_hours?pm.estimated_hours+'h':'—'}</td>
+                <td><Badge value={pm.is_active?'active':'inactive'}/></td>
+                <td>
+                  <button onClick={()=>trigger(pm.id)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'13px',marginRight:'10px'}}>⚡ Trigger</button>
+                  <button onClick={()=>toggle(pm)} style={{color:'#64748b',background:'none',border:'none',cursor:'pointer',fontSize:'13px'}}>{pm.is_active?'Deactivate':'Activate'}</button>
+                </td>
+              </tr>);
+            })}</tbody>
+          </table></div>
         )}
       </div>
-      {modal&&(
-        <Modal title="New PM Schedule" onClose={()=>setModal(false)}>
-          <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-            <div><label className="lbl">Asset *</label>
-              <select className="inp" value={form.asset_id} onChange={e=>setForm({...form,asset_id:e.target.value})}>
-                <option value="">Select asset…</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}
-              </select>
-            </div>
-            <div><label className="lbl">Title *</label><input className="inp" value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></div>
-            <div><label className="lbl">Description</label><textarea className="inp" rows={2} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">Frequency</label>
-                <select className="inp" value={form.frequency} onChange={e=>setForm({...form,frequency:e.target.value})}>
-                  {FREQS.map(f=><option key={f} value={f}>{f}</option>)}
-                </select>
-              </div>
-              <div><label className="lbl">Interval (days)</label><input type="number" className="inp" value={form.interval_days} onChange={e=>setForm({...form,interval_days:e.target.value})}/></div>
-            </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">First Due Date *</label><input type="datetime-local" className="inp" value={form.next_due} onChange={e=>setForm({...form,next_due:e.target.value})}/></div>
-              <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
-            </div>
-            <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
-              <button className="btn btn-primary" style={{flex:1}} onClick={create}>Create Schedule</button>
-              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
-            </div>
+      {modal&&(<Modal title="New PM Schedule" onClose={()=>setModal(false)}>
+        <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+          <div><label className="lbl">Asset *</label><select className="inp" value={form.asset_id} onChange={e=>setForm({...form,asset_id:e.target.value})}><option value="">Select asset…</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}</select></div>
+          <div><label className="lbl">Title *</label><input className="inp" value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></div>
+          <div><label className="lbl">Description</label><textarea className="inp" rows={2} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+            <div><label className="lbl">Frequency</label><select className="inp" value={form.frequency} onChange={e=>setForm({...form,frequency:e.target.value})}>{FREQS.map(f=><option key={f} value={f}>{f}</option>)}</select></div>
+            <div><label className="lbl">Interval (days)</label><input type="number" className="inp" value={form.interval_days} onChange={e=>setForm({...form,interval_days:e.target.value})}/></div>
           </div>
-        </Modal>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+            <div><label className="lbl">First Due Date *</label><input type="datetime-local" className="inp" value={form.next_due} onChange={e=>setForm({...form,next_due:e.target.value})}/></div>
+            <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
+          </div>
+          <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={create}>Create Schedule</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button>
+          </div>
+        </div>
+      </Modal>)}
+    </div>
+  );
+}
+
+// ── ANALYSIS ───────────────────────────────────────────────────────────────
+function Analysis() {
+  // Default date range: last 30 days
+  const today = new Date();
+  const thirtyDaysAgo = new Date(today);
+  thirtyDaysAgo.setDate(today.getDate() - 30);
+  const fmt = d => d.toISOString().split('T')[0];
+
+  const [dateFrom, setDateFrom] = useState(fmt(thirtyDaysAgo));
+  const [dateTo,   setDateTo]   = useState(fmt(today));
+  const [assetId,  setAssetId]  = useState('');
+  const [assets,   setAssets]   = useState([]);
+  const [data,     setData]     = useState(null);
+  const [loading,  setLoading]  = useState(false);
+  const [activeTab,setActiveTab]= useState('machine');  // machine | rootcause | detail
+  const [sortCol,  setSortCol]  = useState('total_cases');
+  const [sortAsc,  setSortAsc]  = useState(false);
+  const [search,   setSearch]   = useState('');
+
+  const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6','#06b6d4','#ec4899'];
+  const RC = window.Recharts;
+
+  // Load asset list for filter dropdown
+  useEffect(()=>{
+    api('/analysis/assets').then(setAssets).catch(()=>{});
+  },[]);
+
+  async function load() {
+    setLoading(true);
+    try {
+      let url = '/analysis/work-orders?date_from='+dateFrom+'&date_to='+dateTo;
+      if (assetId) url += '&asset_id='+assetId;
+      setData(await api(url));
+    } catch(e) { toast(e.message,'error'); }
+    finally { setLoading(false); }
+  }
+
+  // Load on mount
+  useEffect(()=>{ load(); },[]);
+
+  // Quick date range presets
+  function setPreset(days) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - days);
+    setDateFrom(fmt(start));
+    setDateTo(fmt(end));
+  }
+
+  // Sorting helper
+  function sortData(arr, col, asc) {
+    return [...arr].sort((a,b)=>{
+      const av = a[col]??0, bv = b[col]??0;
+      if (typeof av === 'string') return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+      return asc ? av - bv : bv - av;
+    });
+  }
+
+  function SortTh({col, label}) {
+    const active = sortCol === col;
+    return (
+      <th onClick={()=>{ if(active) setSortAsc(!sortAsc); else { setSortCol(col); setSortAsc(false); } }} style={{cursor:'pointer',userSelect:'none'}}>
+        {label}
+        <span className={'sort-arrow'+(active?' active':'')}>{active?(sortAsc?'▲':'▼'):'⇅'}</span>
+      </th>
+    );
+  }
+
+  function fmtDate(d){return d?new Date(d).toLocaleDateString('en-MY',{day:'2-digit',month:'short',year:'numeric'}):'—';}
+
+  // Filtered + sorted machine data
+  const machineRows = useMemo(()=>{
+    if (!data) return [];
+    let rows = data.by_machine.filter(r=>r.asset_name.toLowerCase().includes(search.toLowerCase()));
+    return sortData(rows, sortCol, sortAsc);
+  },[data, search, sortCol, sortAsc]);
+
+  // Filtered + sorted root cause data
+  const rootCauseRows = useMemo(()=>{
+    if (!data) return [];
+    let rows = data.by_root_cause.filter(r=>r.root_cause.toLowerCase().includes(search.toLowerCase()));
+    return sortData(rows, sortCol, sortAsc);
+  },[data, search, sortCol, sortAsc]);
+
+  // Filtered detail rows
+  const detailRows = useMemo(()=>{
+    if (!data) return [];
+    return data.work_orders.filter(w=>
+      w.asset_name.toLowerCase().includes(search.toLowerCase()) ||
+      w.title.toLowerCase().includes(search.toLowerCase()) ||
+      (w.root_cause||'').toLowerCase().includes(search.toLowerCase())
+    );
+  },[data, search]);
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+        <div>
+          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Work Order Analysis</h1>
+          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Breakdown by machine, root cause and downtime</p>
+        </div>
+      </div>
+
+      {/* Filter Bar */}
+      <div className="filter-bar">
+        {/* Date presets */}
+        <div>
+          <label className="lbl">Quick Range</label>
+          <div style={{display:'flex',gap:'6px'}}>
+            {[['7d',7],['30d',30],['90d',90],['1yr',365]].map(([lbl,days])=>(
+              <button key={lbl} onClick={()=>setPreset(days)} className="btn btn-secondary" style={{padding:'5px 12px',fontSize:'12px'}}>{lbl}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Date From */}
+        <div style={{minWidth:'140px'}}>
+          <label className="lbl">Date From</label>
+          <input type="date" className="inp" value={dateFrom} onChange={e=>setDateFrom(e.target.value)}/>
+        </div>
+
+        {/* Date To */}
+        <div style={{minWidth:'140px'}}>
+          <label className="lbl">Date To</label>
+          <input type="date" className="inp" value={dateTo} onChange={e=>setDateTo(e.target.value)}/>
+        </div>
+
+        {/* Machine filter */}
+        <div style={{minWidth:'200px'}}>
+          <label className="lbl">Machine / Asset</label>
+          <select className="inp" value={assetId} onChange={e=>setAssetId(e.target.value)}>
+            <option value="">All machines</option>
+            {assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}
+          </select>
+        </div>
+
+        {/* Apply button */}
+        <div style={{paddingTop:'20px'}}>
+          <button className="btn btn-primary" onClick={load} disabled={loading} style={{whiteSpace:'nowrap'}}>
+            {loading ? '⏳ Loading…' : '🔍 Apply Filter'}
+          </button>
+        </div>
+      </div>
+
+      {/* Summary KPI cards */}
+      {data && (
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:'12px',marginBottom:'20px'}}>
+          {[
+            {icon:'📋',label:'Total Cases',value:data.summary.total_cases,bg:'#eff6ff'},
+            {icon:'✅',label:'Completed',value:data.summary.completed_cases,bg:'#f0fdf4'},
+            {icon:'🔓',label:'Open Cases',value:data.summary.open_cases,bg:'#fef2f2',alert:data.summary.open_cases>0},
+            {icon:'⏱️',label:'Total Downtime',value:data.summary.total_downtime_hrs+'h',bg:'#fff7ed'},
+            {icon:'📊',label:'Completion Rate',value:data.summary.completion_rate+'%',bg:'#faf5ff'},
+            {icon:'⌛',label:'Avg Downtime',value:data.summary.avg_downtime_hrs+'h',bg:'#f0fdfa'},
+          ].map((k,i)=>(
+            <div key={i} className="kpi" style={{padding:'14px',...(k.alert?{borderColor:'#fca5a5'}:{})}}>
+              <div className="kpi-icon" style={{background:k.bg,width:'38px',height:'38px',fontSize:'16px'}}>{k.icon}</div>
+              <div>
+                <div style={{fontSize:'20px',fontWeight:800,color:'#1e293b',lineHeight:1}}>{k.value}</div>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>{k.label}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Charts row */}
+      {data && RC && data.by_machine.length > 0 && (
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px',marginBottom:'20px'}}>
+          {/* Cases by Machine bar chart */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>Number of Cases by Machine</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={data.by_machine.slice(0,8)} layout="vertical" margin={{left:10}}>
+                <RC.XAxis type="number" allowDecimals={false} tick={{fontSize:11}}/>
+                <RC.YAxis dataKey="asset_name" type="category" tick={{fontSize:11}} width={130}/>
+                <RC.Tooltip/>
+                <RC.Bar dataKey="total_cases" name="Cases" radius={[0,6,6,0]}>
+                  {data.by_machine.slice(0,8).map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Bar>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          </div>
+
+          {/* Downtime by Machine bar chart */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>Total Downtime by Machine (hours)</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={data.by_machine.slice(0,8)} layout="vertical" margin={{left:10}}>
+                <RC.XAxis type="number" tick={{fontSize:11}}/>
+                <RC.YAxis dataKey="asset_name" type="category" tick={{fontSize:11}} width={130}/>
+                <RC.Tooltip/>
+                <RC.Bar dataKey="total_downtime" name="Downtime (hrs)" radius={[0,6,6,0]}>
+                  {data.by_machine.slice(0,8).map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Bar>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* Tabs + Search */}
+      {data && (
+        <>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'14px',flexWrap:'wrap',gap:'10px'}}>
+            <div style={{display:'flex',gap:'8px'}}>
+              {[['machine','🏭 By Machine'],['rootcause','🔍 By Root Cause'],['detail','📄 Detail Records']].map(([key,lbl])=>(
+                <button key={key} className={'tab-btn'+(activeTab===key?' active':'')} onClick={()=>{setActiveTab(key);setSortCol(key==='detail'?'asset_name':'total_cases');setSortAsc(false);setSearch('');}}>
+                  {lbl}
+                </button>
+              ))}
+            </div>
+            <input className="inp" style={{maxWidth:'240px'}} placeholder="Search within results…" value={search} onChange={e=>setSearch(e.target.value)}/>
+          </div>
+
+          {loading && <Spinner/>}
+
+          {/* BY MACHINE TAB */}
+          {!loading && activeTab==='machine' && (
+            <div className="card" style={{padding:0}}>
+              {machineRows.length===0 ? <Empty msg="No data for selected filters"/> : (
+                <div className="ovf"><table>
+                  <thead><tr>
+                    <SortTh col="asset_name" label="Machine Name"/>
+                    <SortTh col="asset_category" label="Category"/>
+                    <SortTh col="asset_location" label="Location"/>
+                    <SortTh col="total_cases" label="No. of Cases"/>
+                    <SortTh col="total_downtime" label="Total Downtime (hrs)"/>
+                    <SortTh col="completed" label="Completed"/>
+                    <SortTh col="open" label="Open"/>
+                    <SortTh col="critical" label="Critical"/>
+                  </tr></thead>
+                  <tbody>{machineRows.map((r,i)=>(
+                    <tr key={i}>
+                      <td style={{fontWeight:600,color:'#1e293b'}}>{r.asset_name}</td>
+                      <td style={{color:'#64748b'}}>{r.asset_category||'—'}</td>
+                      <td style={{color:'#64748b'}}>{r.asset_location||'—'}</td>
+                      <td><span style={{fontWeight:700,color:'#2563eb',fontSize:'15px'}}>{r.total_cases}</span></td>
+                      <td><span style={{fontWeight:600,color:r.total_downtime>10?'#dc2626':'#374151'}}>{r.total_downtime}h</span></td>
+                      <td><span style={{color:'#16a34a',fontWeight:600}}>{r.completed}</span></td>
+                      <td><span style={{color:r.open>0?'#ea580c':'#374151',fontWeight:600}}>{r.open}</span></td>
+                      <td><span style={{color:r.critical>0?'#dc2626':'#374151',fontWeight:600}}>{r.critical}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+              )}
+            </div>
+          )}
+
+          {/* BY ROOT CAUSE TAB */}
+          {!loading && activeTab==='rootcause' && (
+            <div className="card" style={{padding:0}}>
+              {rootCauseRows.length===0 ? <Empty msg="No data for selected filters"/> : (
+                <div className="ovf"><table>
+                  <thead><tr>
+                    <SortTh col="root_cause" label="Root Cause / Description"/>
+                    <SortTh col="total_cases" label="No. of Cases"/>
+                    <SortTh col="total_downtime" label="Total Downtime (hrs)"/>
+                    <SortTh col="machines_affected" label="Machines Affected"/>
+                  </tr></thead>
+                  <tbody>{rootCauseRows.map((r,i)=>(
+                    <tr key={i}>
+                      <td style={{maxWidth:'320px',fontWeight:500}}>{r.root_cause}</td>
+                      <td><span style={{fontWeight:700,color:'#2563eb',fontSize:'15px'}}>{r.total_cases}</span></td>
+                      <td><span style={{fontWeight:600,color:r.total_downtime>10?'#dc2626':'#374151'}}>{r.total_downtime}h</span></td>
+                      <td style={{color:'#64748b'}}>{r.machines_affected}</td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+              )}
+            </div>
+          )}
+
+          {/* DETAIL RECORDS TAB */}
+          {!loading && activeTab==='detail' && (
+            <div className="card" style={{padding:0}}>
+              {detailRows.length===0 ? <Empty msg="No records for selected filters"/> : (
+                <div className="ovf"><table>
+                  <thead><tr>
+                    <th>Machine Name</th>
+                    <th>Work Order Title</th>
+                    <th>Root Cause</th>
+                    <th>Type</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Downtime (hrs)</th>
+                    <th>Date Created</th>
+                    <th>Date Completed</th>
+                  </tr></thead>
+                  <tbody>{detailRows.map((r,i)=>(
+                    <tr key={i}>
+                      <td style={{fontWeight:600,whiteSpace:'nowrap'}}>{r.asset_name}</td>
+                      <td style={{maxWidth:'180px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.title}</td>
+                      <td style={{maxWidth:'200px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:'#64748b'}} title={r.root_cause}>{r.root_cause||'—'}</td>
+                      <td><Badge value={r.type}/></td>
+                      <td><Badge value={r.priority}/></td>
+                      <td><Badge value={r.status}/></td>
+                      <td style={{fontWeight:600,color:r.downtime_hours>8?'#dc2626':'#374151'}}>{r.downtime_hours!=null?r.downtime_hours+'h':'—'}</td>
+                      <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{fmtDate(r.created_at)}</td>
+                      <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{fmtDate(r.completed_at)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+              )}
+            </div>
+          )}
+
+          {/* Footer note */}
+          {data && (
+            <div style={{marginTop:'12px',fontSize:'12px',color:'#94a3b8',textAlign:'right'}}>
+              Showing data from {dateFrom} to {dateTo} · {data.summary.total_cases} total records
+              {assetId && ' · Filtered by selected machine'}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
 }
 
-
+// ── App Shell ──────────────────────────────────────────────────────────────
 const NAV=[
-  {key:'dashboard',label:'Dashboard',icon:'📊'},
-  {key:'assets',label:'Assets',icon:'🏭'},
-  {key:'workorders',label:'Work Orders',icon:'📋'},
-  {key:'inventory',label:'Inventory',icon:'📦'},
-  {key:'pm',label:'PM Schedules',icon:'📅'},
+  {key:'dashboard',  label:'Dashboard',   icon:'📊'},
+  {key:'assets',     label:'Assets',      icon:'🏭'},
+  {key:'workorders', label:'Work Orders', icon:'📋'},
+  {key:'inventory',  label:'Inventory',   icon:'📦'},
+  {key:'pm',         label:'PM Schedules',icon:'📅'},
+  {key:'analysis',   label:'Analysis',    icon:'📈'},
 ];
 
 function App() {
   const [user,setUser] = useState(null);
   const [page,setPage] = useState('dashboard');
-
   useEffect(()=>{
     const token=localStorage.getItem('cmms_token');
     if(token) api('/auth/me').then(setUser).catch(()=>localStorage.removeItem('cmms_token'));
   },[]);
-
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules};
+  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules,analysis:Analysis};
   const PageComp=pages[page]||Dashboard;
-
   return (
     <div>
       <div className="sidebar">
         <div style={{padding:'20px 16px',borderBottom:'1px solid #334155'}}>
           <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
             <div style={{width:'36px',height:'36px',background:'#2563eb',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'18px'}}>🔧</div>
-            <div>
-              <div style={{color:'#fff',fontWeight:800,fontSize:'14px'}}>CMMS Pro</div>
-              <div style={{color:'#64748b',fontSize:'11px'}}>Maintenance System</div>
-            </div>
+            <div><div style={{color:'#fff',fontWeight:800,fontSize:'14px'}}>CMMS Pro</div><div style={{color:'#64748b',fontSize:'11px'}}>Maintenance System</div></div>
           </div>
         </div>
         <nav style={{flex:1,padding:'12px 8px'}}>
@@ -724,20 +916,12 @@ function App() {
             <div style={{width:'32px',height:'32px',background:'#2563eb',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:'13px'}}>
               {user.name?user.name.charAt(0).toUpperCase():'U'}
             </div>
-            <div>
-              <div style={{color:'#fff',fontSize:'12px',fontWeight:600}}>{user.name}</div>
-              <div style={{color:'#64748b',fontSize:'11px',textTransform:'capitalize'}}>{user.role}</div>
-            </div>
+            <div><div style={{color:'#fff',fontSize:'12px',fontWeight:600}}>{user.name}</div><div style={{color:'#64748b',fontSize:'11px',textTransform:'capitalize'}}>{user.role}</div></div>
           </div>
-          <button onClick={()=>{localStorage.removeItem('cmms_token');setUser(null);}}
-            style={{width:'100%',background:'none',border:'1px solid #334155',color:'#94a3b8',padding:'7px',borderRadius:'8px',cursor:'pointer',fontSize:'12px'}}>
-            Sign out
-          </button>
+          <button onClick={()=>{localStorage.removeItem('cmms_token');setUser(null);}} style={{width:'100%',background:'none',border:'1px solid #334155',color:'#94a3b8',padding:'7px',borderRadius:'8px',cursor:'pointer',fontSize:'12px'}}>Sign out</button>
         </div>
       </div>
-      <div className="main-content">
-        <PageComp/>
-      </div>
+      <div className="main-content"><PageComp/></div>
     </div>
   );
 }

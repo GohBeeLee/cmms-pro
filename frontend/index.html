@@ -426,14 +426,13 @@ function WorkOrders() {
         {loading?<Spinner/>:wos.length===0?<Empty msg="No work orders"/>:(
           <div className="ovf">
             <table>
-              <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Actual Hours','Update Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+              <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Change Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
               <tbody>
                 {wos.map(w=>(
                   <tr key={w.id}>
                     <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{w.wo_number}</span></td>
                     <td style={{fontWeight:600,maxWidth:'160px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.title}</td>
                     <td style={{color:'#64748b',fontSize:'12px'}}>{w.asset?w.asset.name:'—'}</td>
-                    <td style={{color:'#64748b'}}>{w.actual_hours ? w.actual_hours+'h' : '—'}</td>
                     <td><Badge value={w.type}/></td>
                     <td><Badge value={w.priority}/></td>
                     <td><Badge value={w.status}/></td>
@@ -475,7 +474,6 @@ function WorkOrders() {
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">Due Date</label><input type="datetime-local" className="inp" value={form.due_date} onChange={e=>setForm({...form,due_date:e.target.value})}/></div>
               <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
-              <div><label className="lbl">New Field Label</label><input className="inp" value={form.new_field||''} onChange={e=>setForm({...form,new_field:e.target.value})}/></div>
             </div>
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={create}>Create</button>

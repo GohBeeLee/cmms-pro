@@ -254,3 +254,60 @@ async def consume_part(
         "low_stock": part.quantity_on_hand <= part.reorder_level,
     })
     return record
+
+# ------------ Add Analysis Function for Work Orders--------------------------------------------------------------------------
+@router.get("/analytics", tags=["work_orders"])
+async def get_analytics(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import func, case
+    from models import Asset
+
+    # Total by status
+    status_result = await db.execute(
+        select(WorkOrder.status, func.count().label("count"))
+        .group_by(WorkOrder.status)
+    )
+    by_status = [{"status": r.status.value, "count": r.count} for r in status_result]
+
+    # Total by priority
+    priority_result = await db.execute(
+        select(WorkOrder.priority, func.count().label("count"))
+        .group_by(WorkOrder.priority)
+    )
+    by_priority = [{"priority": r.priority.value, "count": r.count} for r in priority_result]
+
+    # Total by type
+    type_result = await db.execute(
+        select(WorkOrder.type, func.count().label("count"))
+        .group_by(WorkOrder.type)
+    )
+    by_type = [{"type": r.type.value, "count": r.count} for r in type_result]
+
+    # Top 5 assets with most work orders
+    asset_result = await db.execute(
+        select(Asset.name, func.count().label("count"))
+        .join(WorkOrder, WorkOrder.asset_id == Asset.id)
+        .group_by(Asset.name)
+        .order_by(func.count().desc())
+        .limit(5)
+    )
+    by_asset = [{"asset": r.name, "count": r.count} for r in asset_result]
+
+    # Completion rate
+    total = await db.execute(select(func.count()).select_from(WorkOrder))
+    completed = await db.execute(
+        select(func.count()).select_from(WorkOrder)
+        .where(WorkOrder.status == WorkOrderStatus.completed)
+    )
+    total_count = total.scalar() or 0
+    completed_count = completed.scalar() or 0
+    completion_rate = round((completed_count / total_count * 100) if total_count > 0 else 0, 1)
+
+    return {
+        "by_status": by_status,
+        "by_priority": by_priority,
+        "by_type": by_type,
+        "by_asset": by_asset,
+        "total": total_count,
+        "completed": completed_count,
+        "completion_rate": completion_rate,
+    }

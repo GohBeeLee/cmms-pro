@@ -128,6 +128,7 @@ async def get_kpi(db: AsyncSession = Depends(get_db)):
         "pm_schedules_due_soon":       (await db.execute(select(func.count()).select_from(PMSchedule).where(PMSchedule.is_active == True, PMSchedule.next_due <= week_ahead))).scalar(),
         "low_stock_parts":             (await db.execute(select(func.count()).select_from(SparePart).where(SparePart.quantity_on_hand <= SparePart.reorder_level))).scalar(),
         "total_technicians":           (await db.execute(select(func.count()).select_from(UserModel).where(UserModel.is_active == True))).scalar(),
+        "total_pm":                    (await db.execute(select(func.count()).select_from(PMSchedule).where(PMSchedule.is_active == True))).scalar(),
     }
 
 

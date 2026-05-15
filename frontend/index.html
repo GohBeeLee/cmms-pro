@@ -211,6 +211,7 @@ function Dashboard() {
     {icon:'📅',label:'PM Due (7 days)',value:kpi.pm_schedules_due_soon,bg:'#faf5ff',alert:kpi.pm_schedules_due_soon>0},
     {icon:'📦',label:'Low Stock Parts',value:kpi.low_stock_parts,bg:'#fff7ed',alert:kpi.low_stock_parts>0},
     {icon:'👥',label:'Active Users',value:kpi.total_technicians,bg:'#f0fdfa'},
+    {icon:'🔧',label:'Total PM Schedules',value:kpi.total_pm, bg:'#f0fdf4'},
   ] : [];
 
   return (
@@ -263,6 +264,20 @@ function Dashboard() {
                   </RC.BarChart>
                 </RC.ResponsiveContainer>
               ) : <Empty msg="No data yet"/>}
+            </div>
+            {/* New chart — Work Orders by Asset */}
+            <div className="card">
+              <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>
+                Work Orders by Asset
+              </h3>
+              <RC.ResponsiveContainer width="100%" height={200}>
+                <RC.BarChart data={byAsset}>
+                  <RC.XAxis dataKey="name" tick={{fontSize:11}}/>
+                  <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
+                  <RC.Tooltip/>
+                  <RC.Bar dataKey="count" fill="#3b82f6" radius={[6,6,0,0]}/>
+                </RC.BarChart>
+              </RC.ResponsiveContainer>
             </div>
           </div>
         )}
@@ -411,13 +426,14 @@ function WorkOrders() {
         {loading?<Spinner/>:wos.length===0?<Empty msg="No work orders"/>:(
           <div className="ovf">
             <table>
-              <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Change Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+              <thead><tr>{['WO #','Title','Asset','Type','Priority','Status','Due Date','Actual Hours','Update Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
               <tbody>
                 {wos.map(w=>(
                   <tr key={w.id}>
                     <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{w.wo_number}</span></td>
                     <td style={{fontWeight:600,maxWidth:'160px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.title}</td>
                     <td style={{color:'#64748b',fontSize:'12px'}}>{w.asset?w.asset.name:'—'}</td>
+                    <td style={{color:'#64748b'}}>{w.actual_hours ? w.actual_hours+'h' : '—'}</td>
                     <td><Badge value={w.type}/></td>
                     <td><Badge value={w.priority}/></td>
                     <td><Badge value={w.status}/></td>
@@ -459,6 +475,7 @@ function WorkOrders() {
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">Due Date</label><input type="datetime-local" className="inp" value={form.due_date} onChange={e=>setForm({...form,due_date:e.target.value})}/></div>
               <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
+              <div><label className="lbl">New Field Label</label><input className="inp" value={form.new_field||''} onChange={e=>setForm({...form,new_field:e.target.value})}/></div>
             </div>
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={create}>Create</button>
@@ -678,12 +695,125 @@ function PMSchedules() {
   );
 }
 
+/* Analysis Function for Work Order*/
+function Analysis() {
+  const [data, setData] = useState(null);
+  const COLORS = ['#3b82f6','#22c55e','#f59e0b','#ef4444','#8b5cf6'];
+  const RC = window.Recharts;
+
+  async function load() {
+    try { setData(await api('/work-orders/analytics')); }
+    catch(e) { toast(e.message, 'error'); }
+  }
+  useEffect(() => { load(); }, []);
+
+  return (
+    <div>
+      <div style={{marginBottom:'24px'}}>
+        <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Work Order Analysis</h1>
+        <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Performance insights and trends</p>
+      </div>
+
+      {!data ? <Spinner/> : <>
+        {/* Summary cards */}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(180px,1fr))',gap:'14px',marginBottom:'24px'}}>
+          <div className="kpi">
+            <div className="kpi-icon" style={{background:'#eff6ff'}}>📋</div>
+            <div>
+              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.total}</div>
+              <div style={{fontSize:'12px',color:'#94a3b8'}}>Total Work Orders</div>
+            </div>
+          </div>
+          <div className="kpi">
+            <div className="kpi-icon" style={{background:'#f0fdf4'}}>✅</div>
+            <div>
+              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.completed}</div>
+              <div style={{fontSize:'12px',color:'#94a3b8'}}>Completed</div>
+            </div>
+          </div>
+          <div className="kpi">
+            <div className="kpi-icon" style={{background:'#faf5ff'}}>📊</div>
+            <div>
+              <div style={{fontSize:'28px',fontWeight:800,color:'#1e293b'}}>{data.completion_rate}%</div>
+              <div style={{fontSize:'12px',color:'#94a3b8'}}>Completion Rate</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Charts grid */}
+        {RC && <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px'}}>
+
+          {/* By Status */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Status</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={data.by_status}>
+                <RC.XAxis dataKey="status" tick={{fontSize:11}}/>
+                <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
+                <RC.Tooltip/>
+                <RC.Bar dataKey="count" radius={[6,6,0,0]}>
+                  {data.by_status.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Bar>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          </div>
+
+          {/* By Priority */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Priority</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.PieChart>
+                <RC.Pie data={data.by_priority} dataKey="count" nameKey="priority" cx="50%" cy="50%" outerRadius={80}>
+                  {data.by_priority.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Pie>
+                <RC.Tooltip/><RC.Legend/>
+              </RC.PieChart>
+            </RC.ResponsiveContainer>
+          </div>
+
+          {/* By Type */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>By Type</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={data.by_type}>
+                <RC.XAxis dataKey="type" tick={{fontSize:11}}/>
+                <RC.YAxis allowDecimals={false} tick={{fontSize:11}}/>
+                <RC.Tooltip/>
+                <RC.Bar dataKey="count" radius={[6,6,0,0]}>
+                  {data.by_type.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Bar>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          </div>
+
+          {/* Top assets */}
+          <div className="card">
+            <h3 style={{fontWeight:700,fontSize:'14px',color:'#1e293b',marginBottom:'14px'}}>Top 5 Assets by Work Orders</h3>
+            <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={data.by_asset} layout="vertical">
+                <RC.XAxis type="number" allowDecimals={false} tick={{fontSize:11}}/>
+                <RC.YAxis dataKey="asset" type="category" tick={{fontSize:11}} width={120}/>
+                <RC.Tooltip/>
+                <RC.Bar dataKey="count" radius={[0,6,6,0]}>
+                  {data.by_asset.map((_,i) => <RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                </RC.Bar>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          </div>
+
+        </div>}
+      </>}
+    </div>
+  );
+}
+
 const NAV=[
   {key:'dashboard',label:'Dashboard',icon:'📊'},
   {key:'assets',label:'Assets',icon:'🏭'},
   {key:'workorders',label:'Work Orders',icon:'📋'},
   {key:'inventory',label:'Inventory',icon:'📦'},
   {key:'pm',label:'PM Schedules',icon:'📅'},
+  {key:'analysis',label:'Analysis',icon:'📈'},  //for analysis function
 ];
 
 function App() {
@@ -696,7 +826,7 @@ function App() {
   },[]);
 
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules};
+  const pages={dashboard:Dashboard,assets:Assets,workorders:WorkOrders,inventory:Inventory,pm:PMSchedules,analysis:Analysis};
   const PageComp=pages[page]||Dashboard;
 
   return (

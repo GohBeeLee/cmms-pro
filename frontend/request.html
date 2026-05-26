@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>Machine Repair Request</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f4f8;min-height:100vh;padding:16px 16px 40px;}
+  .container{max-width:500px;margin:0 auto;}
+  .header{background:#1e293b;border-radius:16px;padding:22px 20px;margin-bottom:16px;text-align:center;}
+  .header h1{color:#fff;font-size:19px;font-weight:800;margin-bottom:4px;}
+  .header p{color:#94a3b8;font-size:13px;}
+  .logo{width:44px;height:44px;background:#2563eb;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 12px;}
+  .card{background:#fff;border-radius:14px;padding:20px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+  .card h2{font-size:14px;font-weight:700;color:#1e293b;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9;}
+  .field{margin-bottom:14px;}
+  .field:last-child{margin-bottom:0;}
+  label{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:6px;}
+  label .req{color:#ef4444;margin-left:2px;}
+  input[type=text],select,textarea{width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:11px 14px;font-size:15px;font-family:inherit;outline:none;background:#fff;color:#1e293b;transition:border-color 0.15s;}
+  input[type=text]:focus,select:focus,textarea:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,0.12);}
+  textarea{resize:vertical;min-height:90px;line-height:1.5;}
+  select{appearance:auto;}
+  .urgency-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .urgency-btn{border:2px solid #e2e8f0;border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;transition:all 0.15s;background:#fff;user-select:none;}
+  .urgency-btn span{font-size:13px;font-weight:600;color:#64748b;display:block;}
+  .urgency-btn small{font-size:11px;color:#94a3b8;display:block;margin-top:2px;}
+  .urgency-btn.sel-low{border-color:#3b82f6;background:#eff6ff;}.urgency-btn.sel-low span{color:#1d4ed8;}
+  .urgency-btn.sel-medium{border-color:#f59e0b;background:#fefce8;}.urgency-btn.sel-medium span{color:#b45309;}
+  .urgency-btn.sel-high{border-color:#f97316;background:#fff7ed;}.urgency-btn.sel-high span{color:#c2410c;}
+  .urgency-btn.sel-critical{border-color:#ef4444;background:#fef2f2;}.urgency-btn.sel-critical span{color:#b91c1c;}
+  .upload-zone{border:2px dashed #e2e8f0;border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:all 0.15s;background:#fafafa;}
+  .upload-zone:hover,.upload-zone.drag-over{border-color:#2563eb;background:#eff6ff;}
+  .upload-zone .icon{font-size:32px;margin-bottom:8px;}
+  .upload-zone p{font-size:13px;color:#64748b;margin-bottom:4px;}
+  .upload-zone small{font-size:11px;color:#94a3b8;}
+  #file-input{display:none;}
+  .preview-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;}
+  .preview-item{position:relative;border-radius:8px;overflow:hidden;aspect-ratio:1;}
+  .preview-item img{width:100%;height:100%;object-fit:cover;}
+  .preview-item .rm{position:absolute;top:4px;right:4px;width:22px;height:22px;background:rgba(0,0,0,0.6);border:none;border-radius:50%;color:#fff;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;}
+  .btn-submit{width:100%;background:#2563eb;color:#fff;border:none;padding:16px;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;transition:background 0.15s;margin-top:4px;}
+  .btn-submit:hover{background:#1d4ed8;}
+  .btn-submit:disabled{background:#94a3b8;cursor:not-allowed;}
+  .success-screen{display:none;text-align:center;padding:10px 0;}
+  .success-icon{font-size:64px;margin-bottom:12px;}
+  .success-screen h2{font-size:22px;font-weight:800;color:#16a34a;margin-bottom:8px;}
+  .success-screen p{color:#64748b;font-size:14px;line-height:1.6;margin-bottom:4px;}
+  .wo-badge{display:inline-block;background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a;padding:8px 20px;border-radius:999px;font-weight:700;font-size:15px;margin:12px 0;}
+  .btn-new{background:#f1f5f9;color:#374151;border:none;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;}
+  .error-msg{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;display:none;}
+  .char-count{font-size:11px;color:#94a3b8;text-align:right;margin-top:4px;}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="logo">&#128295;</div>
+    <h1>Machine Repair Request</h1>
+    <p>Report a machine problem to the maintenance team</p>
+  </div>
+
+  <div id="form-section">
+    <div class="error-msg" id="error-msg"></div>
+
+    <div class="card">
+      <h2>Machine &amp; Problem</h2>
+      <div class="field">
+        <label>Machine / Asset <span class="req">*</span></label>
+        <select id="asset-select"><option value="">Loading machines...</option></select>
+      </div>
+      <div class="field">
+        <label>Problem Category <span class="req">*</span></label>
+        <select id="problem-category">
+          <option value="">Select problem type...</option>
+          <option>Power trip / Electrical fault</option>
+          <option>Motor issue</option>
+          <option>Pneumatic / Air system</option>
+          <option>Hydraulic / Oil leakage</option>
+          <option>Mechanical breakdown</option>
+          <option>Belt / Chain issue</option>
+          <option>Bearing failure / Noise</option>
+          <option>Sensor / PLC fault</option>
+          <option>Overheating</option>
+          <option>Conveyor issue</option>
+          <option>HVAC / Cooling issue</option>
+          <option>Vibration / Alignment</option>
+          <option>Others</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Problem Description <span class="req">*</span></label>
+        <textarea id="problem-desc" placeholder="Describe what is wrong..." maxlength="500" oninput="upd(this,'cd',500)"></textarea>
+        <div class="char-count"><span id="cd">0</span> / 500</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Photos (optional, max 3)</h2>
+      <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
+        <div class="icon">&#128247;</div>
+        <p>Tap to take a photo or choose from gallery</p>
+        <small>JPG, PNG - max 5 MB each</small>
+      </div>
+      <input type="file" id="file-input" accept="image/*" multiple capture="environment" onchange="onFileSelect(event)"/>
+      <div class="preview-grid" id="preview-grid"></div>
+    </div>
+
+    <div class="card">
+      <h2>Your Details</h2>
+      <div class="field">
+        <label>Your Name <span class="req">*</span></label>
+        <input type="text" id="operator-name" placeholder="Enter your full name" maxlength="100"/>
+      </div>
+      <div class="field">
+        <label>Urgency Level <span class="req">*</span></label>
+        <div class="urgency-grid">
+          <div class="urgency-btn" id="btn-low" onclick="selU('low')"><span>Low</span><small>Can wait 1-2 days</small></div>
+          <div class="urgency-btn sel-medium" id="btn-medium" onclick="selU('medium')"><span>Medium</span><small>Attend today</small></div>
+          <div class="urgency-btn" id="btn-high" onclick="selU('high')"><span>High</span><small>Within hours</small></div>
+          <div class="urgency-btn" id="btn-critical" onclick="selU('critical')"><span>Critical</span><small>Machine stopped!</small></div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Additional Remarks <small style="font-weight:400;color:#94a3b8">(optional)</small></label>
+        <textarea id="remarks" placeholder="Any other information..." maxlength="300" oninput="upd(this,'cr',300)"></textarea>
+        <div class="char-count"><span id="cr">0</span> / 300</div>
+      </div>
+    </div>
+
+    <button class="btn-submit" id="submit-btn" onclick="submitRequest()">Submit Repair Request</button>
+  </div>
+
+  <div class="success-screen" id="success-screen">
+    <div class="card">
+      <div class="success-icon">&#9989;</div>
+      <h2>Request Submitted!</h2>
+      <div class="wo-badge" id="success-wo"></div>
+      <p id="success-msg"></p>
+      <p style="color:#94a3b8;font-size:12px;margin-top:10px">The maintenance team has been notified.</p>
+      <br/>
+      <button class="btn-new" onclick="resetForm()">Submit Another Request</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var API = '';
+var urgency = 'medium';
+var photos = [];
+
+window.addEventListener('DOMContentLoaded', function() {
+  fetch(API + '/requests/assets').then(function(r){ return r.json(); }).then(function(assets) {
+    var sel = document.getElementById('asset-select');
+    sel.innerHTML = '<option value="">Select machine...</option>';
+    assets.forEach(function(a) {
+      var opt = document.createElement('option');
+      opt.value = a.id;
+      opt.textContent = a.name + ' (' + a.asset_code + ')' + (a.location ? ' - ' + a.location : '');
+      sel.appendChild(opt);
+    });
+  }).catch(function() {
+    document.getElementById('asset-select').innerHTML = '<option value="">Failed to load - please refresh</option>';
+  });
+});
+
+function selU(level) {
+  ['low','medium','high','critical'].forEach(function(l) {
+    document.getElementById('btn-' + l).className = 'urgency-btn';
+  });
+  document.getElementById('btn-' + level).className = 'urgency-btn sel-' + level;
+  urgency = level;
+}
+
+function upd(el, id, max) {
+  document.getElementById(id).textContent = el.value.length;
+}
+
+function onDragOver(e) { e.preventDefault(); document.getElementById('upload-zone').classList.add('drag-over'); }
+function onDragLeave(e) { document.getElementById('upload-zone').classList.remove('drag-over'); }
+function onDrop(e) { e.preventDefault(); document.getElementById('upload-zone').classList.remove('drag-over'); handleFiles(Array.from(e.dataTransfer.files)); }
+function onFileSelect(e) { handleFiles(Array.from(e.target.files)); e.target.value = ''; }
+
+function handleFiles(files) {
+  var remaining = 3 - photos.length;
+  if (remaining <= 0) { alert('Maximum 3 photos allowed.'); return; }
+  files.slice(0, remaining).forEach(function(file) {
+    if (!file.type.startsWith('image/')) { alert(file.name + ' is not an image.'); return; }
+    if (file.size > 5 * 1024 * 1024) { alert(file.name + ' is too large (max 5 MB).'); return; }
+    var reader = new FileReader();
+    reader.onload = function(e) { photos.push({ file: file, dataUrl: e.target.result }); renderPreviews(); };
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderPreviews() {
+  var grid = document.getElementById('preview-grid');
+  grid.innerHTML = '';
+  photos.forEach(function(p, i) {
+    var div = document.createElement('div');
+    div.className = 'preview-item';
+    div.innerHTML = '<img src="' + p.dataUrl + '" alt="photo"/><button class="rm" onclick="removePhoto(' + i + ')">x</button>';
+    grid.appendChild(div);
+  });
+  document.getElementById('upload-zone').style.display = photos.length >= 3 ? 'none' : 'block';
+}
+
+function removePhoto(i) { photos.splice(i, 1); renderPreviews(); }
+
+function showError(msg) {
+  var el = document.getElementById('error-msg');
+  el.textContent = msg; el.style.display = 'block';
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function submitRequest() {
+  var assetId  = document.getElementById('asset-select').value;
+  var category = document.getElementById('problem-category').value;
+  var desc     = document.getElementById('problem-desc').value.trim();
+  var name     = document.getElementById('operator-name').value.trim();
+  var remarks  = document.getElementById('remarks').value.trim();
+
+  document.getElementById('error-msg').style.display = 'none';
+
+  if (!assetId)        { showError('Please select a machine.'); return; }
+  if (!category)       { showError('Please select a problem category.'); return; }
+  if (!desc)           { showError('Please describe the problem.'); return; }
+  if (desc.length < 10){ showError('Please provide more detail (at least 10 characters).'); return; }
+  if (!name)           { showError('Please enter your name.'); return; }
+
+  var btn = document.getElementById('submit-btn');
+  btn.disabled = true; btn.textContent = 'Submitting...';
+
+  try {
+    var photoData = photos.map(function(p) { return { filename: p.file.name, data: p.dataUrl, size: p.file.size }; });
+    var payload = {
+      asset_id: assetId,
+      operator_name: name,
+      problem_category: category,
+      problem_description: desc,
+      urgency: urgency,
+      remarks: remarks || null,
+      photos: photoData,
+    };
+    var res = await fetch(API + '/requests/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!res.ok) { var err = await res.json().catch(function(){ return {}; }); throw new Error(err.detail || 'Submission failed.'); }
+    var data = await res.json();
+    document.getElementById('success-wo').textContent  = data.wo_number;
+    document.getElementById('success-msg').textContent = data.message;
+    document.getElementById('form-section').style.display  = 'none';
+    document.getElementById('success-screen').style.display = 'block';
+    window.scrollTo(0, 0);
+  } catch(e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Submit Repair Request';
+  }
+}
+
+function resetForm() {
+  document.getElementById('form-section').style.display   = 'block';
+  document.getElementById('success-screen').style.display = 'none';
+  document.getElementById('asset-select').value     = '';
+  document.getElementById('problem-category').value = '';
+  document.getElementById('problem-desc').value     = '';
+  document.getElementById('operator-name').value    = '';
+  document.getElementById('remarks').value          = '';
+  document.getElementById('cd').textContent = '0';
+  document.getElementById('cr').textContent = '0';
+  photos = []; renderPreviews(); selU('medium'); window.scrollTo(0, 0);
+}
+</script>
+</body>
+</html>

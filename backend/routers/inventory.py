@@ -1,138 +1,530 @@
+"""
+Inventory Router
+================
+Uses real model fields: part_code, name, category, description,
+quantity_on_hand, reorder_level, unit_cost, supplier, location,
+barcode, used_on_asset, notes, unit.
+
+IMPORTANT: Static routes (/import/*, /export/*) declared BEFORE
+           /{part_id} routes to avoid FastAPI path conflicts.
+"""
+import io
+from datetime import datetime
+from typing import Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from db import get_db
-from models import SparePart, User
-from schemas import SparePartCreate, SparePartUpdate, SparePartOut
+from models import SparePart
 from auth import get_current_user
+from models import User
 from websocket_manager import ws_manager
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
-ROOM = "inventory"
+ROOM  = "inventory"
 
 
-@router.get("/", response_model=list[SparePartOut])
-async def list_parts(
-    skip: int = 0,
-    limit: int = 100,
-    low_stock: bool = False,
-    category: str | None = None,
+# ── Schema ─────────────────────────────────────────────────────────────────
+
+class PartIn(BaseModel):
+    part_code:        Optional[str]   = None
+    name:             Optional[str]   = None
+    category:         Optional[str]   = None
+    description:      Optional[str]   = None
+    quantity_on_hand: Optional[int]   = 0
+    reorder_level:    Optional[int]   = 5
+    unit_cost:        Optional[float] = None
+    supplier:         Optional[str]   = None
+    location:         Optional[str]   = None
+    barcode:          Optional[str]   = None
+    used_on_asset:    Optional[str]   = None
+    unit:             Optional[str]   = "pcs"
+
+
+def _dict(p: SparePart) -> dict:
+    qty   = p.quantity_on_hand or 0
+    reord = p.reorder_level    or 0
+    return {
+        "id":               str(p.id),
+        "part_code":        p.part_code,
+        "name":             p.name,
+        "category":         p.category,
+        "description":      p.description,
+        "quantity_on_hand": qty,
+        "reorder_level":    reord,
+        "unit_cost":        p.unit_cost,
+        "total_amount":     round(qty * p.unit_cost, 2) if p.unit_cost else None,
+        "supplier":         p.supplier,
+        "location":         p.location,
+        "barcode":          getattr(p, "barcode",        None),
+        "used_on_asset":    getattr(p, "used_on_asset",  None),
+        "unit":             p.unit or "pcs",
+        "status":           "Topup" if qty <= reord else "Enough",
+        "is_low_stock":     qty <= reord,
+        "created_at":       p.created_at.isoformat() if p.created_at else None,
+        "updated_at":       p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
+async def _get(part_id: UUID, db: AsyncSession) -> SparePart:
+    p = (await db.execute(
+        select(SparePart).where(SparePart.id == part_id)
+    )).scalar_one_or_none()
+    if not p:
+        raise HTTPException(404, "Part not found")
+    return p
+
+
+def _safe_set(obj, field: str, value):
+    """Set attribute only if the column exists on the model."""
+    try:
+        setattr(obj, field, value)
+    except AttributeError:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# STATIC ROUTES — must be declared BEFORE /{part_id}
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/import/template")
+async def download_template(_: User = Depends(get_current_user)):
+    """Generate and return the inventory Excel import template."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed — run: pip install openpyxl")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Inventory"
+
+    thin     = Side(style="thin", color="CCCCCC")
+    border   = Border(left=thin, right=thin, top=thin, bottom=thin)
+    hdr_fill = PatternFill("solid", start_color="1E3A5F")
+    opt_fill = PatternFill("solid", start_color="2D5986")
+    req_hint = PatternFill("solid", start_color="EBF3FB")
+    opt_hint = PatternFill("solid", start_color="F0FDF4")
+    note_fill= PatternFill("solid", start_color="FFF9C4")
+    data_font= Font(name="Arial", size=10)
+    hdr_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+    hint_font= Font(name="Arial", italic=True, color="5A6A7A", size=9)
+
+    # Row 1 title
+    ws.merge_cells("A1:L1")
+    ws["A1"] = "CMMS Pro — Inventory Import Template"
+    ws["A1"].font      = Font(name="Arial", bold=True, size=13, color="FFFFFF")
+    ws["A1"].fill      = hdr_fill
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 30
+
+    # Row 2 note
+    ws.merge_cells("A2:L2")
+    ws["A2"] = (
+        "Required columns (*): category, No, Part Item, Quantity, Threshold.  "
+        "Leave 'Total Amount (RM)' and 'Status' blank — system calculates automatically."
+    )
+    ws["A2"].font      = Font(name="Arial", italic=True, size=10, color="5A6A7A")
+    ws["A2"].fill      = note_fill
+    ws["A2"].alignment = Alignment(horizontal="center")
+    ws.row_dimensions[2].height = 18
+    ws.row_dimensions[3].height = 6
+
+    # Headers row 4 — YOUR exact column names
+    cols = [
+        ("category *",           True,  "Electrical / Mechanical / Pneumatic / Hydraulic / Consumable / Other"),
+        ("No *",                 True,  "Unique part number e.g. E-001, M-002  (must not duplicate)"),
+        ("Part Item *",          True,  "Full part name e.g. Bearing 6205, Fuse 10A"),
+        ("Description",          False, "Additional spec or model number (optional)"),
+        ("Quantity *",           True,  "Current stock on hand — number only"),
+        ("Rack No",              False, "Storage location e.g. Rack A1, Shelf B3"),
+        ("Use at",               False, "Machine or asset name this part is used on"),
+        ("Unit Price (RM)",      False, "Cost per unit in RM e.g. 12.50"),
+        ("Total Amount(RM)",     False, "AUTO-CALCULATED — leave blank"),
+        ("Barcode",              False, "Barcode or QR number (optional)"),
+        ("Threshold *",          True,  "Min stock level — alert when Quantity ≤ Threshold"),
+        ("Status(Enough/Topup)", False, "AUTO-CALCULATED — leave blank"),
+    ]
+    for c, (h, req, hint) in enumerate(cols, 1):
+        cell = ws.cell(row=4, column=c, value=h)
+        cell.font      = hdr_font
+        cell.fill      = hdr_fill if req else opt_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border    = border
+        hc = ws.cell(row=5, column=c, value=hint)
+        hc.font      = hint_font
+        hc.fill      = req_hint if req else opt_hint
+        hc.alignment = Alignment(wrap_text=True, vertical="top")
+        hc.border    = border
+
+    ws.row_dimensions[4].height = 24
+    ws.row_dimensions[5].height = 40
+
+    # Sample rows
+    samples = [
+        ["Electrical","E-001","Fuse 10A",           "Glass fuse 10A 250V",   50,"Rack A1","All machines",    0.80,"","BC001001",10,""],
+        ["Electrical","E-002","Fuse 16A",           "Glass fuse 16A 250V",   30,"Rack A1","Compressor",       1.20,"","BC001002",10,""],
+        ["Electrical","E-003","Contactor 9A",       "LC1D09 24VDC coil",      5,"Rack A2","Conveyor Motor",  45.00,"","BC001003", 2,""],
+        ["Mechanical","M-001","Bearing 6205",       "Deep groove 25x52mm",   20,"Shelf B1","Pump A",           8.50,"","BC002001", 5,""],
+        ["Mechanical","M-002","Bearing 6206",       "Deep groove 30x62mm",   15,"Shelf B1","Motor #1",         9.20,"","BC002002", 5,""],
+        ["Mechanical","M-003","V-Belt A42",         "Classical V-belt",        8,"Shelf B2","Compressor",     12.00,"","BC002003", 3,""],
+        ["Pneumatic", "P-001","SMC Filter Element", "AF20-F02 element",        6,"Rack C1","Pneumatic line",  22.00,"","BC003001", 2,""],
+        ["Pneumatic", "P-002","Solenoid Valve 5/2", "SY3120-5LZD-M5",          4,"Rack C2","Cylinder line",  85.00,"","BC003002", 2,""],
+        ["Consumable","C-001","Cable Tie 300mm",    "Black nylon 300mm",     200,"Rack D1","General",          0.05,"","BC004001",50,""],
+        ["Consumable","C-002","WD-40 Spray 400ml",  "Multi-use lubricant",    10,"Rack D2","General",         12.00,"","BC004002", 3,""],
+    ]
+    alt = [PatternFill("solid",start_color="FFFFFF"), PatternFill("solid",start_color="F7FBFF")]
+    for r, row in enumerate(samples, 6):
+        for c, v in enumerate(row, 1):
+            cell = ws.cell(row=r, column=c, value=v if v != "" else None)
+            cell.font = data_font; cell.fill = alt[r%2]; cell.border = border
+            cell.alignment = Alignment(vertical="center", horizontal="right" if c in (5,8,9,11) else "left")
+        ws.row_dimensions[r].height = 18
+    for r in range(16, 56):
+        for c in range(1, 13):
+            ws.cell(row=r,column=c).fill = alt[r%2]
+            ws.cell(row=r,column=c).border = border
+        ws.row_dimensions[r].height = 18
+
+    for i, w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18], 1):
+        from openpyxl.utils import get_column_letter
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A6"
+
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="CMMS_Inventory_Import_Template.xlsx"'},
+    )
+
+
+@router.post("/import/excel")
+async def import_excel(
+    file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
+):
+    """Import inventory from Excel. Accepts your existing format."""
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(400, "Only .xlsx files accepted")
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed")
+
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception:
+        raise HTTPException(400, "Cannot open file — must be a valid .xlsx file")
+
+    ws = wb.worksheets[0]
+
+    # Find header row (contains "No" or "Part Item")
+    header_row = None
+    for row in ws.iter_rows(min_row=1, max_row=10):
+        vals = [str(c.value or "").strip().lower() for c in row]
+        if any(v in ("no","no *","part item","part item *","part_code") for v in vals):
+            header_row = row[0].row
+            break
+    if not header_row:
+        raise HTTPException(400,
+            "Cannot find header row. Make sure row 4 has columns: "
+            "No, Part Item, Quantity, Threshold.")
+
+    # Column alias map
+    aliases = {
+        "category":"category","category *":"category",
+        "no":"part_code","no *":"part_code","part_code":"part_code",
+        "part item":"name","part item *":"name","name":"name",
+        "description":"description",
+        "quantity":"quantity","quantity *":"quantity","qty":"quantity",
+        "rack no":"location","rack":"location","location":"location",
+        "use at":"used_on","used at":"used_on",
+        "unit price (rm)":"unit_cost","unit price":"unit_cost","price (rm)":"unit_cost",
+        "total amount(rm)":"_skip","total amount (rm)":"_skip","total":"_skip",
+        "barcode":"barcode",
+        "threshold":"reorder_level","thereshold":"reorder_level",
+        "threshold *":"reorder_level","min stock":"reorder_level",
+        "status(enough/topup)":"_skip","status":"_skip",
+        "supplier":"supplier","unit":"unit",
+    }
+    col_map = {}
+    for cell in ws[header_row]:
+        if cell.value:
+            key = str(cell.value).strip().lower()
+            mapped = aliases.get(key)
+            if mapped and mapped != "_skip":
+                col_map[mapped] = cell.column - 1
+
+    missing = [r for r in ["part_code","name","quantity"] if r not in col_map]
+    if missing:
+        raise HTTPException(400,
+            f"Missing columns: {', '.join(missing)}. "
+            f"Found: {list(col_map.keys())}")
+
+    existing = {p.part_code: p for p in (await db.execute(select(SparePart))).scalars().all()}
+    valid_cats = {"Electrical","Mechanical","Pneumatic","Hydraulic","Consumable","Other"}
+
+    inserted, updated, skipped = 0, 0, []
+
+    def gcol(rv, key, default=""):
+        idx = col_map.get(key)
+        if idx is None or idx >= len(rv): return default
+        v = rv[idx]; return str(v).strip() if v is not None else default
+
+    def gnum(rv, key, default=None):
+        raw = gcol(rv, key, "")
+        try: return float(raw) if raw else default
+        except: return default
+
+    for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
+        if all(v is None or str(v).strip()=='' for v in rv): continue
+
+        part_code = gcol(rv,"part_code")
+        name      = gcol(rv,"name")
+        if not part_code:
+            skipped.append({"reason":"Missing part No"}); continue
+        if not name:
+            skipped.append({"part_code":part_code,"reason":"Missing Part Item name"}); continue
+
+        cat_raw  = gcol(rv,"category") or "Other"
+        category = "Other"
+        for vc in valid_cats:
+            if vc.lower()==cat_raw.lower() or vc.lower() in cat_raw.lower():
+                category=vc; break
+
+        qty           = int(gnum(rv,"quantity",0) or 0)
+        uc_raw        = gnum(rv,"unit_cost")
+        unit_cost     = round(float(uc_raw),4) if uc_raw is not None else None
+        reorder_level = int(gnum(rv,"reorder_level",5) or 5)
+        description   = gcol(rv,"description")  or None
+        location      = gcol(rv,"location")     or None
+        used_on       = gcol(rv,"used_on")      or None
+        barcode       = gcol(rv,"barcode")      or None
+        supplier      = gcol(rv,"supplier")     or None
+        unit          = gcol(rv,"unit")         or "pcs"
+
+        if part_code in existing:
+            p = existing[part_code]
+            p.name             = name
+            p.category         = category
+            p.description      = description
+            p.quantity_on_hand = qty
+            p.reorder_level    = reorder_level
+            if unit_cost  is not None: p.unit_cost = unit_cost
+            if location:  p.location  = location
+            if supplier:  p.supplier  = supplier
+            p.unit = unit
+            _safe_set(p,"barcode",       barcode)
+            _safe_set(p,"used_on_asset", used_on)
+            p.updated_at = datetime.utcnow()
+            updated += 1
+        else:
+            p = SparePart(
+                part_code        = part_code,
+                name             = name,
+                category         = category,
+                description      = description,
+                quantity_on_hand = qty,
+                reorder_level    = reorder_level,
+                unit_cost        = unit_cost,
+                location         = location,
+                supplier         = supplier,
+                unit             = unit,
+            )
+            _safe_set(p,"barcode",       barcode)
+            _safe_set(p,"used_on_asset", used_on)
+            db.add(p)
+            existing[part_code] = p
+            inserted += 1
+
+    await db.flush()
+    return {
+        "success":True,"inserted":inserted,"updated":updated,
+        "skipped":len(skipped),"skipped_details":skipped,
+        "message":f"Import complete: {inserted} added, {updated} updated, {len(skipped)} skipped.",
+    }
+
+
+@router.get("/export/excel")
+async def export_excel(
+    category:  Optional[str] = None,
+    low_stock: bool = False,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Export inventory in YOUR exact column format."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        raise HTTPException(500,"openpyxl not installed")
+
+    q = select(SparePart).order_by(SparePart.category, SparePart.name)
+    if category:  q = q.where(SparePart.category == category)
+    if low_stock: q = q.where(SparePart.quantity_on_hand <= SparePart.reorder_level)
+    parts = (await db.execute(q)).scalars().all()
+
+    wb = Workbook(); ws = wb.active; ws.title = "Inventory"
+    thin     = Side(style="thin",color="CCCCCC")
+    border   = Border(left=thin,right=thin,top=thin,bottom=thin)
+    hdr_font = Font(name="Arial",bold=True,color="FFFFFF",size=10)
+    hdr_fill = PatternFill("solid",start_color="1E3A5F")
+    data_font= Font(name="Arial",size=10)
+    enough   = PatternFill("solid",start_color="DCFCE7")
+    topup    = PatternFill("solid",start_color="FEF9C4")
+
+    ws.merge_cells("A1:L1")
+    ws["A1"] = f"CMMS Pro — Inventory Report  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(parts)} parts"
+    ws["A1"].font = Font(name="Arial",bold=True,size=11,color="FFFFFF")
+    ws["A1"].fill = hdr_fill
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.row_dimensions[1].height = 26
+
+    headers = ["category","No","Part Item","Description","Quantity",
+               "Rack No","Use at","Unit Price (RM)","Total Amount(RM)",
+               "Barcode","Threshold","Status(Enough/Topup)"]
+    for c,h in enumerate(headers,1):
+        cell = ws.cell(row=2,column=c,value=h)
+        cell.font=hdr_font; cell.fill=hdr_fill; cell.border=border
+        cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+    ws.row_dimensions[2].height = 24
+
+    topup_n=enough_n=0
+    for r,p in enumerate(parts,3):
+        qty   = p.quantity_on_hand or 0
+        reord = p.reorder_level    or 0
+        sts   = "Topup" if qty<=reord else "Enough"
+        if sts=="Topup": topup_n+=1
+        else: enough_n+=1
+        total = round(qty*p.unit_cost,2) if p.unit_cost else ""
+        row_data = [
+            p.category or "",
+            p.part_code, p.name,
+            p.description or "",
+            qty,
+            p.location or "",
+            getattr(p,"used_on_asset",None) or "",
+            p.unit_cost if p.unit_cost else "",
+            total,
+            getattr(p,"barcode",None) or "",
+            reord, sts,
+        ]
+        fill = enough if sts=="Enough" else topup
+        for c,v in enumerate(row_data,1):
+            cell=ws.cell(row=r,column=c,value=v)
+            cell.font=data_font; cell.fill=fill; cell.border=border
+            cell.alignment=Alignment(vertical="center",horizontal="right" if c in(5,8,9,11) else "left")
+        ws.row_dimensions[r].height=18
+
+    foot=len(parts)+3
+    ws.cell(row=foot,column=1,value="TOTAL").font=Font(name="Arial",bold=True,size=10)
+    ws.cell(row=foot,column=5,value=sum(p.quantity_on_hand or 0 for p in parts)).font=Font(name="Arial",bold=True)
+    ws.cell(row=foot,column=9,value=round(sum((p.quantity_on_hand or 0)*(p.unit_cost or 0) for p in parts),2)).font=Font(name="Arial",bold=True)
+    ws.cell(row=foot,column=12,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
+    ws.row_dimensions[foot].height=20
+
+    for i,w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18],1):
+        ws.column_dimensions[get_column_letter(i)].width=w
+    ws.freeze_panes="A3"
+
+    buf=io.BytesIO(); wb.save(buf); buf.seek(0)
+    fname=f"Inventory_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":f'attachment; filename="{fname}"'})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PATH PARAMETER ROUTES — after all static routes
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/")
+async def list_parts(
+    low_stock:bool=False, category:Optional[str]=None,
+    skip:int=0, limit:int=500,
+    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
 ):
     q = select(SparePart)
-    if low_stock:
-        q = q.where(SparePart.quantity_on_hand <= SparePart.reorder_level)
-    if category:
-        q = q.where(SparePart.category == category)
-    q = q.offset(skip).limit(limit).order_by(SparePart.name)
-    result = await db.execute(q)
-    return result.scalars().all()
+    if low_stock: q=q.where(SparePart.quantity_on_hand<=SparePart.reorder_level)
+    if category:  q=q.where(SparePart.category==category)
+    q=q.offset(skip).limit(limit).order_by(SparePart.category,SparePart.name)
+    return [_dict(p) for p in (await db.execute(q)).scalars().all()]
 
 
-@router.get("/{part_id}", response_model=SparePartOut)
-async def get_part(
-    part_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    result = await db.execute(select(SparePart).where(SparePart.id == part_id))
-    part = result.scalar_one_or_none()
-    if not part:
-        raise HTTPException(404, "Spare part not found")
-    return part
-
-
-@router.post("/", response_model=SparePartOut, status_code=201)
+@router.post("/", status_code=201)
 async def create_part(
-    body: SparePartCreate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    body:PartIn, db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
 ):
-    existing = await db.execute(select(SparePart).where(SparePart.part_code == body.part_code))
-    if existing.scalar_one_or_none():
-        raise HTTPException(400, "Part code already exists")
+    if not body.part_code: raise HTTPException(400,"part_code required")
+    if not body.name:      raise HTTPException(400,"name required")
+    if (await db.execute(select(SparePart).where(SparePart.part_code==body.part_code))).scalar_one_or_none():
+        raise HTTPException(400,f"Part code '{body.part_code}' already exists")
+    p=SparePart(
+        part_code=body.part_code, name=body.name,
+        category=body.category or "Other",
+        description=body.description,
+        quantity_on_hand=body.quantity_on_hand or 0,
+        reorder_level=body.reorder_level or 5,
+        unit_cost=body.unit_cost, supplier=body.supplier,
+        location=body.location, unit=body.unit or "pcs",
+    )
+    _safe_set(p,"barcode",      body.barcode)
+    _safe_set(p,"used_on_asset",body.used_on_asset)
+    db.add(p); await db.flush(); await db.refresh(p)
+    await ws_manager.broadcast_event(ROOM,"inventory.created",{"id":str(p.id),"name":p.name})
+    return _dict(p)
 
-    part = SparePart(**body.model_dump())
-    db.add(part)
-    await db.flush()
-    await db.refresh(part)
 
-    await ws_manager.broadcast_event(ROOM, "inventory.created", {
-        "id": str(part.id),
-        "part_code": part.part_code,
-        "name": part.name,
-        "quantity_on_hand": part.quantity_on_hand,
-    })
-    return part
+@router.get("/{part_id}")
+async def get_part(part_id:UUID,db:AsyncSession=Depends(get_db),_:User=Depends(get_current_user)):
+    return _dict(await _get(part_id,db))
 
 
-@router.patch("/{part_id}", response_model=SparePartOut)
+@router.patch("/{part_id}")
 async def update_part(
-    part_id: UUID,
-    body: SparePartUpdate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    part_id:UUID, body:PartIn,
+    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
 ):
-    result = await db.execute(select(SparePart).where(SparePart.id == part_id))
-    part = result.scalar_one_or_none()
-    if not part:
-        raise HTTPException(404, "Spare part not found")
-
-    for field, value in body.model_dump(exclude_unset=True).items():
-        setattr(part, field, value)
-
+    p=await _get(part_id,db)
+    updates=body.model_dump(exclude_unset=True,exclude_none=True)
+    for k,v in updates.items():
+        if k in("barcode","used_on_asset"): _safe_set(p,k,v)
+        else:
+            try: setattr(p,k,v)
+            except: pass
+    p.updated_at=datetime.utcnow()
     await db.flush()
-    await db.refresh(part)
-
-    await ws_manager.broadcast_event(ROOM, "inventory.updated", {
-        "id": str(part.id),
-        "quantity_on_hand": part.quantity_on_hand,
-        "low_stock": part.quantity_on_hand <= part.reorder_level,
-    })
-    return part
+    await ws_manager.broadcast_event(ROOM,"inventory.updated",{"id":str(p.id),"name":p.name})
+    return _dict(p)
 
 
-@router.delete("/{part_id}", status_code=204)
-async def delete_part(
-    part_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+@router.delete("/{part_id}",status_code=204)
+async def delete_part(part_id:UUID,db:AsyncSession=Depends(get_db),_:User=Depends(get_current_user)):
+    p=await _get(part_id,db)
+    await db.delete(p)
+    await ws_manager.broadcast_event(ROOM,"inventory.deleted",{"id":str(part_id)})
+
+
+@router.post("/{part_id}/restock")
+async def restock(
+    part_id:UUID, quantity:int,
+    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
 ):
-    result = await db.execute(select(SparePart).where(SparePart.id == part_id))
-    part = result.scalar_one_or_none()
-    if not part:
-        raise HTTPException(404, "Spare part not found")
-
-    await db.delete(part)
-    await ws_manager.broadcast_event(ROOM, "inventory.deleted", {"id": str(part_id)})
-
-
-@router.post("/{part_id}/restock", response_model=SparePartOut)
-async def restock_part(
-    part_id: UUID,
-    quantity: int,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    """Add stock to an existing spare part."""
-    if quantity <= 0:
-        raise HTTPException(400, "Quantity must be positive")
-
-    result = await db.execute(select(SparePart).where(SparePart.id == part_id))
-    part = result.scalar_one_or_none()
-    if not part:
-        raise HTTPException(404, "Spare part not found")
-
-    part.quantity_on_hand += quantity
+    if quantity<1: raise HTTPException(400,"Quantity must be at least 1")
+    p=await _get(part_id,db)
+    p.quantity_on_hand+=quantity
+    p.updated_at=datetime.utcnow()
     await db.flush()
-
-    await ws_manager.broadcast_event(ROOM, "inventory.restocked", {
-        "id": str(part.id),
-        "part_code": part.part_code,
-        "quantity_on_hand": part.quantity_on_hand,
-        "low_stock": part.quantity_on_hand <= part.reorder_level,
-    })
-    return part
+    await ws_manager.broadcast_event(ROOM,"inventory.restocked",{"id":str(p.id),"name":p.name,"new_qty":p.quantity_on_hand})
+    return _dict(p)

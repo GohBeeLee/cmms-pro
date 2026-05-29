@@ -95,6 +95,7 @@ class WorkOrderCreate(BaseModel):
     description: Optional[str] = None
     due_date: Optional[datetime] = None
     estimated_hours: Optional[float] = None
+    affected_downtime: bool = True
 
 class WorkOrderUpdate(BaseModel):
     priority: Optional[Priority] = None
@@ -104,6 +105,7 @@ class WorkOrderUpdate(BaseModel):
     due_date: Optional[datetime] = None
     estimated_hours: Optional[float] = None
     actual_hours: Optional[float] = None
+    affected_downtime: Optional[bool] = None
 
 class WorkOrderOut(BaseModel):
     id: UUID
@@ -118,6 +120,7 @@ class WorkOrderOut(BaseModel):
     due_date: Optional[datetime]
     estimated_hours: Optional[float]
     actual_hours: Optional[float]
+    affected_downtime: bool
     completed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -202,6 +205,8 @@ class SparePartCreate(BaseModel):
     unit_cost: Optional[float] = None
     supplier: Optional[str] = None
     location: Optional[str] = None
+    barcode: Optional[str] = None
+    used_on_asset: Optional[str] = None
 
 class SparePartUpdate(BaseModel):
     name: Optional[str] = None
@@ -212,6 +217,8 @@ class SparePartUpdate(BaseModel):
     unit_cost: Optional[float] = None
     supplier: Optional[str] = None
     location: Optional[str] = None
+    barcode: Optional[str] = None
+    used_on_asset: Optional[str] = None
 
 class SparePartOut(BaseModel):
     id: UUID
@@ -225,6 +232,8 @@ class SparePartOut(BaseModel):
     unit_cost: Optional[float]
     supplier: Optional[str]
     location: Optional[str]
+    barcode: Optional[str]
+    used_on_asset: Optional[str]
     created_at: datetime
 
     model_config = {"from_attributes": True}

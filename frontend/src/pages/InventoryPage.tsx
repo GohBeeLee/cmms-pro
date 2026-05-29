@@ -9,7 +9,7 @@ import { Modal, Spinner, EmptyState, PageHeader } from '../components/ui'
 const EMPTY_FORM = {
   part_code: '', name: '', description: '', category: '',
   unit: 'pcs', quantity_on_hand: 0, reorder_level: 5,
-  unit_cost: '', supplier: '', location: '',
+  unit_cost: '', supplier: '', location: '', barcode: '',
 }
 
 export default function InventoryPage() {
@@ -108,7 +108,7 @@ export default function InventoryPage() {
           <table className="w-full">
             <thead>
               <tr>
-                {['Part Code', 'Name', 'Category', 'In Stock', 'Reorder Level', 'Unit Cost', 'Supplier', 'Actions'].map(h => (
+                {['Part Code', 'Name', 'Category', 'Barcode', 'In Stock', 'Reorder Level', 'Unit Cost', 'Supplier', 'Actions'].map(h => (
                   <th key={h} className="table-header">{h}</th>
                 ))}
               </tr>
@@ -126,6 +126,7 @@ export default function InventoryPage() {
                       </span>
                     </td>
                     <td className="table-cell text-gray-500">{p.category ?? '—'}</td>
+                    <td className="table-cell font-mono text-xs text-gray-500">{p.barcode ?? '—'}</td>
                     <td className={`table-cell font-semibold ${isLow ? 'text-orange-600' : 'text-gray-900'}`}>
                       {p.quantity_on_hand} {p.unit}
                     </td>
@@ -162,6 +163,7 @@ export default function InventoryPage() {
               { key: 'category', label: 'Category' },
               { key: 'supplier', label: 'Supplier' },
               { key: 'location', label: 'Storage Location' },
+              { key: 'barcode', label: 'Barcode' },
             ].map(({ key, label }) => (
               <div key={key}>
                 <label className="label">{label}</label>

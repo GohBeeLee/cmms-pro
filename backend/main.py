@@ -28,6 +28,7 @@ from routers.requests import router as requests_router
 from routers.export_import import router as data_router
 from routers.users import router as users_router
 from routers.stock import router as stock_router
+from routers.analysis import router as analysis_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -53,22 +54,30 @@ async def run_pm_check():
             await db.rollback()
 
 
+async def ensure_schema_updates():
+    """Apply lightweight SQLite-safe schema updates for existing local databases."""
+    if not settings.DATABASE_URL.startswith("sqlite"):
+        return
+    async with engine.begin() as conn:
+        columns = (await conn.execute(text("PRAGMA table_info(work_orders)"))).mappings().all()
+        names = {col["name"] for col in columns}
+        if "affected_downtime" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN affected_downtime BOOLEAN NOT NULL DEFAULT 1"))
+        spare_columns = (await conn.execute(text("PRAGMA table_info(spare_parts)"))).mappings().all()
+        spare_names = {col["name"] for col in spare_columns}
+        if "barcode" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN barcode VARCHAR(100)"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_spare_parts_barcode ON spare_parts (barcode)"))
+        if "used_on_asset" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN used_on_asset VARCHAR(200)"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_schema_updates()
     logger.info("Database tables ready")
-    from db import AsyncSessionLocal
-    from models import User
-    async with AsyncSessionLocal() as db:
-        result = await db.execute(select(func.count()).select_from(User))
-        if result.scalar() == 0:
-            logger.info("Auto-seeding...")
-            try:
-                import seed; await seed.seed()
-                logger.info("Seed complete")
-            except Exception as e:
-                logger.error("Seed failed: %s", e)
     await ws_manager.startup()
     scheduler.add_job(run_pm_check, "interval", hours=1, id="pm_check")
     scheduler.start()
@@ -96,6 +105,7 @@ app.include_router(requests_router)    # public — no auth needed
 app.include_router(data_router)        # export + import (Excel)
 app.include_router(users_router)       # technician list for assignment
 app.include_router(stock_router)       # stock in/out + history
+app.include_router(analysis_router)    # work order downtime analysis
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ class CompletionForm(BaseModel):
     root_cause:        str
     actions_taken:     str
     actual_hours:      float
+    affected_downtime: bool = True
     remarks:           Optional[str] = None
     parts_used:        list[dict] = []   # [{spare_part_id, quantity_used}]
     completion_photos: list[PhotoEntry] = []
@@ -50,6 +51,7 @@ class WOCreate(BaseModel):
     description:      Optional[str] = None
     due_date:         Optional[str] = None
     estimated_hours:  Optional[float] = None
+    affected_downtime: bool = True
 
 class WOUpdate(BaseModel):
     status:           Optional[str] = None
@@ -58,6 +60,7 @@ class WOUpdate(BaseModel):
     description:      Optional[str] = None
     due_date:         Optional[str] = None
     actual_hours:     Optional[float] = None
+    affected_downtime: Optional[bool] = None
     assigned_to_user: Optional[str] = None
 
 
@@ -94,6 +97,7 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "status":       wo.status.value  if wo.status   else None,
         "actual_hours": wo.actual_hours,
         "estimated_hours": wo.estimated_hours,
+        "affected_downtime": bool(getattr(wo, "affected_downtime", True)),
         "due_date":     wo.due_date.isoformat()     if wo.due_date     else None,
         "created_at":   wo.created_at.isoformat()   if wo.created_at   else None,
         "updated_at":   wo.updated_at.isoformat()   if wo.updated_at   else None,
@@ -164,6 +168,7 @@ async def create_work_order(
         title           = body.title,
         description     = body.description,
         estimated_hours = body.estimated_hours,
+        affected_downtime = body.affected_downtime,
         created_by      = current_user.id,
     )
     if body.due_date:
@@ -199,6 +204,8 @@ async def update_work_order(
         wo.due_date = datetime.fromisoformat(body.due_date.replace("Z",""))
     if body.actual_hours is not None:
         wo.actual_hours = body.actual_hours
+    if body.affected_downtime is not None:
+        wo.affected_downtime = body.affected_downtime
     if body.assigned_to_user:
         wo.assigned_to_user = UUID(body.assigned_to_user)
     wo.updated_at = datetime.utcnow()
@@ -273,6 +280,7 @@ async def complete_work_order(
     wo.status       = WorkOrderStatus.completed
     wo.completed_at = datetime.utcnow()
     wo.actual_hours = body.actual_hours
+    wo.affected_downtime = body.affected_downtime
     wo.updated_at   = datetime.utcnow()
 
     comp = (
@@ -281,6 +289,7 @@ async def complete_work_order(
         f"Root cause    : {body.root_cause}\n"
         f"Actions taken : {body.actions_taken}\n"
         f"Actual hours  : {body.actual_hours}h\n"
+        f"Downtime type : {'Affected' if body.affected_downtime else 'Non affected'}\n"
     )
     if body.remarks:
         comp += f"Remarks       : {body.remarks}\n"

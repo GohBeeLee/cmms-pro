@@ -389,14 +389,14 @@ async def export_history(
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     # Title
-    ws.merge_cells("A1:M1")
+    ws.merge_cells("A1:N1")
     ws["A1"] = "CMMS Pro — Work Order History Report"
     ws["A1"].font      = Font(name="Arial", bold=True, size=13, color="1E3A5F")
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws["A1"].fill      = PatternFill("solid", start_color="EBF3FB")
     ws.row_dimensions[1].height = 30
 
-    ws.merge_cells("A2:M2")
+    ws.merge_cells("A2:N2")
     ws["A2"] = f"Generated: {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC   |   Total: {len(wos)} records"
     ws["A2"].font      = Font(name="Arial", italic=True, size=10, color="5A6A7A")
     ws["A2"].alignment = Alignment(horizontal="center")
@@ -408,7 +408,7 @@ async def export_history(
         "WO Number","Machine","Asset Code","Title",
         "Type","Priority","Status",
         "Operator","Problem Category","Root Cause",
-        "Downtime (hrs)","Request Date","Completed Date",
+        "Downtime Type","Downtime (hrs)","Request Date","Completed Date",
     ]
     hdr_font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
     hdr_fill = PatternFill("solid", start_color="1E3A5F")
@@ -457,6 +457,7 @@ async def export_history(
             parse_field(wo.description, "Submitted by") or "—",
             parse_field(wo.description, "Category")     or "—",
             parse_field(wo.description, "Root cause")   or "—",
+            "Affected" if getattr(wo, "affected_downtime", True) else "Non affected",
             downtime(wo),
             wo.created_at.strftime("%d %b %Y %H:%M")   if wo.created_at   else "—",
             wo.completed_at.strftime("%d %b %Y %H:%M") if wo.completed_at else "—",
@@ -468,7 +469,7 @@ async def export_history(
         ws.row_dimensions[r].height = 18
 
     # Column widths
-    for i, w in enumerate([16,24,14,34,14,12,14,20,22,22,14,18,18], 1):
+    for i, w in enumerate([16,24,14,34,14,12,14,20,22,22,16,14,18,18], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     ws.freeze_panes = "A5"

@@ -46,6 +46,7 @@ class UserRole(str, enum.Enum):
     admin = "admin"
     manager = "manager"
     technician = "technician"
+    production = "production"
     viewer = "viewer"
 
 class PMFrequency(str, enum.Enum):
@@ -109,6 +110,7 @@ class WorkOrder(Base):
     due_date: Mapped[datetime | None] = mapped_column(DateTime)
     estimated_hours: Mapped[float | None] = mapped_column(Float)
     actual_hours: Mapped[float | None] = mapped_column(Float)
+    affected_downtime: Mapped[bool] = mapped_column(Boolean, default=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -167,6 +169,8 @@ class SparePart(Base):
     unit_cost: Mapped[float | None] = mapped_column(Float)
     supplier: Mapped[str | None] = mapped_column(String(150))
     location: Mapped[str | None] = mapped_column(String(100))
+    barcode: Mapped[str | None] = mapped_column(String(100), index=True)
+    used_on_asset: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

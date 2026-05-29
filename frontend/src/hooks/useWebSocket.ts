@@ -7,7 +7,7 @@ const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000'
 // Map WS room → React Query cache keys to invalidate
 const ROOM_QUERY_MAP: Record<string, string[][]> = {
   assets:      [['assets'], ['kpi']],
-  work_orders: [['work_orders'], ['kpi']],
+  work_orders: [['work_orders'], ['analysis'], ['kpi']],
   inventory:   [['inventory'], ['kpi']],
   tasks:       [['work_orders'], ['tasks']],
   pm_schedules:[['pm_schedules'], ['kpi']],

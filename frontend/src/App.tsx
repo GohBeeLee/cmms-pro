@@ -8,6 +8,7 @@ import AssetsPage from './pages/AssetsPage'
 import WorkOrdersPage from './pages/WorkOrdersPage'
 import InventoryPage from './pages/InventoryPage'
 import PMSchedulesPage from './pages/PMSchedulesPage'
+import UsersPage from './pages/UsersPage'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -37,6 +38,7 @@ export default function App() {
                   <Route path="/work-orders" element={<WorkOrdersPage />} />
                   <Route path="/inventory"   element={<InventoryPage />} />
                   <Route path="/pm"          element={<PMSchedulesPage />} />
+                  <Route path="/users"       element={<UsersPage />} />
                   <Route path="*"            element={<Navigate to="/" replace />} />
                 </Routes>
               </Layout>

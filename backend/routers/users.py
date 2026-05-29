@@ -1,10 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
-from typing import Optional
-import hashlib
-import bcrypt
+from uuid import UUID
 
 from db import get_db
 from models import User, UserRole
@@ -58,3 +55,35 @@ async def create_user(
     db.add(user)
     await db.flush()
     return user
+
+
+@router.patch("/{user_id}", response_model=UserOut)
+async def update_user(
+    user_id: UUID,
+    body: UserUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    updates = body.model_dump(exclude_unset=True)
+    for key, value in updates.items():
+        setattr(user, key, value)
+    await db.flush()
+    return user
+
+
+@router.delete("/{user_id}", status_code=204)
+async def delete_user(
+    user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if user_id == current_user.id:
+        raise HTTPException(400, "You cannot delete your own account")
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found")
+    user.is_active = False
+    await db.flush()

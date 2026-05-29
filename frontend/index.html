@@ -159,6 +159,8 @@ const BCOLS={
   inactive:'#f1f5f9;#475569',corrective:'#dbeafe;#1e40af',
   preventive:'#dcfce7;#166534',inspection:'#fef9c3;#854d0e',
   emergency:'#fee2e2;#991b1b',
+  affected:'#fee2e2;#991b1b',non_affected:'#dcfce7;#166534',
+  production:'#dcfce7;#166534',
 };
 
 function Badge({value}) {
@@ -771,6 +773,7 @@ function TechnicianBoard(){
   const [rootCause,setRootCause]=useState('');
   const [actions,setActions]=useState('');
   const [actualHours,setActualHours]=useState('');
+  const [affectedDowntime,setAffectedDowntime]=useState(true);
   const [remarks,setRemarks]=useState('');
   const [usedParts,setUsedParts]=useState([]);
   const [compPhotos,setCompPhotos]=useState([]);
@@ -801,7 +804,7 @@ function TechnicianBoard(){
 
   function openComplete(wo){
     setCompleting(wo);
-    setRootCause('');setActions('');setActualHours('');setRemarks('');setUsedParts([]);setCompPhotos([]);
+    setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);
     loadParts(wo.id);
   }
 
@@ -830,6 +833,7 @@ function TechnicianBoard(){
           root_cause:rootCause,
           actions_taken:actions,
           actual_hours:hrs,
+          affected_downtime:affectedDowntime,
           remarks:remarks||null,
           parts_used:usedParts.map(p=>({spare_part_id:p.spare_part_id,quantity_used:p.quantity_used})),
           completion_photos:photoData,
@@ -880,7 +884,7 @@ function TechnicianBoard(){
                 <div style={{flex:1}}>
                   <div style={{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px',flexWrap:'wrap'}}>
                     <span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</span>
-                    <Badge value={w.priority}/><Badge value={w.status}/>{w.type&&<Badge value={w.type}/>}
+                    <Badge value={w.priority}/><Badge value={w.status}/>{w.type&&<Badge value={w.type}/>}<Badge value={w.affected_downtime===false?'non_affected':'affected'}/>
                   </div>
                   <div style={{fontWeight:700,color:'#1e293b',fontSize:'15px',marginBottom:'4px'}}>{w.title}</div>
                   <div style={{fontSize:'12px',color:'#64748b',marginBottom:'6px'}}>
@@ -964,6 +968,14 @@ function TechnicianBoard(){
               </div>
 
               <div>
+                <label className="lbl">Downtime Type</label>
+                <select className="inp" value={affectedDowntime?'affected':'non_affected'} onChange={e=>setAffectedDowntime(e.target.value==='affected')}>
+                  <option value="affected">Affected downtime</option>
+                  <option value="non_affected">Non-affected downtime</option>
+                </select>
+              </div>
+
+              <div>
                 <label className="lbl">Root Cause <span style={{color:'#ef4444'}}>*</span></label>
                 <select className="inp" value={rootCause} onChange={e=>setRootCause(e.target.value)}>
                   <option value="">Select root cause…</option>
@@ -1043,6 +1055,11 @@ function HistoryLog(){
   const [selected,setSelected]=useState(null);
   const [dateFrom,setDateFrom]=useState('');
   const [dateTo,setDateTo]=useState('');
+  const [locationFilter,setLocationFilter]=useState('');
+  const [locations,setLocations]=useState([]);
+  const [analysis,setAnalysis]=useState(null);
+  const [analysisLoading,setAnalysisLoading]=useState(true);
+  const RC=window.Recharts;
 
   async function load(){
     setLoading(true);
@@ -1053,7 +1070,24 @@ function HistoryLog(){
       setWos(data.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)));
     }catch(e){toast(e.message,'err');}finally{setLoading(false);}
   }
+  async function loadAnalysis(){
+    setAnalysisLoading(true);
+    try{
+      const qs=[];
+      if(dateFrom) qs.push('date_from='+encodeURIComponent(dateFrom));
+      if(dateTo) qs.push('date_to='+encodeURIComponent(dateTo));
+      if(locationFilter) qs.push('location='+encodeURIComponent(locationFilter));
+      setAnalysis(await api('/analysis/work-orders'+(qs.length?'?'+qs.join('&'):'')));
+    }catch(e){toast(e.message,'err');}finally{setAnalysisLoading(false);}
+  }
+  async function loadLocations(){
+    try{setLocations(await api('/analysis/locations'));}catch(e){}
+  }
   useEffect(()=>{load();},[statusFilter]);
+  useEffect(()=>{loadAnalysis();},[dateFrom,dateTo,locationFilter]);
+  useEffect(()=>{const t=setInterval(loadAnalysis,30000);return()=>clearInterval(t);},[dateFrom,dateTo,locationFilter]);
+  useEffect(()=>{loadLocations();},[]);
+  useWS('work_orders',()=>{load();loadAnalysis();});
 
   // Extract all embedded base64 photos from description
   // Handles both [OPERATOR_PHOTOS] and [COMPLETION_PHOTOS] sections
@@ -1125,7 +1159,52 @@ function HistoryLog(){
           <label className="lbl">To Date</label>
           <input type="date" className="inp" value={dateTo} onChange={e=>setDateTo(e.target.value)}/>
         </div>
+        <div style={{minWidth:'180px'}}>
+          <label className="lbl">Location</label>
+          <select className="inp" value={locationFilter} onChange={e=>setLocationFilter(e.target.value)}>
+            <option value="">All locations</option>
+            {locations.map(x=><option key={x.location} value={x.location}>{x.location}</option>)}
+          </select>
+        </div>
         <button className="btn btn-primary" onClick={load}>🔄 Refresh</button>
+      </div>
+
+      <div className="card" style={{marginBottom:'16px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'14px'}}>
+          <div>
+            <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Downtime Analysis</div>
+            <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Affected vs non-affected downtime for the selected date range and location</div>
+          </div>
+          <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'5px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>Live</span>
+        </div>
+
+        <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:'12px',marginBottom:'16px'}}>
+          {[
+            ['Affected Hrs',analysis?.summary?.affected_downtime_hrs??0,'#fee2e2','#991b1b'],
+            ['Non-Affected Hrs',analysis?.summary?.non_affected_downtime_hrs??0,'#dcfce7','#166534'],
+            ['Total Cases',analysis?.summary?.total_cases??0,'#dbeafe','#1e40af'],
+            ['Avg Downtime',(analysis?.summary?.avg_downtime_hrs??0)+'h','#ede9fe','#5b21b6'],
+          ].map(([label,value,bg,color])=>(
+            <div key={label} style={{background:bg,borderRadius:'10px',padding:'12px'}}>
+              <div style={{fontSize:'20px',fontWeight:800,color}}>{value}</div>
+              <div style={{fontSize:'12px',color:'#475569',marginTop:'2px'}}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {analysisLoading?<Spinner/>:(analysis?.downtime_graph||[]).length===0?<Empty msg="No downtime data for selected filters"/>:(
+          <RC.ResponsiveContainer width="100%" height={260}>
+            <RC.BarChart data={analysis.downtime_graph}>
+              <RC.CartesianGrid strokeDasharray="3 3" vertical={false}/>
+              <RC.XAxis dataKey="date" tick={{fontSize:12}}/>
+              <RC.YAxis tick={{fontSize:12}}/>
+              <RC.Tooltip formatter={(v)=>v+'h'}/>
+              <RC.Legend/>
+              <RC.Bar dataKey="affected_downtime" name="Affected" stackId="downtime" fill="#ef4444"/>
+              <RC.Bar dataKey="non_affected_downtime" name="Non-affected" stackId="downtime" fill="#10b981"/>
+            </RC.BarChart>
+          </RC.ResponsiveContainer>
+        )}
       </div>
 
       <div style={{fontSize:'12px',color:'#94a3b8',marginBottom:'10px'}}>{filtered.length} records found</div>
@@ -1134,7 +1213,7 @@ function HistoryLog(){
         <div className="card" style={{padding:0}}>
           <div className="ovf"><table>
             <thead><tr>
-              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h}>{h}</th>)}
+              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime Type','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(w=>{
               const isReq=w.title.startsWith('[Request]');
@@ -1151,6 +1230,7 @@ function HistoryLog(){
                   <td style={{color:'#64748b',fontSize:'12px'}}>{operator||'—'}</td>
                   <td><Badge value={w.status}/></td>
                   <td style={{color:'#64748b',fontSize:'12px',maxWidth:'120px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={rootCause}>{rootCause}</td>
+                  <td><Badge value={w.affected_downtime===false?'non_affected':'affected'}/></td>
                   <td style={{fontWeight:600,color:'#b45309'}}>{actualHrs}</td>
                   <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{fmtDate(w.created_at)}</td>
                   <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{w.completed_at?fmtDate(w.completed_at):'—'}</td>
@@ -1181,6 +1261,7 @@ function HistoryLog(){
                 <div><strong>Status:</strong> <Badge value={selected.status}/></div>
                 <div><strong>Priority:</strong> <Badge value={selected.priority}/></div>
                 <div><strong>Type:</strong> <Badge value={selected.type}/></div>
+                <div><strong>Downtime Type:</strong> <Badge value={selected.affected_downtime===false?'non_affected':'affected'}/></div>
                 <div><strong>Request Date:</strong> {fmtDT(selected.created_at)}</div>
                 <div><strong>Completed:</strong> {selected.completed_at?fmtDT(selected.completed_at):'Not completed'}</div>
                 <div><strong>Actual Hours:</strong> {selected.actual_hours?selected.actual_hours+'h':calcDowntime(selected.created_at,selected.completed_at).display}</div>
@@ -2293,6 +2374,40 @@ function StockScanner(){
 }
 
 // ── App Shell ──────────────────────────────────────────────────────────────
+function UsersManagement(){
+  const [users,setUsers]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [modal,setModal]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const [form,setForm]=useState({name:'',email:'',password:'',role:'technician'});
+  async function load(){setLoading(true);try{setUsers(await api('/users/'));}catch(e){toast(e.message,'err');}finally{setLoading(false);}}
+  useEffect(()=>{load();},[]);
+  async function save(){
+    if(!form.name.trim()||!form.email.trim()||!form.password.trim()){toast('Name, email and password are required','err');return;}
+    setSaving(true);
+    try{await api('/users/',{method:'POST',body:JSON.stringify(form)});toast('User added');setModal(false);setForm({name:'',email:'',password:'',role:'technician'});load();}
+    catch(e){toast(e.message,'err');}
+    finally{setSaving(false);}
+  }
+  return <div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+      <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Users</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Add technicians, managers, viewers, and admins</p></div>
+      <button className="btn btn-primary" onClick={()=>setModal(true)}>+ Add User</button>
+    </div>
+    <div className="card" style={{padding:0}}>{loading?<Spinner/>:users.length===0?<Empty msg="No users found"/>:<div className="ovf"><table>
+      <thead><tr>{['Name','Email','Role','Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+      <tbody>{users.map(u=><tr key={u.id}><td style={{fontWeight:700}}>{u.name}</td><td style={{color:'#64748b'}}>{u.email}</td><td><Badge value={u.role}/></td><td><Badge value={u.is_active?'active':'inactive'}/></td></tr>)}</tbody>
+    </table></div>}</div>
+    {modal&&<Modal title="Add User" onClose={()=>setModal(false)}><div style={{display:'grid',gap:'12px'}}>
+      <div><label className="lbl">Name *</label><input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></div>
+      <div><label className="lbl">Email *</label><input className="inp" type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></div>
+      <div><label className="lbl">Password *</label><input className="inp" type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></div>
+      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','viewer','admin','production'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
+      <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}><button className="btn btn-primary" style={{flex:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save User'}</button><button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button></div>
+    </div></Modal>}
+  </div>;
+}
+
 const NAV=[
   {key:'dashboard', label:'Dashboard',    icon:'📊'},
   {key:'inbox',     label:'Admin Inbox',  icon:'📥'},
@@ -2302,7 +2417,8 @@ const NAV=[
   {key:'assets',    label:'Assets',       icon:'🏭'},
   {key:'inventory', label:'Inventory',    icon:'📦'},
   {key:'stock',     label:'Stock In/Out', icon:'🔲'},
-  {key:'pm',        label:'PM Schedules', icon:'📅'},
+  //{key:'pm',        label:'PM Schedules', icon:'📅'},
+  {key:'users',     label:'Users',        icon:'👥'},
 ];
 
 function App(){
@@ -2313,7 +2429,7 @@ function App(){
     if(token) api('/auth/me').then(setUser).catch(()=>localStorage.removeItem('cmms_token'));
   },[]);
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,inbox:AdminInbox,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:Inventory,stock:StockScanner,pm:PMSchedules};
+  const pages={dashboard:Dashboard,inbox:AdminInbox,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:Inventory,stock:StockScanner,pm:PMSchedules,users:UsersManagement};
   const PageComp=pages[page]||Dashboard;
   return (
     <div>

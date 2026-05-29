@@ -11,6 +11,7 @@ const NAV = [
   { to: '/work-orders',icon: ClipboardList,   label: 'Work Orders' },
   { to: '/inventory',  icon: Package,         label: 'Inventory' },
   { to: '/pm',         icon: Calendar,        label: 'PM Schedules' },
+  { to: '/users',      icon: Users,           label: 'Users' },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {

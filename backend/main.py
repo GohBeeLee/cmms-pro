@@ -27,6 +27,7 @@ from routers.pm_schedules import router as pm_router, _generate_wo_from_pm
 from routers.requests import router as requests_router
 from routers.export_import import router as data_router
 from routers.users import router as users_router
+from routers.stock import router as stock_router
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ app.include_router(pm_router)
 app.include_router(requests_router)    # public — no auth needed
 app.include_router(data_router)        # export + import (Excel)
 app.include_router(users_router)       # technician list for assignment
+app.include_router(stock_router)       # stock in/out + history
 
 
 # ── WebSocket ─────────────────────────────────────────────────────────────

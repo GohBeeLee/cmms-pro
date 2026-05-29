@@ -12,12 +12,9 @@
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
 <style>
   *{box-sizing:border-box;}
-  html, body{width:100%;overflow-x:hidden;}
-  .wo-card,.card{min-width:0; max-width:100%;}
-  img{max-width:100%;}
   body{font-family:'Segoe UI',system-ui,sans-serif;background:#f8fafc;margin:0;}
   .sidebar{width:220px;min-height:100vh;background:#1e293b;position:fixed;top:0;left:0;z-index:40;display:flex;flex-direction:column;}
-  .main-content{ margin-left:220px;padding:28px; width:calc(100% - 220px); min-width:0; overflow-x:hidden;}
+  .main-content{margin-left:220px;padding:28px;}
   .nav-link{display:flex;align-items:center;gap:10px;padding:10px 14px;color:#94a3b8;border-radius:8px;margin:2px 8px;cursor:pointer;font-size:14px;transition:all 0.15s;}
   .nav-link:hover,.nav-link.active{background:#2563eb;color:#fff;}
   .card{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.07);border:1px solid #f1f5f9;padding:20px;}
@@ -464,7 +461,7 @@ function Dashboard(){
         </div>
 
         {/* Charts */}
-        {RC&&<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'18px', width:'100%', minWidth:0}}>
+        {RC&&<div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'18px'}}>
           <div className="card"><h3 style={{fontWeight:700,color:'#1e293b',marginBottom:'14px',fontSize:'14px'}}>Work Orders by Status</h3>
             {cS.length>0?<RC.ResponsiveContainer width="100%" height={200}><RC.PieChart><RC.Pie data={cS} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={75}>{cS.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</RC.Pie><RC.Tooltip/><RC.Legend/></RC.PieChart></RC.ResponsiveContainer>:<Empty msg="No data"/>}
           </div>
@@ -678,7 +675,7 @@ function AdminInbox(){
 
       {selected&&(
         <Modal title={'Assign: '+selected.wo_number+' — '+(selected.asset?selected.asset.name:'—')} onClose={()=>setSelected(null)} large>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'20px',width:'100%', minWidth:0}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div>
               <div className="section-title">Request Details</div>
               <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',marginBottom:'12px'}}>
@@ -879,7 +876,7 @@ function TechnicianBoard(){
           const dt=calcDowntime(w.created_at,null);
           return (
             <div key={w.id} className="wo-card" style={{borderLeft:'4px solid '+(priorityBorder[w.priority]||'#e2e8f0'),background:priorityBg[w.priority]||'#fff'}}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px',flexWrap:'wrap'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px'}}>
                 <div style={{flex:1}}>
                   <div style={{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px',flexWrap:'wrap'}}>
                     <span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</span>
@@ -889,7 +886,7 @@ function TechnicianBoard(){
                   <div style={{fontSize:'12px',color:'#64748b',marginBottom:'6px'}}>
                     🏭 {w.asset?.name||'—'} &nbsp;·&nbsp; 📍 {w.asset?.location||'—'}
                   </div>
-                  {w.description&&<div style={{fontSize:'12px',color:'#374151',background:'rgba(255,255,255,0.7)',overflowWrap:'break-word',wordBreak:'break-word', minWidth:0,borderRadius:'6px',padding:'8px 10px',marginBottom:'8px',whiteSpace:'pre-line',maxHeight:'80px',overflow:'hidden'}}>{w.description}</div>}
+                  {w.description&&<div style={{fontSize:'12px',color:'#374151',background:'rgba(255,255,255,0.7)',borderRadius:'6px',padding:'8px 10px',marginBottom:'8px',whiteSpace:'pre-line',maxHeight:'80px',overflow:'hidden'}}>{w.description}</div>}
 
                   {/* Operator photos shown on board */}
                   {photos.length>0&&(
@@ -905,7 +902,7 @@ function TechnicianBoard(){
                     <span style={{marginLeft:'12px',color:'#b45309',fontWeight:600}}>⏱ Waiting: {dt.display}</span>
                   </div>
                 </div>
-                <div style={{display:'flex',flexDirection:'column',gap:'6px',minWidth:'130px',flexShrink:0}}>
+                <div style={{display:'flex',flexDirection:'column',gap:'6px',minWidth:'130px'}}>
                   <button className="btn btn-success" style={{fontSize:'12px',padding:'7px 12px'}} onClick={()=>openComplete(w)}>✅ Complete Job</button>
                   <button className="btn btn-secondary" style={{fontSize:'12px',padding:'7px 12px'}} onClick={async()=>{setPartsModal(w);await loadParts(w.id);}}>🔩 Check Parts</button>
                   <select className="inp" style={{fontSize:'12px',padding:'6px 8px'}} value={w.status} onChange={e=>updateStatus(w.id,e.target.value)}>
@@ -945,7 +942,7 @@ function TechnicianBoard(){
       {/* Completion form modal */}
       {completing&&(
         <Modal title={'Complete Work Order: '+completing.wo_number} onClose={()=>setCompleting(null)} large>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'20px',width:'100%', minWidth:0}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
 
             {/* Left column */}
             <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
@@ -1175,7 +1172,7 @@ function HistoryLog(){
       {/* Detail modal */}
       {selected&&(
         <Modal title={selected.wo_number+' — '+( selected.asset?.name||'—')} onClose={()=>setSelected(null)} large>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'20px',width:'100%', minWidth:0}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div>
               <div className="section-title">Work Order Details</div>
               <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',lineHeight:1.8,marginBottom:'12px'}}>
@@ -1625,7 +1622,7 @@ function Inventory(){
       {modal&&(
         <Modal title={editPart?'Edit Part: '+editPart.part_code:'Add Spare Part'} onClose={()=>{setModal(false);setEditPart(null);}}>
           <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'10px',width:'100%', minWidth:0}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">No (Part Code) *</label>
                 <input className="inp" disabled={!!editPart} value={form.part_code} onChange={e=>setForm({...form,part_code:e.target.value})}/>
               </div>
@@ -1664,7 +1661,7 @@ function Inventory(){
                 <input className="inp" value={form.unit} onChange={e=>setForm({...form,unit:e.target.value})} placeholder="pcs"/>
               </div>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'10px',width:'100%', minWidth:0}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">Supplier</label>
                 <input className="inp" value={form.supplier} onChange={e=>setForm({...form,supplier:e.target.value})}/>
               </div>
@@ -1806,11 +1803,11 @@ function PMSchedules(){
           <div><label className="lbl">Asset *</label><select className="inp" value={form.asset_id} onChange={e=>setForm({...form,asset_id:e.target.value})}><option value="">Select asset…</option>{assets.map(a=><option key={a.id} value={a.id}>{a.name} ({a.asset_code})</option>)}</select></div>
           <div><label className="lbl">Title *</label><input className="inp" value={form.title} onChange={e=>setForm({...form,title:e.target.value})}/></div>
           <div><label className="lbl">Description</label><textarea className="inp" rows={2} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'10px',width:'100%', minWidth:0}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
             <div><label className="lbl">Frequency</label><select className="inp" value={form.frequency} onChange={e=>setForm({...form,frequency:e.target.value})}>{FREQS.map(f=><option key={f} value={f}>{f}</option>)}</select></div>
             <div><label className="lbl">Interval (days)</label><input type="number" className="inp" value={form.interval_days} onChange={e=>setForm({...form,interval_days:e.target.value})}/></div>
           </div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'10px',width:'100%', minWidth:0}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
             <div><label className="lbl">First Due Date *</label><input type="datetime-local" className="inp" value={form.next_due} onChange={e=>setForm({...form,next_due:e.target.value})}/></div>
             <div><label className="lbl">Est. Hours</label><input type="number" className="inp" value={form.estimated_hours} onChange={e=>setForm({...form,estimated_hours:e.target.value})}/></div>
           </div>
@@ -1824,6 +1821,477 @@ function PMSchedules(){
   );
 }
 
+
+// ── Stock Scanner ──────────────────────────────────────────────────────────
+function StockScanner(){
+  const [mode,setMode]       = useState('out');       // 'in' | 'out'
+  const [barcode,setBarcode] = useState('');
+  const [scanning,setScanning]= useState(false);
+  const [part,setPart]       = useState(null);
+  const [qty,setQty]         = useState(1);
+  const [reason,setReason]   = useState('');
+  const [reference,setReference]= useState('');
+  const [result,setResult]   = useState(null);        // last action result
+  const [history,setHistory] = useState([]);
+  const [histLoading,setHistLoading]= useState(false);
+  const [histFilter,setHistFilter]= useState('');
+  const [histDateFrom,setHistDateFrom]= useState('');
+  const [histDateTo,setHistDateTo]= useState('');
+  const [activeTab,setActiveTab]= useState('scan');   // 'scan' | 'history'
+  const barcodeRef = useRef(null);
+
+  // Auto-focus barcode input when tab is scan
+  useEffect(()=>{ if(activeTab==='scan') barcodeRef.current?.focus(); },[activeTab]);
+
+  // Load history
+  async function loadHistory(){
+    setHistLoading(true);
+    try{
+      let url='/stock/history?limit=200';
+      if(histFilter)   url+='&movement='+histFilter;
+      if(histDateFrom) url+='&date_from='+histDateFrom;
+      if(histDateTo)   url+='&date_to='+histDateTo;
+      setHistory(await api(url));
+    }catch(e){toast(e.message,'err');}
+    finally{setHistLoading(false);}
+  }
+
+  useEffect(()=>{ if(activeTab==='history') loadHistory(); },[activeTab,histFilter,histDateFrom,histDateTo]);
+  useWS('inventory', ev=>{
+    if(activeTab==='history') loadHistory();
+    // Refresh part card if it's the same part
+    if(part && (ev.payload?.part_id===part.id)) lookupBarcode(barcode);
+  });
+
+  // Lookup by barcode
+  async function lookupBarcode(code){
+    const b = (code||barcode).trim();
+    if(!b) return;
+    setScanning(true); setPart(null); setResult(null); setQty(1); setReason(''); setReference('');
+    try{
+      const data = await api('/stock/scan/'+encodeURIComponent(b));
+      setPart(data);
+      // Auto-focus qty field after scan
+      setTimeout(()=>document.getElementById('qty-input')?.focus(), 100);
+    }catch(e){
+      toast(e.message,'err');
+      setPart(null);
+    }finally{setScanning(false);}
+  }
+
+  // Handle barcode input — scan on Enter key
+  function onBarcodeKey(e){
+    if(e.key==='Enter'){
+      e.preventDefault();
+      lookupBarcode();
+    }
+  }
+
+  // Submit stock in or out
+  async function submitMove(){
+    if(!part){ toast('Please scan a part first','err'); return; }
+    if(qty<1){ toast('Quantity must be at least 1','err'); return; }
+    if(mode==='out' && qty>part.quantity_on_hand){
+      toast(`Only ${part.quantity_on_hand} ${part.unit||'pcs'} available`,'err'); return;
+    }
+    try{
+      const endpoint = mode==='in' ? '/stock/in' : '/stock/out';
+      const data = await api(endpoint,{
+        method:'POST',
+        body:JSON.stringify({
+          part_id:   part.id,
+          quantity:  qty,
+          reason:    reason||null,
+          reference: reference||null,
+        }),
+      });
+      setResult(data);
+      toast(data.message, data.low_stock?'err':'ok');
+      // Refresh part card with new qty
+      setPart(data.part);
+      // Clear fields for next scan
+      setQty(1); setReason(''); setReference('');
+      setBarcode('');
+      // Re-focus barcode for next item
+      setTimeout(()=>barcodeRef.current?.focus(), 200);
+    }catch(e){ toast(e.message,'err'); }
+  }
+
+  function fmtDT(d){
+    if(!d) return '—';
+    const s=String(d); const dt=toUTC(s.endsWith('Z')||s.includes('+') ? s : s+'Z');
+    return dt.toLocaleString('en-MY',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  }
+
+  const moveColor = {
+    stock_in: {bg:'#dcfce7',color:'#166534',label:'Stock In',icon:'📥'},
+    stock_out:{bg:'#fef9c3',color:'#854d0e',label:'Stock Out',icon:'📤'},
+    restock:  {bg:'#dbeafe',color:'#1e40af',label:'Restock',  icon:'🔄'},
+    adjustment:{bg:'#f1f5f9',color:'#475569',label:'Adjust',  icon:'⚙️'},
+  };
+
+  return (
+    <div>
+      {/* Header */}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
+        <div>
+          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Stock Scanner</h1>
+          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Scan barcode to stock in or out spare parts</p>
+        </div>
+        <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>downloadFile('/stock/history/export.xlsx','StockHistory.xlsx')}>
+          📊 Export History
+        </button>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:'flex',gap:'8px',marginBottom:'20px'}}>
+        {[['scan','🔍 Scan & Move'],['history','📋 Movement History']].map(([k,l])=>(
+          <button key={k} onClick={()=>setActiveTab(k)} style={{
+            padding:'8px 20px',borderRadius:'8px',border:'none',cursor:'pointer',
+            fontSize:'14px',fontWeight:600,
+            background:activeTab===k?'#2563eb':'#f1f5f9',
+            color:activeTab===k?'#fff':'#64748b',
+          }}>{l}</button>
+        ))}
+      </div>
+
+      {/* ── SCAN TAB ── */}
+      {activeTab==='scan'&&(
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+
+          {/* Left: Scanner input */}
+          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+
+            {/* Mode toggle */}
+            <div className="card" style={{padding:'16px'}}>
+              <div className="section-title" style={{marginBottom:'12px'}}>Transaction Type</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+                <div onClick={()=>setMode('out')} style={{
+                  padding:'16px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
+                  border:mode==='out'?'2px solid #f59e0b':'2px solid #e2e8f0',
+                  background:mode==='out'?'#fefce8':'#fff',
+                }}>
+                  <div style={{fontSize:'28px',marginBottom:'4px'}}>📤</div>
+                  <div style={{fontWeight:700,color:mode==='out'?'#b45309':'#64748b',fontSize:'14px'}}>Stock Out</div>
+                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Take parts from store</div>
+                </div>
+                <div onClick={()=>setMode('in')} style={{
+                  padding:'16px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
+                  border:mode==='in'?'2px solid #16a34a':'2px solid #e2e8f0',
+                  background:mode==='in'?'#f0fdf4':'#fff',
+                }}>
+                  <div style={{fontSize:'28px',marginBottom:'4px'}}>📥</div>
+                  <div style={{fontWeight:700,color:mode==='in'?'#16a34a':'#64748b',fontSize:'14px'}}>Stock In</div>
+                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Add parts to store</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Barcode input */}
+            <div className="card" style={{padding:'16px'}}>
+              <div className="section-title" style={{marginBottom:'12px'}}>Scan Barcode</div>
+              <div style={{display:'flex',gap:'8px',marginBottom:'12px'}}>
+                <input
+                  ref={barcodeRef}
+                  className="inp"
+                  placeholder="Scan or type barcode / part No…"
+                  value={barcode}
+                  onChange={e=>setBarcode(e.target.value)}
+                  onKeyDown={onBarcodeKey}
+                  style={{fontSize:'16px',letterSpacing:'1px'}}
+                  autoComplete="off"
+                />
+                <button className="btn btn-primary" onClick={()=>lookupBarcode()} disabled={scanning||!barcode.trim()} style={{whiteSpace:'nowrap',minWidth:'80px'}}>
+                  {scanning?'…':'🔍 Find'}
+                </button>
+              </div>
+              <div style={{fontSize:'12px',color:'#94a3b8',display:'flex',alignItems:'center',gap:'6px'}}>
+                <span style={{fontSize:'16px'}}>💡</span>
+                Point a barcode scanner at the item — it types and submits automatically.
+                Or type the part No and press <strong style={{color:'#374151'}}>Enter</strong>.
+              </div>
+            </div>
+
+            {/* Qty + reason */}
+            {part&&(
+              <div className="card" style={{padding:'16px'}}>
+                <div className="section-title" style={{marginBottom:'12px'}}>
+                  {mode==='out'?'📤 Stock Out Details':'📥 Stock In Details'}
+                </div>
+                <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+                  <div>
+                    <label className="lbl">Quantity <span style={{color:'#ef4444'}}>*</span></label>
+                    <input
+                      id="qty-input"
+                      type="number"
+                      min={1}
+                      max={mode==='out'?part.quantity_on_hand:9999}
+                      className="inp"
+                      style={{fontSize:'20px',fontWeight:700,textAlign:'center'}}
+                      value={qty}
+                      onChange={e=>setQty(parseInt(e.target.value)||1)}
+                      onKeyDown={e=>e.key==='Enter'&&submitMove()}
+                    />
+                    {mode==='out'&&<div style={{fontSize:'12px',color:'#64748b',marginTop:'4px'}}>
+                      Available: <strong>{part.quantity_on_hand}</strong> {part.unit||'pcs'}
+                    </div>}
+                  </div>
+                  <div>
+                    <label className="lbl">Reason <small style={{fontWeight:400,color:'#94a3b8'}}>(optional)</small></label>
+                    <select className="inp" value={reason} onChange={e=>setReason(e.target.value)}>
+                      <option value="">Select reason…</option>
+                      {mode==='out'
+                        ?['Used for repair','Preventive maintenance','Machine breakdown','Testing','Others'].map(r=><option key={r} value={r}>{r}</option>)
+                        :['Purchase received','Returned unused','Stock adjustment','Transfer in','Others'].map(r=><option key={r} value={r}>{r}</option>)
+                      }
+                    </select>
+                  </div>
+                  <div>
+                    <label className="lbl">Reference <small style={{fontWeight:400,color:'#94a3b8'}}>(WO No / PO No)</small></label>
+                    <input className="inp" placeholder="e.g. WO-202506-0012" value={reference} onChange={e=>setReference(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitMove()}/>
+                  </div>
+                  <button
+                    className={mode==='out'?'btn':'btn btn-success'}
+                    style={{
+                      padding:'13px',fontSize:'15px',fontWeight:700,
+                      background:mode==='out'?'#d97706':'#16a34a',color:'#fff',
+                    }}
+                    onClick={submitMove}
+                  >
+                    {mode==='out'?`📤 Confirm Stock Out (−${qty})`:`📥 Confirm Stock In (+${qty})`}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right: Part card + result */}
+          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+
+            {/* Part card */}
+            {!part&&!scanning&&(
+              <div className="card" style={{
+                display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
+                padding:'60px 20px',textAlign:'center',background:'#f8fafc',border:'2px dashed #e2e8f0',
+              }}>
+                <div style={{fontSize:'56px',marginBottom:'16px'}}>🔲</div>
+                <div style={{fontWeight:700,color:'#374151',fontSize:'16px',marginBottom:'8px'}}>Ready to scan</div>
+                <div style={{color:'#94a3b8',fontSize:'13px',lineHeight:1.6}}>
+                  Scan a barcode with your scanner device<br/>
+                  or type the barcode / part No in the field
+                </div>
+              </div>
+            )}
+
+            {scanning&&(
+              <div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'60px'}}>
+                <Spinner/>
+              </div>
+            )}
+
+            {part&&!scanning&&(
+              <div className="card" style={{
+                border: part.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',
+                background: part.is_low_stock?'#fefce8':'#fff',
+              }}>
+                {/* Part header */}
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'14px'}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'13px',fontWeight:700,marginBottom:'4px'}}>
+                      {part.part_code}
+                    </div>
+                    <div style={{fontWeight:800,color:'#1e293b',fontSize:'18px',marginBottom:'4px'}}>{part.name}</div>
+                    <div style={{fontSize:'12px',color:'#64748b'}}>{part.category}{part.description&&' · '+part.description}</div>
+                  </div>
+                  <span style={{
+                    padding:'4px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:700,flexShrink:0,
+                    background:part.is_low_stock?'#fef9c3':'#dcfce7',
+                    color:part.is_low_stock?'#854d0e':'#166534',
+                  }}>{part.status}</span>
+                </div>
+
+                {/* Stock level */}
+                <div style={{
+                  display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',
+                  background:'#f8fafc',borderRadius:'10px',padding:'14px',marginBottom:'14px',
+                }}>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'28px',fontWeight:800,color:part.is_low_stock?'#ea580c':'#2563eb'}}>{part.quantity_on_hand}</div>
+                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Current Stock</div>
+                  </div>
+                  <div style={{textAlign:'center',borderLeft:'1px solid #e2e8f0',borderRight:'1px solid #e2e8f0'}}>
+                    <div style={{fontSize:'28px',fontWeight:800,color:'#64748b'}}>{part.reorder_level}</div>
+                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Min Level</div>
+                  </div>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'18px',fontWeight:700,color:'#374151'}}>{part.unit||'pcs'}</div>
+                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Unit</div>
+                  </div>
+                </div>
+
+                {/* Details */}
+                <div style={{fontSize:'13px',color:'#374151',lineHeight:2}}>
+                  {part.location&&<div>📍 <strong>Location:</strong> {part.location}</div>}
+                  {part.used_on_asset&&<div>🏭 <strong>Used on:</strong> {part.used_on_asset}</div>}
+                  {part.unit_cost&&<div>💰 <strong>Unit Price:</strong> RM {part.unit_cost.toFixed(2)}</div>}
+                  {part.barcode&&<div>🔲 <strong>Barcode:</strong> <span style={{fontFamily:'monospace'}}>{part.barcode}</span></div>}
+                </div>
+
+                {/* Low stock warning */}
+                {part.is_low_stock&&(
+                  <div style={{marginTop:'12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px 14px',fontSize:'13px',color:'#991b1b',fontWeight:600}}>
+                    ⚠️ Low stock — below minimum level! Please restock.
+                  </div>
+                )}
+
+                {/* Recent movements */}
+                {part.recent_movements&&part.recent_movements.length>0&&(
+                  <div style={{marginTop:'14px'}}>
+                    <div style={{fontSize:'12px',fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'8px'}}>Recent Movements</div>
+                    {part.recent_movements.map((m,i)=>{
+                      const mc=moveColor[m.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️'};
+                      const sign=m.movement==='stock_out'?'−':'+';
+                      return (
+                        <div key={i} style={{display:'flex',alignItems:'center',gap:'10px',padding:'6px 0',borderBottom:'1px solid #f1f5f9'}}>
+                          <span style={{background:mc.bg,color:mc.color,padding:'2px 8px',borderRadius:'6px',fontSize:'11px',fontWeight:700,flexShrink:0}}>
+                            {mc.icon} {sign}{m.quantity}
+                          </span>
+                          <div style={{flex:1,minWidth:0}}>
+                            <div style={{fontSize:'12px',color:'#374151',fontWeight:500}}>{m.reason||'—'}</div>
+                            <div style={{fontSize:'11px',color:'#94a3b8'}}>{m.performed_by_name}</div>
+                          </div>
+                          <div style={{fontSize:'11px',color:'#94a3b8',whiteSpace:'nowrap'}}>{fmtDT(m.created_at)}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Transaction result banner */}
+            {result&&(
+              <div style={{
+                background: result.low_stock?'#fef2f2':mode==='out'?'#fefce8':'#f0fdf4',
+                border: `2px solid ${result.low_stock?'#fca5a5':mode==='out'?'#fde68a':'#bbf7d0'}`,
+                borderRadius:'12px',padding:'16px',
+              }}>
+                <div style={{fontWeight:700,fontSize:'15px',marginBottom:'8px',color:result.low_stock?'#991b1b':mode==='out'?'#b45309':'#16a34a'}}>
+                  {mode==='out'?'📤 Stock Out Complete':'📥 Stock In Complete'}
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                  {[
+                    {label:'Before',value:result.qty_before},
+                    {label:mode==='out'?'Removed':'Added',value:(mode==='out'?'−':'+')+(result.qty_after!==undefined?Math.abs(result.qty_after-result.qty_before):0)},
+                    {label:'After', value:result.qty_after},
+                  ].map((s,i)=>(
+                    <div key={i} style={{textAlign:'center',background:'rgba(255,255,255,0.7)',borderRadius:'8px',padding:'8px'}}>
+                      <div style={{fontSize:'22px',fontWeight:800,color:'#1e293b'}}>{s.value}</div>
+                      <div style={{fontSize:'11px',color:'#64748b'}}>{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+                {result.low_stock&&<div style={{fontSize:'12px',color:'#991b1b',fontWeight:600}}>⚠️ Stock is now below minimum level — please restock!</div>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── HISTORY TAB ── */}
+      {activeTab==='history'&&(
+        <div>
+          {/* Filter bar */}
+          <div style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #f1f5f9',marginBottom:'16px',display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-end'}}>
+            <div style={{minWidth:'160px'}}>
+              <label className="lbl">Movement Type</label>
+              <select className="inp" value={histFilter} onChange={e=>setHistFilter(e.target.value)}>
+                <option value="">All movements</option>
+                <option value="stock_in">📥 Stock In</option>
+                <option value="stock_out">📤 Stock Out</option>
+                <option value="restock">🔄 Restock</option>
+              </select>
+            </div>
+            <div style={{minWidth:'140px'}}>
+              <label className="lbl">From Date</label>
+              <input type="date" className="inp" value={histDateFrom} onChange={e=>setHistDateFrom(e.target.value)}/>
+            </div>
+            <div style={{minWidth:'140px'}}>
+              <label className="lbl">To Date</label>
+              <input type="date" className="inp" value={histDateTo} onChange={e=>setHistDateTo(e.target.value)}/>
+            </div>
+            <button className="btn btn-primary" onClick={loadHistory}>🔍 Search</button>
+            <button className="btn btn-secondary" onClick={()=>downloadFile('/stock/history/export.xlsx'+(histFilter?'?movement='+histFilter:''),'StockHistory.xlsx')}>
+              📊 Export Excel
+            </button>
+          </div>
+
+          {/* Summary cards */}
+          {history.length>0&&(()=>{
+            const inCount  = history.filter(h=>h.movement==='stock_in').length;
+            const outCount = history.filter(h=>h.movement==='stock_out').length;
+            const inQty    = history.filter(h=>h.movement==='stock_in').reduce((s,h)=>s+(h.quantity||0),0);
+            const outQty   = history.filter(h=>h.movement==='stock_out').reduce((s,h)=>s+(h.quantity||0),0);
+            return (
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'12px',marginBottom:'16px'}}>
+                {[
+                  {icon:'📋',label:'Total Movements',value:history.length,bg:'#eff6ff',color:'#2563eb'},
+                  {icon:'📥',label:'Stock In (txn)',value:inCount,bg:'#f0fdf4',color:'#16a34a'},
+                  {icon:'📤',label:'Stock Out (txn)',value:outCount,bg:'#fefce8',color:'#b45309'},
+                  {icon:'📦',label:'Net Qty Change',value:(inQty-outQty>=0?'+':''+(inQty-outQty)),bg:'#f5f3ff',color:'#5b21b6'},
+                ].map((s,i)=>(
+                  <div key={i} className="kpi" style={{padding:'14px'}}>
+                    <div className="kpi-icon" style={{background:s.bg,width:'38px',height:'38px',fontSize:'16px'}}>{s.icon}</div>
+                    <div>
+                      <div style={{fontSize:'22px',fontWeight:800,color:s.color,lineHeight:1}}>{s.value}</div>
+                      <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>{s.label}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* History table */}
+          <div className="card" style={{padding:0}}>
+            {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
+              <div className="ovf"><table>
+                <thead><tr>
+                  {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}</th>)}
+                </tr></thead>
+                <tbody>{history.map((h,i)=>{
+                  const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
+                  const sign=h.movement==='stock_out'?'−':'+';
+                  return (
+                    <tr key={i}>
+                      <td style={{whiteSpace:'nowrap',fontSize:'12px',color:'#64748b'}}>{fmtDT(h.created_at)}</td>
+                      <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{h.part_code}</span></td>
+                      <td style={{fontWeight:600}}>{h.part_name}</td>
+                      <td>
+                        <span style={{background:mc.bg,color:mc.color,padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,whiteSpace:'nowrap'}}>
+                          {mc.icon} {mc.label||h.movement}
+                        </span>
+                      </td>
+                      <td style={{textAlign:'right',fontWeight:700,color:h.movement==='stock_out'?'#ea580c':'#16a34a',fontSize:'14px'}}>
+                        {sign}{h.quantity}
+                      </td>
+                      <td style={{textAlign:'right',color:'#64748b'}}>{h.qty_before}</td>
+                      <td style={{textAlign:'right',fontWeight:600,color:'#1e293b'}}>{h.qty_after}</td>
+                      <td style={{color:'#64748b',fontSize:'12px'}}>{h.reason||'—'}</td>
+                      <td style={{fontFamily:'monospace',fontSize:'12px',color:'#2563eb'}}>{h.reference||'—'}</td>
+                      <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{h.performed_by_name}</td>
+                    </tr>
+                  );
+                })}</tbody>
+              </table></div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── App Shell ──────────────────────────────────────────────────────────────
 const NAV=[
   {key:'dashboard', label:'Dashboard',    icon:'📊'},
@@ -1833,6 +2301,7 @@ const NAV=[
   {key:'qr',        label:'QR Code',      icon:'🔲'},
   {key:'assets',    label:'Assets',       icon:'🏭'},
   {key:'inventory', label:'Inventory',    icon:'📦'},
+  {key:'stock',     label:'Stock In/Out', icon:'🔲'},
   {key:'pm',        label:'PM Schedules', icon:'📅'},
 ];
 
@@ -1844,7 +2313,7 @@ function App(){
     if(token) api('/auth/me').then(setUser).catch(()=>localStorage.removeItem('cmms_token'));
   },[]);
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,inbox:AdminInbox,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:Inventory,pm:PMSchedules};
+  const pages={dashboard:Dashboard,inbox:AdminInbox,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:Inventory,stock:StockScanner,pm:PMSchedules};
   const PageComp=pages[page]||Dashboard;
   return (
     <div>

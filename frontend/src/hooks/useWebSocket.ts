@@ -11,6 +11,7 @@ const ROOM_QUERY_MAP: Record<string, string[][]> = {
   inventory:   [['inventory'], ['kpi']],
   tasks:       [['work_orders'], ['tasks']],
   pm_schedules:[['pm_schedules'], ['kpi']],
+  users:       [['users'], ['assignable_users']],
 }
 
 // Human-readable toast messages per event type
@@ -27,6 +28,10 @@ const EVENT_MESSAGES: Record<string, string> = {
   'task.assigned':        '👷 Task assigned',
   'task.updated':         '✏️ Task status updated',
   'pm.created':           '📅 PM schedule created',
+  'work_order.assigned':  '👷 Work order assigned',
+  'user.created':         '👤 New user added',
+  'user.updated':         '🟢 Staff attendance updated',
+  'user.deleted':         '👤 User removed',
   'connection.established': null as any, // suppress
 }
 

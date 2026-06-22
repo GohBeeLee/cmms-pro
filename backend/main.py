@@ -17,9 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from db import engine, Base, get_db, settings
-from models import PMSchedule
+from models import PMSchedule, User, UserRole
 from websocket_manager import ws_manager
-from auth import router as auth_router
+from auth import router as auth_router, hash_password
 from routers.assets import router as assets_router
 from routers.work_orders import router as wo_router
 from routers.inventory import router as inventory_router
@@ -70,6 +70,53 @@ async def ensure_schema_updates():
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_spare_parts_barcode ON spare_parts (barcode)"))
         if "used_on_asset" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN used_on_asset VARCHAR(200)"))
+        user_columns = (await conn.execute(text("PRAGMA table_info(users)"))).mappings().all()
+        user_names = {col["name"] for col in user_columns}
+        if "is_present" not in user_names:
+            await conn.execute(text("ALTER TABLE users ADD COLUMN is_present BOOLEAN NOT NULL DEFAULT 1"))
+
+
+DEFAULT_ADMIN_EMAIL    = "admin@cmms.com"
+DEFAULT_ADMIN_PASSWORD = "admin1234"
+DEFAULT_ADMIN_NAME     = "Administrator"
+
+async def ensure_default_admin():
+    """
+    Guarantees a working admin account always exists, even on a brand new
+    or freshly-deleted database. Runs on every startup:
+      - If no user with DEFAULT_ADMIN_EMAIL exists, create one.
+      - If it exists but isn't admin/active, restore those flags.
+    Does NOT touch the password of an existing account, so changing the
+    password via the app later is preserved across restarts.
+    """
+    from db import AsyncSessionLocal
+    async with AsyncSessionLocal() as db:
+        try:
+            result = await db.execute(select(User).where(User.email == DEFAULT_ADMIN_EMAIL))
+            admin = result.scalar_one_or_none()
+            if admin is None:
+                admin = User(
+                    name=DEFAULT_ADMIN_NAME,
+                    email=DEFAULT_ADMIN_EMAIL,
+                    hashed_password=hash_password(DEFAULT_ADMIN_PASSWORD),
+                    role=UserRole.admin,
+                    is_active=True,
+                    is_present=True,
+                )
+                db.add(admin)
+                logger.info("Default admin account created: %s", DEFAULT_ADMIN_EMAIL)
+            else:
+                changed = False
+                if admin.role != UserRole.admin:
+                    admin.role = UserRole.admin; changed = True
+                if not admin.is_active:
+                    admin.is_active = True; changed = True
+                if changed:
+                    logger.info("Default admin account restored: %s", DEFAULT_ADMIN_EMAIL)
+            await db.commit()
+        except Exception as e:
+            logger.error("ensure_default_admin error: %s", e)
+            await db.rollback()
 
 
 @asynccontextmanager
@@ -77,6 +124,7 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await ensure_schema_updates()
+    await ensure_default_admin()
     logger.info("Database tables ready")
     await ws_manager.startup()
     scheduler.add_job(run_pm_check, "interval", hours=1, id="pm_check")

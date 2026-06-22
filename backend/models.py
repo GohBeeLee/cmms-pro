@@ -70,6 +70,7 @@ class User(Base):
     hashed_password: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(SAEnum(UserRole), default=UserRole.technician)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_present: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="user")

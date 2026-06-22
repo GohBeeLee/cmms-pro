@@ -6,14 +6,14 @@ import base64
 from uuid import UUID
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
 from typing import Optional
 
 from db import get_db
-from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, Asset
+from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, Asset, TaskAssignment, TaskStatus
 from auth import get_current_user
 from websocket_manager import ws_manager
 
@@ -38,7 +38,8 @@ class CompletionForm(BaseModel):
     completion_photos: list[PhotoEntry] = []
 
 class AssignRequest(BaseModel):
-    user_id:  str
+    user_id:  Optional[str] = None
+    user_ids: list[str] = []
     priority: Optional[str] = None
     due_date: Optional[str] = None
     notes:    Optional[str] = None
@@ -102,6 +103,17 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "created_at":   wo.created_at.isoformat()   if wo.created_at   else None,
         "updated_at":   wo.updated_at.isoformat()   if wo.updated_at   else None,
         "completed_at": wo.completed_at.isoformat() if wo.completed_at else None,
+        "assigned_users": [
+            {
+                "id": str(a.user.id),
+                "name": a.user.name,
+                "email": a.user.email,
+                "role": a.user.role.value if a.user.role else None,
+                "assignment_status": a.status.value if a.status else None,
+            }
+            for a in (wo.assignments or [])
+            if a.user and getattr(a.user, "is_active", True)
+        ],
         "asset": {
             "id":         str(wo.asset.id),
             "name":       wo.asset.name,
@@ -114,7 +126,10 @@ def _wo_dict(wo: WorkOrder) -> dict:
 async def _get_wo(wo_id: UUID, db: AsyncSession) -> WorkOrder:
     result = await db.execute(
         select(WorkOrder).where(WorkOrder.id == wo_id)
-        .options(selectinload(WorkOrder.asset))
+        .options(
+            selectinload(WorkOrder.asset),
+            selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
+        )
     )
     wo = result.scalar_one_or_none()
     if not wo:
@@ -134,13 +149,26 @@ async def list_work_orders(
     status: str | None = None,
     priority: str | None = None,
     asset_id: UUID | None = None,
+    my_jobs_only: bool = False,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
-    q = select(WorkOrder).options(selectinload(WorkOrder.asset))
+    q = select(WorkOrder).options(
+        selectinload(WorkOrder.asset),
+        selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
+    )
     if status:   q = q.where(WorkOrder.status == status)
     if priority: q = q.where(WorkOrder.priority == priority)
     if asset_id: q = q.where(WorkOrder.asset_id == asset_id)
+
+    # Explicit opt-in scoping — used by the technician Work Order Board so they
+    # only see jobs assigned to them. Admin/manager are never restricted, even
+    # if this flag is passed, since they're allowed full visibility everywhere.
+    if my_jobs_only and current_user.role.value not in ("admin", "manager"):
+        q = q.where(
+            WorkOrder.assignments.any(TaskAssignment.user_id == current_user.id)
+        )
+
     q = q.offset(skip).limit(limit).order_by(WorkOrder.created_at.desc())
     result = await db.execute(q)
     return [_wo_dict(w) for w in result.scalars().all()]
@@ -233,15 +261,36 @@ async def delete_work_order(
 @router.post("/{wo_id}/assign")
 async def assign_to_technician(
     wo_id: UUID, body: AssignRequest,
-    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     from models import Priority
-    wo = await _get_wo(wo_id, db)
-    tech = (await db.execute(select(User).where(User.id == UUID(body.user_id)))).scalar_one_or_none()
-    if not tech:
-        raise HTTPException(404, "User not found")
 
-    wo.assigned_to_user = UUID(body.user_id)
+    # Collect all requested user IDs (supports legacy single user_id + new user_ids list)
+    raw_ids: list[str] = list(body.user_ids or [])
+    if body.user_id and body.user_id not in raw_ids:
+        raw_ids.append(body.user_id)
+    if not raw_ids:
+        raise HTTPException(400, "At least one technician must be selected")
+
+    wo = await _get_wo(wo_id, db)
+
+    techs: list[User] = []
+    for uid in raw_ids:
+        tech = (await db.execute(select(User).where(User.id == UUID(uid)))).scalar_one_or_none()
+        if not tech:
+            raise HTTPException(404, f"User {uid} not found")
+        techs.append(tech)
+
+    # Replace existing assignments with the new set
+    await db.execute(delete(TaskAssignment).where(TaskAssignment.work_order_id == wo_id))
+    for tech in techs:
+        db.add(TaskAssignment(
+            work_order_id=wo_id,
+            user_id=tech.id,
+            status=TaskStatus.pending,
+            notes=body.notes,
+        ))
+
     wo.status = WorkOrderStatus.in_progress
     wo.updated_at = datetime.utcnow()
     if body.priority:
@@ -249,9 +298,10 @@ async def assign_to_technician(
     if body.due_date:
         wo.due_date = datetime.fromisoformat(body.due_date.replace("Z",""))
 
+    tech_names = ", ".join(f"{t.name} ({t.email})" for t in techs)
     note = (
         f"\n[ASSIGNED — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
-        f"Assigned to   : {tech.name} ({tech.email})\n"
+        f"Assigned to   : {tech_names}\n"
     )
     if body.notes:
         note += f"Notes         : {body.notes}\n"
@@ -260,7 +310,8 @@ async def assign_to_technician(
     await db.flush()
     await ws_manager.broadcast_event(ROOM, "work_order.assigned", {
         "id": str(wo.id), "wo_number": wo.wo_number,
-        "assigned_to": tech.name, "assigned_to_id": str(tech.id),
+        "assigned_to": tech_names,
+        "assigned_user_ids": [str(t.id) for t in techs],
     })
     return _wo_dict(await _get_wo(wo_id, db))
 

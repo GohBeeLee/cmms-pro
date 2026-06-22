@@ -98,6 +98,10 @@ function toast(msg, type) {
   setTimeout(()=>el.remove(), 4000);
 }
 
+// ── Auth context ───────────────────────────────────────────────────────────
+const AuthCtx = React.createContext(null);
+function useAuth(){ return React.useContext(AuthCtx); }
+
 async function api(path, opts) {
   opts = opts||{};
   const token = localStorage.getItem('cmms_token');
@@ -326,11 +330,11 @@ function Login({onLogin}){
         </div>
         <form onSubmit={submit}>
           <div style={{marginBottom:'14px'}}><label className="lbl">Email</label><input className="inp" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="admin@cmms.com" required/></div>
-          <div style={{marginBottom:'18px'}}><label className="lbl">Password</label><input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password123" required/></div>
+          <div style={{marginBottom:'18px'}}><label className="lbl">Password</label><input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password" required/></div>
           {err&&<div style={{background:'#fee2e2',color:'#991b1b',padding:'10px 14px',borderRadius:'8px',fontSize:'13px',marginBottom:'14px'}}>{err}</div>}
           <button className="btn btn-primary" type="submit" disabled={loading} style={{width:'100%',padding:'10px'}}>{loading?'Signing in…':'Sign in'}</button>
         </form>
-        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}><strong>Demo:</strong> admin@cmms.com / password123</div>
+        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}><strong>NOTE:</strong> Please contact ADMIN if you forgot password</div>
       </div>
     </div>
   );
@@ -477,6 +481,199 @@ function Dashboard(){
 }
 
 // ── QR Code Page ───────────────────────────────────────────────────────────
+function MaintenanceAlertBoard(){
+  const [wos,setWos]=useState([]);
+  const [technicians,setTechnicians]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [selected,setSelected]=useState(null);
+  const [priority,setPriority]=useState('medium');
+  const [dueDate,setDueDate]=useState('');
+  const [assignNotes,setAssignNotes]=useState('');
+  const [assignTechIds,setAssignTechIds]=useState([]); // multi-select
+  const [assigning,setAssigning]=useState(false);
+  const [soundEnabled,setSoundEnabled]=useState(false);
+  const soundEnabledRef=useRef(false);
+  const [now,setNow]=useState(Date.now());
+  const knownOpenRef=useRef(new Set());
+  const loadedRef=useRef(false);
+  const audioRef=useRef(null);
+
+  async function beep(force=false){
+    if(!force&&!soundEnabledRef.current) return;
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      const ctx=audioRef.current||new Ctx();
+      audioRef.current=ctx;
+      if(ctx.state==='suspended') await ctx.resume();
+      for(let i=0;i<3;i++){
+        const osc=ctx.createOscillator();
+        const gain=ctx.createGain();
+        osc.type='sine'; osc.frequency.value=880; gain.gain.value=0.12;
+        osc.connect(gain); gain.connect(ctx.destination);
+        const t=ctx.currentTime+(i*0.28);
+        osc.start(t); osc.stop(t+0.16);
+      }
+    }catch(e){}
+  }
+  async function enableSound(){
+    try{
+      const Ctx=window.AudioContext||window.webkitAudioContext;
+      audioRef.current=audioRef.current||new Ctx();
+      if(audioRef.current.state==='suspended') await audioRef.current.resume();
+      soundEnabledRef.current=true;
+      setSoundEnabled(true);
+      setTimeout(()=>beep(true),50);
+    }catch(e){toast('Sound is blocked by this browser','err');}
+  }
+
+  // Returns array of {id,name} from backend's assigned_users; falls back to parsing legacy description text
+  function getAssignedList(wo){
+    if(wo.assigned_users&&wo.assigned_users.length>0) return wo.assigned_users;
+    const m=(wo.description||'').match(/Assigned to\s*:\s*([^\n]+)/);
+    if(!m) return [];
+    return m[1].split(',').map(s=>({id:null,name:s.trim().replace(/\s*\([^)]*\)/,'')}));
+  }
+
+  async function load({alert=false}={}){
+    try{
+      const [open,inp,hold,techs]=await Promise.all([
+        api('/work-orders/?status=open&limit=200'),
+        api('/work-orders/?status=in_progress&limit=200'),
+        api('/work-orders/?status=on_hold&limit=200'),
+        api('/users/technicians'),
+      ]);
+      const merged=[...open,...inp,...hold].sort((a,b)=>{const p={critical:0,high:1,medium:2,low:3};return (p[a.priority]||2)-(p[b.priority]||2)||new Date(a.created_at)-new Date(b.created_at);});
+      const incomingIds=new Set(open.map(w=>w.id));
+      if(loadedRef.current){
+        const hasNew=[...incomingIds].some(id=>!knownOpenRef.current.has(id));
+        if(hasNew||alert) beep();
+      }
+      knownOpenRef.current=incomingIds; loadedRef.current=true;
+      setWos(merged); setTechnicians(techs);
+    }catch(e){toast(e.message,'err');}
+    finally{setLoading(false);}
+  }
+
+  useEffect(()=>{load();},[]);
+  useEffect(()=>{const t=setInterval(()=>setNow(Date.now()),30000);return()=>clearInterval(t);},[]);
+  useWS('work_orders',ev=>{load({alert:ev.type==='work_order.created'});});
+  useWS('requests',ev=>{if(ev.type==='request.new'){toast('New work order request','info');load({alert:true});}});
+  useWS('users',()=>load()); // refresh assignable list live when attendance changes
+
+  function openAssign(wo){
+    setSelected(wo);
+    setPriority(wo.priority||'medium');
+    setDueDate('');
+    setAssignNotes('');
+    // Pre-tick whoever is currently assigned (if they're still in the assignable list)
+    const existing=getAssignedList(wo).map(u=>u.id).filter(Boolean);
+    setAssignTechIds(existing);
+  }
+  function toggleTech(id){
+    setAssignTechIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  }
+  async function assign(){
+    if(!selected) return;
+    if(assignTechIds.length===0){toast('Please select at least one technician','err');return;}
+    setAssigning(true);
+    try{
+      await api('/work-orders/'+selected.id+'/assign',{method:'POST',body:JSON.stringify({user_ids:assignTechIds,priority,due_date:dueDate?new Date(dueDate).toISOString():null,notes:assignNotes||null})});
+      const names=technicians.filter(t=>assignTechIds.includes(t.id)).map(t=>t.name).join(', ');
+      toast('Assigned to '+names); setSelected(null); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setAssigning(false);}
+  }
+
+  const incoming=wos.filter(w=>w.status==='open');
+  const active=wos.filter(w=>w.status!=='open');
+  const critical=wos.filter(w=>w.priority==='critical').length;
+
+  return <div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'14px',marginBottom:'20px'}}>
+      <div><h1 style={{fontSize:'28px',fontWeight:900,color:'#1e293b',margin:0}}>Maintenance Alert Board</h1><p style={{color:'#64748b',fontSize:'14px',margin:'4px 0 0'}}>Live incoming work orders, assignment, and running downtime</p></div>
+      <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+        {incoming.length>0&&<span className="new-pulse" style={{background:'#fee2e2',color:'#991b1b',padding:'8px 14px',borderRadius:'999px',fontSize:'13px',fontWeight:800}}>NEW {incoming.length}</span>}
+        {critical>0&&<span className="new-pulse" style={{background:'#7f1d1d',color:'#fff',padding:'8px 14px',borderRadius:'999px',fontSize:'13px',fontWeight:800}}>CRITICAL {critical}</span>}
+        <button className={soundEnabled?'btn btn-success':'btn btn-secondary'} onClick={enableSound}>{soundEnabled?'Sound On':'Enable Sound'}</button>
+        <button className="btn btn-secondary" onClick={()=>load()}>Refresh</button>
+      </div>
+    </div>
+
+    <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:'14px',marginBottom:'18px'}}>
+      {[['Incoming',incoming.length,'#fee2e2','#991b1b'],['Active',active.length,'#dbeafe','#1e40af'],['Critical',critical,'#7f1d1d','#fff'],['Assignable',technicians.length,'#dcfce7','#166534']].map(([label,value,bg,color])=>(
+        <div key={label} className="card" style={{background:bg,padding:'18px'}}><div style={{fontSize:'34px',fontWeight:900,color,lineHeight:1}}>{value}</div><div style={{fontSize:'13px',fontWeight:700,color:color==='#fff'?'#fecaca':'#475569',marginTop:'4px'}}>{label}</div></div>
+      ))}
+    </div>
+
+    {loading?<Spinner/>:wos.length===0?<Empty msg="No active work orders"/>:<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(320px,1fr))',gap:'14px'}}>
+      {wos.map(w=>{
+        const assignedList=getAssignedList(w);
+        const assignedLabel=assignedList.length===0?null:assignedList.length===1?assignedList[0].name:assignedList[0].name+' +'+(assignedList.length-1)+' more';
+        const dt=calcDowntime(w.created_at,null);const isIncoming=w.status==='open';const isCritical=w.priority==='critical';
+        return (
+        <div key={w.id} className={isIncoming?'new-pulse':''} style={{background:isCritical?'#450a0a':isIncoming?'#fff7ed':'#fff',color:isCritical?'#fff':'#1e293b',border:'2px solid '+(isCritical?'#ef4444':isIncoming?'#f97316':'#e2e8f0'),borderRadius:'14px',padding:'18px',boxShadow:isIncoming?'0 10px 22px rgba(249,115,22,.18)':'0 1px 3px rgba(0,0,0,.06)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',gap:'10px',alignItems:'flex-start',marginBottom:'12px'}}>
+            <div><div style={{fontFamily:'monospace',fontSize:'13px',fontWeight:800,color:isCritical?'#fecaca':'#2563eb'}}>{w.wo_number}</div><div style={{fontSize:'20px',fontWeight:900,marginTop:'3px'}}>{w.asset?.name||w.title}</div><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',marginTop:'3px'}}>{w.asset?.location||'No location'}</div></div>
+            <div style={{display:'flex',gap:'6px',flexWrap:'wrap',justifyContent:'flex-end'}}><Badge value={w.priority}/><Badge value={w.status}/></div>
+          </div>
+          <div style={{background:isCritical?'rgba(255,255,255,.08)':'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',fontWeight:700}}>RUNNING DOWNTIME</div><div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':'#b45309',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}</div></div>
+          <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:'70px',overflow:'hidden',marginBottom:'12px'}}>{(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title}</div>
+          {assignedList.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:'4px',marginBottom:'10px'}}>
+            {assignedList.map((u,i)=><span key={u.id||i} style={{background:isCritical?'rgba(255,255,255,.15)':'#ede9fe',color:isCritical?'#fff':'#5b21b6',padding:'2px 9px',borderRadius:'999px',fontSize:'11px',fontWeight:700}}>👷 {u.name}</span>)}
+          </div>}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px'}}>
+            <div style={{fontSize:'12px',fontWeight:700,color:isCritical?'#fecaca':assignedLabel?'#5b21b6':'#dc2626'}}>{assignedLabel?'Assigned: '+assignedLabel:'Unassigned'}</div>
+            <button className="btn btn-primary" onClick={()=>openAssign(w)}>{assignedLabel?'Reassign':'Assign'}</button>
+          </div>
+        </div>
+      );})}
+    </div>}
+
+    {selected&&<Modal title={'Assign: '+selected.wo_number} onClose={()=>setSelected(null)} large><div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+      <div>
+        <div className="section-title">Work Order</div>
+        <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',lineHeight:1.7}}>
+          <div style={{fontWeight:800,fontSize:'16px',color:'#1e293b'}}>{selected.asset?.name||selected.title}</div>
+          <div><strong>Downtime:</strong> {calcDowntime(selected.created_at,null).display}</div>
+          <div><strong>Priority:</strong> <Badge value={selected.priority}/></div>
+          <div><strong>Status:</strong> <Badge value={selected.status}/></div>
+          <div style={{whiteSpace:'pre-line',marginTop:'8px'}}>{selected.description||'No description'}</div>
+        </div>
+      </div>
+      <div style={{display:'grid',gap:'12px'}}>
+        <div>
+          <label className="lbl">Assign Technicians {assignTechIds.length>0&&<span style={{color:'#2563eb',fontWeight:700}}>({assignTechIds.length} selected)</span>}</label>
+          {technicians.length===0
+            ?<div style={{color:'#dc2626',fontSize:'13px',padding:'10px',background:'#fef2f2',borderRadius:'8px'}}>No staff marked present today.</div>
+            :<div style={{display:'flex',flexDirection:'column',gap:'6px',maxHeight:'220px',overflowY:'auto',border:'1px solid #e2e8f0',borderRadius:'10px',padding:'6px'}}>
+              {technicians.map(t=>{
+                const isChecked=assignTechIds.includes(t.id);
+                return (
+                  <label key={t.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'8px 10px',borderRadius:'8px',cursor:'pointer',background:isChecked?'#eff6ff':'transparent'}}>
+                    <input type="checkbox" checked={isChecked} onChange={()=>toggleTech(t.id)} style={{width:'16px',height:'16px',accentColor:'#2563eb',cursor:'pointer'}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:'13px',color:'#1e293b'}}>{t.name}</div>
+                      <div style={{fontSize:'11px',color:'#64748b',textTransform:'capitalize'}}>{t.role}</div>
+                    </div>
+                    {isChecked&&<span style={{fontSize:'11px',color:'#2563eb',fontWeight:700}}>✓</span>}
+                  </label>
+                );
+              })}
+            </div>
+          }
+        </div>
+        <div><label className="lbl">Priority</label><select className="inp" value={priority} onChange={e=>setPriority(e.target.value)}>{['low','medium','high','critical'].map(p=><option key={p} value={p}>{p}</option>)}</select></div>
+        <div><label className="lbl">Due Date</label><input type="datetime-local" className="inp" value={dueDate} onChange={e=>setDueDate(e.target.value)}/></div>
+        <div><label className="lbl">Notes</label><textarea className="inp" rows={3} value={assignNotes} onChange={e=>setAssignNotes(e.target.value)}/></div>
+        <div style={{display:'flex',gap:'10px'}}>
+          <button className="btn btn-primary" style={{flex:1}} onClick={assign} disabled={assigning||assignTechIds.length===0}>{assigning?'Assigning...':'Confirm Assignment'+(assignTechIds.length>0?' ('+assignTechIds.length+')':'')}</button>
+          <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setSelected(null)}>Cancel</button>
+        </div>
+      </div>
+    </div></Modal>}
+  </div>;
+}
+
 function QRPage(){
   const requestUrl = window.location.origin + '/request';
   const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(requestUrl);
@@ -529,239 +726,11 @@ function QRPage(){
   );
 }
 
-// ── Admin Inbox ────────────────────────────────────────────────────────────
-function AdminInbox(){
-  const [wos,setWos]=useState([]);
-  const [technicians,setTechnicians]=useState([]);
-  const [loading,setLoading]=useState(true);
-  const [selected,setSelected]=useState(null);
-  const [priority,setPriority]=useState('medium');
-  const [dueDate,setDueDate]=useState('');
-  const [assignNotes,setAssignNotes]=useState('');
-  const [assignTechId,setAssignTechId]=useState('');
-  const [assigning,setAssigning]=useState(false);
-
-  async function load(){
-    try{
-      const [open,inp,techs]=await Promise.all([
-        api('/work-orders/?status=open&limit=100'),
-        api('/work-orders/?status=in_progress&limit=100'),
-        api('/users/technicians'),
-      ]);
-      setWos([...open,...inp].sort((a,b)=>{
-        const p={critical:0,high:1,medium:2,low:3};
-        return (p[a.priority]||2)-(p[b.priority]||2);
-      }));
-      setTechnicians(techs);
-    }catch(e){toast(e.message,'err');}finally{setLoading(false);}
-  }
-
-  useEffect(()=>{load();},[]);
-  useWS('requests',ev=>{if(ev.type==='request.new'){toast('🔔 New request: '+ev.payload.asset_name,'info');load();}});
-  useWS('work_orders',load);
-
-  function openAssign(wo){
-    setSelected(wo);
-    setPriority(wo.priority||'medium');
-    setDueDate('');setAssignNotes('');setAssignTechId('');
-  }
-
-  async function assign(){
-    if(!selected) return;
-    if(!assignTechId){toast('Please select a technician','err');return;}
-    setAssigning(true);
-    try{
-      await api('/work-orders/'+selected.id+'/assign',{
-        method:'POST',
-        body:JSON.stringify({
-          user_id:  assignTechId,
-          priority: priority,
-          due_date: dueDate?new Date(dueDate).toISOString():null,
-          notes:    assignNotes||null,
-        }),
-      });
-      const tech=technicians.find(t=>t.id===assignTechId);
-      toast('Assigned to '+(tech?tech.name:'technician'));
-      setSelected(null);load();
-    }catch(e){toast(e.message,'err');}
-    finally{setAssigning(false);}
-  }
-
-  function extractPhotos(wo){
-    const desc=wo.description||'';const photos=[];
-    const re=/\[PHOTO:([^\|]+)\|([^\]]+)\]/g;let m;
-    while((m=re.exec(desc))!==null){if(m[2]!=='TOO_LARGE') photos.push(m[2]);}
-    return photos;
-  }
-
-  function getAssignedTech(wo){
-    const m=(wo.description||'').match(/Assigned to\s*:\s*([^\n\(]+)/);
-    return m?m[1].trim():null;
-  }
-
-  const requests=wos.filter(w=>w.title.startsWith('[Request]'));
-  const others  =wos.filter(w=>!w.title.startsWith('[Request]'));
-
-  return (
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-        <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Admin Inbox</h1>
-          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Operator requests — review and assign to technician</p></div>
-        <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
-          {requests.length>0&&<span className="new-pulse" style={{background:'#fee2e2',color:'#991b1b',padding:'4px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>🔴 {requests.length} new</span>}
-          <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'6px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:600}}>● Live</span>
-        </div>
-      </div>
-
-      {requests.length>0&&<>
-        <div className="section-title">🆕 New Operator Requests ({requests.length})</div>
-        {requests.map(w=>{
-          const photos=extractPhotos(w);
-          const dt=calcDowntime(w.created_at,null);
-          const assigned=getAssignedTech(w);
-          return (
-            <div key={w.id} className={'wo-card priority-'+w.priority+' new-pulse'}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px'}}>
-                <div style={{flex:1}}>
-                  <div style={{display:'flex',gap:'6px',alignItems:'center',marginBottom:'6px',flexWrap:'wrap'}}>
-                    <span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</span>
-                    <Badge value={w.priority}/><Badge value={w.status}/>
-                    {assigned&&<span style={{background:'#ede9fe',color:'#5b21b6',padding:'2px 8px',borderRadius:'999px',fontSize:'11px',fontWeight:600}}>👷 {assigned}</span>}
-                  </div>
-                  <div style={{fontWeight:700,color:'#1e293b',marginBottom:'4px'}}>{w.asset?w.asset.name:'—'}</div>
-                  <div style={{fontSize:'12px',color:'#374151',whiteSpace:'pre-line',marginBottom:'8px',maxHeight:'70px',overflow:'hidden'}}>
-                    {(w.description||'').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')).join('\n')}
-                  </div>
-                  {photos.length>0&&<PhotoViewer photos={photos} label="📷 Photos:"/>}
-                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'6px'}}>
-                    Received: {fmtDT(w.created_at)} · Waiting: <strong style={{color:'#b45309'}}>{dt.display}</strong>
-                  </div>
-                </div>
-                <button className="btn btn-primary" style={{whiteSpace:'nowrap',fontSize:'13px',flexShrink:0}} onClick={()=>openAssign(w)}>
-                  {assigned?'Reassign':'Assign →'}
-                </button>
-              </div>
-            </div>
-          );
-        })}
-      </>}
-
-      {others.length>0&&<>
-        <div className="section-title" style={{marginTop:'20px'}}>📋 All Open Work Orders ({others.length})</div>
-        <div className="card" style={{padding:0}}>
-          <div className="ovf"><table>
-            <thead><tr>{['WO #','Title','Asset','Priority','Status','Assigned To','Due','Action'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-            <tbody>{others.map(w=>{
-              const assigned=getAssignedTech(w);
-              return (
-                <tr key={w.id}>
-                  <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{w.wo_number}</span></td>
-                  <td style={{fontWeight:600,maxWidth:'160px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{w.title}</td>
-                  <td style={{color:'#64748b',fontSize:'12px'}}>{w.asset?w.asset.name:'—'}</td>
-                  <td><Badge value={w.priority}/></td><td><Badge value={w.status}/></td>
-                  <td>{assigned
-                    ?<span style={{background:'#ede9fe',color:'#5b21b6',padding:'2px 8px',borderRadius:'999px',fontSize:'11px',fontWeight:600}}>👷 {assigned}</span>
-                    :<span style={{color:'#dc2626',fontSize:'11px',fontWeight:600}}>⚠ Unassigned</span>}
-                  </td>
-                  <td style={{color:'#64748b',fontSize:'12px'}}>{fmtDate(w.due_date)}</td>
-                  <td><button className="btn btn-secondary" style={{fontSize:'11px',padding:'4px 10px'}} onClick={()=>openAssign(w)}>{assigned?'Reassign':'Assign'}</button></td>
-                </tr>
-              );
-            })}</tbody>
-          </table></div>
-        </div>
-      </>}
-
-      {loading&&<Spinner/>}
-      {!loading&&wos.length===0&&<Empty msg="No open work orders — all clear! ✅"/>}
-
-      {selected&&(
-        <Modal title={'Assign: '+selected.wo_number+' — '+(selected.asset?selected.asset.name:'—')} onClose={()=>setSelected(null)} large>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
-            <div>
-              <div className="section-title">Request Details</div>
-              <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',marginBottom:'12px'}}>
-                <div style={{fontWeight:700,color:'#1e293b',marginBottom:'6px',fontSize:'15px'}}>{selected.asset?selected.asset.name:'—'}</div>
-                <div style={{fontSize:'13px',color:'#374151',whiteSpace:'pre-line',lineHeight:1.7,maxHeight:'180px',overflowY:'auto'}}>{selected.description}</div>
-                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'8px'}}>
-                  Created: {fmtDT(selected.created_at)} · Waiting: <strong style={{color:'#b45309'}}>{calcDowntime(selected.created_at,null).display}</strong>
-                </div>
-              </div>
-              <PhotoViewer photos={extractPhotos(selected)} label="Operator photos:"/>
-            </div>
-
-            <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
-              <div className="section-title">Assign to Technician</div>
-
-              <div>
-                <label className="lbl">Select Technician <span style={{color:'#ef4444'}}>*</span></label>
-                {technicians.length===0
-                  ?<div style={{color:'#dc2626',fontSize:'13px',padding:'10px',background:'#fef2f2',borderRadius:'8px'}}>No technicians found.</div>
-                  :<div style={{display:'flex',flexDirection:'column',gap:'6px',maxHeight:'220px',overflowY:'auto',paddingRight:'2px'}}>
-                    {technicians.map(t=>{
-                      const isSel=assignTechId===t.id;
-                      const busy=wos.filter(w=>(w.description||'').includes(t.name)&&(w.description||'').includes('Assigned to')).length;
-                      return (
-                        <div key={t.id} onClick={()=>setAssignTechId(t.id)} style={{
-                          display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',
-                          borderRadius:'10px',cursor:'pointer',
-                          border:isSel?'2px solid #2563eb':'2px solid #e2e8f0',
-                          background:isSel?'#eff6ff':'#fff',
-                        }}>
-                          <div style={{
-                            width:'36px',height:'36px',borderRadius:'50%',flexShrink:0,
-                            background:isSel?'#2563eb':busy>2?'#ef4444':busy>0?'#f59e0b':'#16a34a',
-                            color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700,fontSize:'14px',
-                          }}>{t.name.charAt(0).toUpperCase()}</div>
-                          <div style={{flex:1}}>
-                            <div style={{fontWeight:700,color:'#1e293b',fontSize:'13px'}}>{t.name}</div>
-                            <div style={{fontSize:'11px',color:'#64748b',textTransform:'capitalize'}}>{t.role}</div>
-                          </div>
-                          <div style={{textAlign:'right',fontSize:'11px',fontWeight:700,color:busy===0?'#16a34a':busy>2?'#dc2626':'#d97706'}}>
-                            {busy===0?'✅ Available':busy+' active job'+(busy>1?'s':'')}
-                            {isSel&&<div style={{color:'#2563eb',fontSize:'10px'}}>✓ Selected</div>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                }
-              </div>
-
-              <div><label className="lbl">Priority</label>
-                <select className="inp" value={priority} onChange={e=>setPriority(e.target.value)}>
-                  {['low','medium','high','critical'].map(p=><option key={p} value={p}>{p.charAt(0).toUpperCase()+p.slice(1)}</option>)}
-                </select>
-              </div>
-
-              <div><label className="lbl">Due Date</label>
-                <input type="datetime-local" className="inp" value={dueDate} onChange={e=>setDueDate(e.target.value)}/>
-              </div>
-
-              <div><label className="lbl">Notes to Technician <small style={{fontWeight:400,color:'#94a3b8'}}>(optional)</small></label>
-                <textarea className="inp" rows={2} placeholder="Any special instructions…" value={assignNotes} onChange={e=>setAssignNotes(e.target.value)}/>
-              </div>
-
-              {!assignTechId&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#991b1b'}}>
-                ⚠️ Select a technician above to confirm.
-              </div>}
-
-              <div style={{display:'flex',gap:'8px'}}>
-                <button className="btn btn-primary" style={{flex:1,padding:'11px'}} onClick={assign} disabled={assigning||!assignTechId}>
-                  {assigning?'Assigning…':'✅ Confirm Assignment'}
-                </button>
-                <button className="btn btn-secondary" style={{flex:1,padding:'11px'}} onClick={()=>setSelected(null)}>Cancel</button>
-              </div>
-            </div>
-          </div>
-        </Modal>
-      )}
-    </div>
-  );
-}
 
 // ── Technician Board ───────────────────────────────────────────────────────
 function TechnicianBoard(){
+  const {user}=useAuth();
+  const isAdminOrManager=user&&(user.role==='admin'||user.role==='manager');
   const [wos,setWos]=useState([]);
   const [loading,setLoading]=useState(true);
   const [completing,setCompleting]=useState(null);
@@ -783,9 +752,10 @@ function TechnicianBoard(){
 
   async function load(){
     try{
+      const scope='&my_jobs_only='+(!isAdminOrManager);
       const all=filterStatus
-        ?await api('/work-orders/?status='+filterStatus+'&limit=100')
-        :[...await api('/work-orders/?status=open&limit=100'),...await api('/work-orders/?status=in_progress&limit=100')];
+        ?await api('/work-orders/?status='+filterStatus+'&limit=100'+scope)
+        :[...await api('/work-orders/?status=open&limit=100'+scope),...await api('/work-orders/?status=in_progress&limit=100'+scope)];
       setWos(all.sort((a,b)=>{const p={critical:0,high:1,medium:2,low:3};return (p[a.priority]||2)-(p[b.priority]||2);}));
     }catch(e){toast(e.message,'err');}finally{setLoading(false);}
   }
@@ -861,7 +831,7 @@ function TechnicianBoard(){
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-        <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Work Order Board</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>All open work orders — sorted by priority</p></div>
+        <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Work Order Board</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>{isAdminOrManager?'All open work orders — sorted by priority':'Your assigned work orders — sorted by priority'}</p></div>
         <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'6px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:600}}>● Live</span>
       </div>
 
@@ -1048,11 +1018,16 @@ function TechnicianBoard(){
 
 // ── History Log ────────────────────────────────────────────────────────────
 function HistoryLog(){
+  const {user}=useAuth();
+  const isAdmin=user&&user.role==='admin';
   const [wos,setWos]=useState([]);
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
   const [statusFilter,setStatusFilter]=useState('completed');
   const [selected,setSelected]=useState(null);
+  const [editing,setEditing]=useState(null);   // wo being edited
+  const [editForm,setEditForm]=useState({});    // edit field values
+  const [saving,setSaving]=useState(false);
   const [dateFrom,setDateFrom]=useState('');
   const [dateTo,setDateTo]=useState('');
   const [locationFilter,setLocationFilter]=useState('');
@@ -1120,6 +1095,39 @@ function HistoryLog(){
       }
     }
     return '—';
+  }
+
+  function openEdit(wo){
+    setEditing(wo);
+    setEditForm({
+      title:            wo.title||'',
+      priority:         wo.priority||'medium',
+      status:           wo.status||'completed',
+      actual_hours:     wo.actual_hours!=null?wo.actual_hours:'',
+      affected_downtime:wo.affected_downtime!==false,
+      completed_at:     wo.completed_at?wo.completed_at.slice(0,16):'',
+      description:      wo.description||'',
+    });
+  }
+
+  async function saveEdit(){
+    if(!editing) return;
+    setSaving(true);
+    try{
+      const body={};
+      if(editForm.title)      body.title=editForm.title;
+      if(editForm.priority)   body.priority=editForm.priority;
+      if(editForm.status)     body.status=editForm.status;
+      body.affected_downtime=editForm.affected_downtime;
+      if(editForm.actual_hours!=='') body.actual_hours=parseFloat(editForm.actual_hours);
+      if(editForm.completed_at)      body.completed_at=new Date(editForm.completed_at).toISOString();
+      if(editForm.description)       body.description=editForm.description;
+      await api('/work-orders/'+editing.id,{method:'PATCH',body:JSON.stringify(body)});
+      toast('Work order updated ✅');
+      setEditing(null);
+      load();loadAnalysis();
+    }catch(e){toast(e.message,'err');}
+    finally{setSaving(false);}
   }
 
   return (
@@ -1240,7 +1248,10 @@ function HistoryLog(){
                       :<span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                   </td>
                   <td>
-                    <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
+                    <div style={{display:'flex',gap:'4px'}}>
+                      <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
+                      {isAdmin&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>openEdit(w)}>✏️ Edit</button>}
+                    </div>
                   </td>
                 </tr>
               );
@@ -1276,6 +1287,68 @@ function HistoryLog(){
               {selected._photos&&selected._photos.length>0
                 ?<PhotoViewer photos={selected._photos}/>
                 :<Empty msg="No photos attached"/>}
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Edit Modal (admin only) ── */}
+      {editing&&(
+        <Modal title={'Edit: '+editing.wo_number+' — '+(editing.asset?.name||'—')} onClose={()=>setEditing(null)} large>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+            <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
+              <div>
+                <label className="lbl">Title</label>
+                <input className="inp" value={editForm.title} onChange={e=>setEditForm({...editForm,title:e.target.value})}/>
+              </div>
+              <div>
+                <label className="lbl">Priority</label>
+                <select className="inp" value={editForm.priority} onChange={e=>setEditForm({...editForm,priority:e.target.value})}>
+                  {['low','medium','high','critical'].map(p=><option key={p} value={p}>{p.charAt(0).toUpperCase()+p.slice(1)}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="lbl">Status</label>
+                <select className="inp" value={editForm.status} onChange={e=>setEditForm({...editForm,status:e.target.value})}>
+                  {['open','in_progress','on_hold','completed','cancelled'].map(s=><option key={s} value={s}>{s.replace('_',' ')}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="lbl">Actual Hours</label>
+                <input type="number" step="0.5" min="0" className="inp" value={editForm.actual_hours} onChange={e=>setEditForm({...editForm,actual_hours:e.target.value})} placeholder="e.g. 2.5"/>
+              </div>
+              <div>
+                <label className="lbl">Completed At</label>
+                <input type="datetime-local" className="inp" value={editForm.completed_at} onChange={e=>setEditForm({...editForm,completed_at:e.target.value})}/>
+              </div>
+              <div>
+                <label className="lbl">Downtime Type</label>
+                <div style={{display:'flex',gap:'12px',marginTop:'4px'}}>
+                  {[['affected','Affected (Production Loss)'],[false,'Non-Affected']].map(([val,label])=>(
+                    <label key={String(val)} style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',cursor:'pointer'}}>
+                      <input type="radio" name="affected_downtime"
+                        checked={val==='affected'?editForm.affected_downtime===true:editForm.affected_downtime===false}
+                        onChange={()=>setEditForm({...editForm,affected_downtime:val==='affected'})}
+                      /> {label}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
+              <div style={{flex:1}}>
+                <label className="lbl">Description / Notes</label>
+                <textarea className="inp" rows={12} style={{resize:'vertical'}} value={editForm.description} onChange={e=>setEditForm({...editForm,description:e.target.value})}/>
+              </div>
+              <div style={{background:'#fef9c3',border:'1px solid #fde047',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#713f12'}}>
+                ⚠️ Admin edit — changes are permanent and will be reflected in all reports.
+              </div>
+              <div style={{display:'flex',gap:'8px'}}>
+                <button className="btn btn-primary" style={{flex:1,padding:'11px'}} onClick={saveEdit} disabled={saving}>
+                  {saving?'Saving…':'💾 Save Changes'}
+                </button>
+                <button className="btn btn-secondary" style={{flex:1,padding:'11px'}} onClick={()=>setEditing(null)}>Cancel</button>
+              </div>
             </div>
           </div>
         </Modal>
@@ -1504,21 +1577,60 @@ function Assets(){
   );
 }
 
-// ── Inventory ──────────────────────────────────────────────────────────────
-function Inventory(){
+// ── Inventory & Stock (combined) ────────────────────────────────────────────
+function InventoryAndStock(){
+  const {user}=useAuth();
+  const canManage=user&&(user.role==='admin'||user.role==='manager');
+  const [tab,setTab]=useState('parts'); // 'parts' | 'history'
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px',flexWrap:'wrap',gap:'10px'}}>
+        <div>
+          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Inventory & Stock</h1>
+          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Scan, manage parts, and track stock movements</p>
+        </div>
+        <div style={{display:'flex',gap:'8px'}}>
+          {[['parts','📦 Parts & Scanner'],['history','📋 Movement History']].map(([k,l])=>(
+            <button key={k} onClick={()=>setTab(k)} style={{
+              padding:'9px 22px',borderRadius:'8px',border:'none',cursor:'pointer',
+              fontSize:'14px',fontWeight:700,
+              background:tab===k?'#1e293b':'#f1f5f9',
+              color:tab===k?'#fff':'#64748b',
+            }}>{l}</button>
+          ))}
+        </div>
+      </div>
+      {tab==='parts'?<PartsAndScannerTab canManage={canManage}/>:<StockHistoryTab/>}
+    </div>
+  );
+}
+
+// ── Parts & Scanner (combined list + barcode scan/move) ───────────────────
+function PartsAndScannerTab({canManage}){
   const [parts,setParts]=useState([]);
+  const [categories,setCategories]=useState([]);
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
   const [catFilter,setCatFilter]=useState('');
   const [lowOnly,setLowOnly]=useState(false);
   const [modal,setModal]=useState(false);
   const [editPart,setEditPart]=useState(null);
-  const [restockId,setRestockId]=useState(null);
-  const [restockQty,setRestockQty]=useState(1);
   const [importModal,setImportModal]=useState(false);
   const [importResult,setImportResult]=useState(null);
   const [importing,setImporting]=useState(false);
   const importRef=useRef(null);
+
+  // ── Scanner state ──
+  const [scanOpen,setScanOpen]=useState(false);
+  const [mode,setMode]=useState('out'); // 'in' | 'out'
+  const [barcode,setBarcode]=useState('');
+  const [scanning,setScanning]=useState(false);
+  const [scanPart,setScanPart]=useState(null);
+  const [qty,setQty]=useState(1);
+  const [reason,setReason]=useState('');
+  const [reference,setReference]=useState('');
+  const [moveResult,setMoveResult]=useState(null);
+  const barcodeRef=useRef(null);
 
   const emptyForm={
     part_code:'',name:'',category:'',description:'',unit:'pcs',
@@ -1527,20 +1639,23 @@ function Inventory(){
   };
   const [form,setForm]=useState(emptyForm);
 
-  const CATS=['Electrical','Mechanical','Pneumatic','Hydraulic','Consumable','Other'];
-
   async function load(){
     try{
       let url='/inventory/?low_stock='+lowOnly;
       if(catFilter) url+='&category='+encodeURIComponent(catFilter);
-      setParts(await api(url));
+      const [p,cats]=await Promise.all([api(url),api('/inventory/categories')]);
+      setParts(p);
+      setCategories(cats);
     }catch(e){toast(e.message,'err');}
     finally{setLoading(false);}
   }
   useEffect(()=>{load();},[lowOnly,catFilter]);
   useWS('inventory',load);
 
+  useEffect(()=>{ if(scanOpen) setTimeout(()=>barcodeRef.current?.focus(),150); },[scanOpen]);
+
   async function save(){
+    if(!canManage){toast('Only admins and managers can edit parts','err');return;}
     try{
       const p={
         ...form,
@@ -1559,21 +1674,15 @@ function Inventory(){
     }catch(e){toast(e.message,'err');}
   }
 
-  async function restock(){
-    try{
-      await api('/inventory/'+restockId+'/restock?quantity='+restockQty,{method:'POST'});
-      toast('Restocked!');setRestockId(null);load();
-    }catch(e){toast(e.message,'err');}
-  }
-
   async function del(id,name){
+    if(!canManage){toast('Only admins and managers can delete parts','err');return;}
     if(!confirm('Delete part "'+name+'"?')) return;
     try{await api('/inventory/'+id,{method:'DELETE'});toast('Deleted');load();}
     catch(e){toast(e.message,'err');}
   }
 
-  // ── Excel import ─────────────────────────────────────────────────────────
   async function handleImport(e){
+    if(!canManage){toast('Only admins and managers can import parts','err');e.target.value='';return;}
     const file=e.target.files[0];
     if(!file) return;
     if(!file.name.endsWith('.xlsx')){toast('Please select an .xlsx file','err');return;}
@@ -1594,58 +1703,95 @@ function Inventory(){
     finally{setImporting(false);e.target.value='';}
   }
 
+  // ── Scanner logic ──
+  async function lookupBarcode(code){
+    const b=(code||barcode).trim();
+    if(!b) return;
+    setScanning(true);setScanPart(null);setMoveResult(null);setQty(1);setReason('');setReference('');
+    try{
+      const data=await api('/stock/scan/'+encodeURIComponent(b));
+      setScanPart(data);
+      setTimeout(()=>document.getElementById('qty-input')?.focus(),100);
+    }catch(e){toast(e.message,'err');setScanPart(null);}
+    finally{setScanning(false);}
+  }
+  function onBarcodeKey(e){ if(e.key==='Enter'){e.preventDefault();lookupBarcode();} }
+
+  async function submitMove(){
+    if(!scanPart){toast('Please scan a part first','err');return;}
+    if(qty<1){toast('Quantity must be at least 1','err');return;}
+    if(mode==='out'&&qty>scanPart.quantity_on_hand){
+      toast(`Only ${scanPart.quantity_on_hand} ${scanPart.unit||'pcs'} available`,'err');return;
+    }
+    try{
+      const endpoint=mode==='in'?'/stock/in':'/stock/out';
+      const data=await api(endpoint,{method:'POST',body:JSON.stringify({part_id:scanPart.id,quantity:qty,reason:reason||null,reference:reference||null})});
+      setMoveResult(data);
+      toast(data.message,data.low_stock?'err':'ok');
+      setScanPart(data.part);
+      setQty(1);setReason('');setReference('');setBarcode('');
+      setTimeout(()=>barcodeRef.current?.focus(),200);
+      load();
+    }catch(e){toast(e.message,'err');}
+  }
+
+  function openScanner(prefillBarcode){
+    setScanOpen(true);setScanPart(null);setMoveResult(null);setBarcode(prefillBarcode||'');setQty(1);setReason('');setReference('');
+    if(prefillBarcode) setTimeout(()=>lookupBarcode(prefillBarcode),50);
+  }
+  function closeScanner(){setScanOpen(false);setScanPart(null);setMoveResult(null);setBarcode('');}
+
   const filtered=parts.filter(p=>
     p.name.toLowerCase().includes(search.toLowerCase())||
     (p.part_code||'').toLowerCase().includes(search.toLowerCase())||
     (p.description||'').toLowerCase().includes(search.toLowerCase())
   );
-
   const topupCount=filtered.filter(p=>p.is_low_stock).length;
 
   return (
     <div>
-      {/* Header */}
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-        <div>
-          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Inventory</h1>
-          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Spare parts management</p>
-        </div>
+      {/* Action bar */}
+      <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'16px'}}>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
-          {/* Download template */}
-          <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>downloadFile('/inventory/import/template','CMMS_Inventory_Import_Template.xlsx')}>
+          <button className="btn btn-success" style={{fontSize:'13px',fontWeight:700}} onClick={()=>openScanner()}>
+            🔲 Scan to Stock In/Out
+          </button>
+          {canManage&&<>
+            <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>downloadFile('/inventory/import/template','CMMS_Inventory_Import_Template.xlsx')}>
               📥 Template
             </button>
-          {/* Import Excel */}
-          <label style={{cursor:'pointer'}}>
-            <span className="btn btn-secondary" style={{fontSize:'13px',display:'inline-block',background:importing?'#f1f5f9':'#fff'}}>
-              {importing?'⏳ Importing…':'📤 Import Excel'}
-            </span>
-            <input ref={importRef} type="file" accept=".xlsx" style={{display:'none'}} onChange={handleImport} disabled={importing}/>
-          </label>
-          {/* Export Excel */}
-          <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{
-              const qs=(catFilter?'?category='+encodeURIComponent(catFilter):'')+(lowOnly?(catFilter?'&':'?')+'low_stock=true':'');
-              downloadFile('/inventory/export/excel'+qs,'Inventory.xlsx');
-            }}>📊 Export Excel</button>
-          {/* Add part */}
-          <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setModal(true);}}>
-            + Add Part
-          </button>
+            <label style={{cursor:'pointer'}}>
+              <span className="btn btn-secondary" style={{fontSize:'13px',display:'inline-block',background:importing?'#f1f5f9':'#fff'}}>
+                {importing?'⏳ Importing…':'📤 Import Excel'}
+              </span>
+              <input ref={importRef} type="file" accept=".xlsx" style={{display:'none'}} onChange={handleImport} disabled={importing}/>
+            </label>
+            <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{
+                const qs=(catFilter?'?category='+encodeURIComponent(catFilter):'')+(lowOnly?(catFilter?'&':'?')+'low_stock=true':'');
+                downloadFile('/inventory/export/excel'+qs,'Inventory.xlsx');
+              }}>📊 Export Excel</button>
+            <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setModal(true);}}>
+              + Add Part
+            </button>
+          </>}
         </div>
       </div>
 
       {/* Filter bar */}
       <div style={{display:'flex',gap:'10px',marginBottom:'16px',alignItems:'center',flexWrap:'wrap'}}>
         <input className="inp" style={{maxWidth:'220px'}} placeholder="Search parts…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <select className="inp" style={{maxWidth:'160px'}} value={catFilter} onChange={e=>setCatFilter(e.target.value)}>
+        <select className="inp" style={{maxWidth:'180px'}} value={catFilter} onChange={e=>setCatFilter(e.target.value)}>
           <option value="">All categories</option>
-          {CATS.map(c=><option key={c} value={c}>{c}</option>)}
+          {categories.map(c=><option key={c} value={c}>{c}</option>)}
         </select>
         <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer',whiteSpace:'nowrap'}}>
           <input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/> ⚠️ Topup only
         </label>
         {topupCount>0&&<span style={{background:'#fef9c3',color:'#854d0e',padding:'3px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
           {topupCount} part{topupCount>1?'s':''} need Topup
+        </span>}
+        {!canManage&&<span style={{background:'#f1f5f9',color:'#64748b',padding:'3px 12px',borderRadius:'999px',fontSize:'11px'}}>
+          👁️ View only — prices hidden
         </span>}
       </div>
 
@@ -1654,7 +1800,11 @@ function Inventory(){
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No parts found"/>:(
           <div className="ovf"><table>
             <thead><tr>
-              {['No','Part Item','Category','Description','Qty','Rack No','Use at','Unit Price (RM)','Total (RM)','Barcode','Threshold','Status','Actions'].map(h=><th key={h}>{h}</th>)}
+              {[
+                'No','Part Item','Category','Description','Qty','Rack No','Use at',
+                ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
+                'Barcode','Threshold','Status','Actions',
+              ].map(h=><th key={h}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
               const isTopup=p.is_low_stock;
@@ -1669,8 +1819,10 @@ function Inventory(){
                   <td style={{fontWeight:700,color:isTopup?'#ea580c':'#1e293b',textAlign:'right'}}>{p.quantity_on_hand}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.location||'—'}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.used_on_asset||'—'}</td>
-                  <td style={{color:'#64748b',textAlign:'right'}}>{p.unit_cost?'RM '+p.unit_cost.toFixed(2):'—'}</td>
-                  <td style={{color:'#374151',fontWeight:500,textAlign:'right'}}>{total}</td>
+                  {canManage&&<>
+                    <td style={{color:'#64748b',textAlign:'right'}}>{p.unit_cost?'RM '+p.unit_cost.toFixed(2):'—'}</td>
+                    <td style={{color:'#374151',fontWeight:500,textAlign:'right'}}>{total}</td>
+                  </>}
                   <td style={{color:'#64748b',fontSize:'11px',fontFamily:'monospace'}}>{p.barcode||'—'}</td>
                   <td style={{textAlign:'right',color:'#64748b'}}>{p.reorder_level}</td>
                   <td>
@@ -1681,16 +1833,18 @@ function Inventory(){
                     }}>{p.status||'—'}</span>
                   </td>
                   <td style={{whiteSpace:'nowrap'}}>
-                    <button onClick={()=>{setEditPart(p);setForm({
-                      part_code:p.part_code,name:p.name,category:p.category||'',
-                      description:p.description||'',unit:p.unit||'pcs',
-                      quantity_on_hand:p.quantity_on_hand,reorder_level:p.reorder_level,
-                      unit_cost:p.unit_cost||'',supplier:p.supplier||'',
-                      location:p.location||'',barcode:p.barcode||'',
-                      used_on_asset:p.used_on_asset||'',
-                    });setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
-                    <button onClick={()=>{setRestockId(p.id);setRestockQty(1);}} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Restock</button>
-                    <button onClick={()=>del(p.id,p.name)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Delete</button>
+                    <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
+                    {canManage&&<>
+                      <button onClick={()=>{setEditPart(p);setForm({
+                        part_code:p.part_code,name:p.name,category:p.category||'',
+                        description:p.description||'',unit:p.unit||'pcs',
+                        quantity_on_hand:p.quantity_on_hand,reorder_level:p.reorder_level,
+                        unit_cost:p.unit_cost||'',supplier:p.supplier||'',
+                        location:p.location||'',barcode:p.barcode||'',
+                        used_on_asset:p.used_on_asset||'',
+                      });setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
+                      <button onClick={()=>del(p.id,p.name)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Delete</button>
+                    </>}
                   </td>
                 </tr>
               );
@@ -1699,8 +1853,8 @@ function Inventory(){
         )}
       </div>
 
-      {/* Add / Edit modal */}
-      {modal&&(
+      {/* Add / Edit modal — admin/manager only */}
+      {modal&&canManage&&(
         <Modal title={editPart?'Edit Part: '+editPart.part_code:'Add Spare Part'} onClose={()=>{setModal(false);setEditPart(null);}}>
           <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
@@ -1708,10 +1862,8 @@ function Inventory(){
                 <input className="inp" disabled={!!editPart} value={form.part_code} onChange={e=>setForm({...form,part_code:e.target.value})}/>
               </div>
               <div><label className="lbl">Category</label>
-                <select className="inp" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}>
-                  <option value="">Select…</option>
-                  {CATS.map(c=><option key={c} value={c}>{c}</option>)}
-                </select>
+                <input className="inp" list="cat-options" value={form.category} onChange={e=>setForm({...form,category:e.target.value})} placeholder="Type or select…"/>
+                <datalist id="cat-options">{categories.map(c=><option key={c} value={c}/>)}</datalist>
               </div>
             </div>
             <div><label className="lbl">Part Item (Name) *</label>
@@ -1753,21 +1905,6 @@ function Inventory(){
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
               <button className="btn btn-secondary" style={{flex:1}} onClick={()=>{setModal(false);setEditPart(null);}}>Cancel</button>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* Restock modal */}
-      {restockId&&(
-        <Modal title="Restock Part" onClose={()=>setRestockId(null)}>
-          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-            <div><label className="lbl">Quantity to Add</label>
-              <input type="number" className="inp" min={1} value={restockQty} onChange={e=>setRestockQty(+e.target.value)}/>
-            </div>
-            <div style={{display:'flex',gap:'10px'}}>
-              <button className="btn btn-primary" style={{flex:1}} onClick={restock} disabled={restockQty<1}>Confirm Restock</button>
-              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setRestockId(null)}>Cancel</button>
             </div>
           </div>
         </Modal>
@@ -1823,9 +1960,299 @@ function Inventory(){
           )}
         </Modal>
       )}
+
+      {/* ── Scanner modal ── */}
+      {scanOpen&&(
+        <Modal title="🔲 Scan to Stock In / Out" onClose={closeScanner} large>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+            {/* Left: scanner input */}
+            <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+              <div className="card" style={{padding:'16px'}}>
+                <div className="section-title" style={{marginBottom:'12px'}}>Transaction Type</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+                  <div onClick={()=>setMode('out')} style={{
+                    padding:'14px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
+                    border:mode==='out'?'2px solid #f59e0b':'2px solid #e2e8f0',
+                    background:mode==='out'?'#fefce8':'#fff',
+                  }}>
+                    <div style={{fontSize:'24px',marginBottom:'4px'}}>📤</div>
+                    <div style={{fontWeight:700,color:mode==='out'?'#b45309':'#64748b',fontSize:'13px'}}>Stock Out</div>
+                  </div>
+                  <div onClick={()=>setMode('in')} style={{
+                    padding:'14px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
+                    border:mode==='in'?'2px solid #16a34a':'2px solid #e2e8f0',
+                    background:mode==='in'?'#f0fdf4':'#fff',
+                  }}>
+                    <div style={{fontSize:'24px',marginBottom:'4px'}}>📥</div>
+                    <div style={{fontWeight:700,color:mode==='in'?'#16a34a':'#64748b',fontSize:'13px'}}>Stock In</div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="card" style={{padding:'16px'}}>
+                <div className="section-title" style={{marginBottom:'12px'}}>Scan Barcode</div>
+                <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
+                  <input
+                    ref={barcodeRef}
+                    className="inp"
+                    placeholder="Scan or type barcode / part No…"
+                    value={barcode}
+                    onChange={e=>setBarcode(e.target.value)}
+                    onKeyDown={onBarcodeKey}
+                    style={{fontSize:'16px',letterSpacing:'1px'}}
+                    autoComplete="off"
+                  />
+                  <button className="btn btn-primary" onClick={()=>lookupBarcode()} disabled={scanning||!barcode.trim()} style={{whiteSpace:'nowrap',minWidth:'80px'}}>
+                    {scanning?'…':'🔍 Find'}
+                  </button>
+                </div>
+                <div style={{fontSize:'12px',color:'#94a3b8'}}>💡 Scan with a device or type the part No and press Enter.</div>
+              </div>
+
+              {scanPart&&(
+                <div className="card" style={{padding:'16px'}}>
+                  <div className="section-title" style={{marginBottom:'12px'}}>
+                    {mode==='out'?'📤 Stock Out Details':'📥 Stock In Details'}
+                  </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+                    <div>
+                      <label className="lbl">Quantity *</label>
+                      <input
+                        id="qty-input" type="number" min={1}
+                        max={mode==='out'?scanPart.quantity_on_hand:9999}
+                        className="inp" style={{fontSize:'20px',fontWeight:700,textAlign:'center'}}
+                        value={qty} onChange={e=>setQty(parseInt(e.target.value)||1)}
+                        onKeyDown={e=>e.key==='Enter'&&submitMove()}
+                      />
+                      {mode==='out'&&<div style={{fontSize:'12px',color:'#64748b',marginTop:'4px'}}>
+                        Available: <strong>{scanPart.quantity_on_hand}</strong> {scanPart.unit||'pcs'}
+                      </div>}
+                    </div>
+                    <div>
+                      <label className="lbl">Reason <small style={{fontWeight:400,color:'#94a3b8'}}>(optional)</small></label>
+                      <select className="inp" value={reason} onChange={e=>setReason(e.target.value)}>
+                        <option value="">Select reason…</option>
+                        {mode==='out'
+                          ?['Used for repair','Preventive maintenance','Machine breakdown','Testing','Others'].map(r=><option key={r} value={r}>{r}</option>)
+                          :['Purchase received','Returned unused','Stock adjustment','Transfer in','Others'].map(r=><option key={r} value={r}>{r}</option>)
+                        }
+                      </select>
+                    </div>
+                    <div>
+                      <label className="lbl">Reference <small style={{fontWeight:400,color:'#94a3b8'}}>(WO No / PO No)</small></label>
+                      <input className="inp" placeholder="e.g. WO-202506-0012" value={reference} onChange={e=>setReference(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitMove()}/>
+                    </div>
+                    <button
+                      style={{padding:'13px',fontSize:'15px',fontWeight:700,border:'none',borderRadius:'8px',cursor:'pointer',background:mode==='out'?'#d97706':'#16a34a',color:'#fff'}}
+                      onClick={submitMove}
+                    >
+                      {mode==='out'?`📤 Confirm Stock Out (−${qty})`:`📥 Confirm Stock In (+${qty})`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Right: part card + result */}
+            <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+              {!scanPart&&!scanning&&(
+                <div className="card" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'50px 20px',textAlign:'center',background:'#f8fafc',border:'2px dashed #e2e8f0'}}>
+                  <div style={{fontSize:'48px',marginBottom:'14px'}}>🔲</div>
+                  <div style={{fontWeight:700,color:'#374151',fontSize:'15px',marginBottom:'6px'}}>Ready to scan</div>
+                  <div style={{color:'#94a3b8',fontSize:'12px',lineHeight:1.6}}>Scan a barcode or type the part No</div>
+                </div>
+              )}
+              {scanning&&<div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'50px'}}><Spinner/></div>}
+              {scanPart&&!scanning&&(
+                <div className="card" style={{border:scanPart.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',background:scanPart.is_low_stock?'#fefce8':'#fff'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'12px'}}>
+                    <div style={{flex:1}}>
+                      <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700,marginBottom:'4px'}}>{scanPart.part_code}</div>
+                      <div style={{fontWeight:800,color:'#1e293b',fontSize:'16px',marginBottom:'4px'}}>{scanPart.name}</div>
+                      <div style={{fontSize:'12px',color:'#64748b'}}>{scanPart.category}{scanPart.description&&' · '+scanPart.description}</div>
+                    </div>
+                    <span style={{padding:'4px 12px',borderRadius:'999px',fontSize:'11px',fontWeight:700,flexShrink:0,background:scanPart.is_low_stock?'#fef9c3':'#dcfce7',color:scanPart.is_low_stock?'#854d0e':'#166534'}}>{scanPart.status}</span>
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',background:'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{fontSize:'24px',fontWeight:800,color:scanPart.is_low_stock?'#ea580c':'#2563eb'}}>{scanPart.quantity_on_hand}</div>
+                      <div style={{fontSize:'11px',color:'#94a3b8'}}>Current Stock</div>
+                    </div>
+                    <div style={{textAlign:'center',borderLeft:'1px solid #e2e8f0',borderRight:'1px solid #e2e8f0'}}>
+                      <div style={{fontSize:'24px',fontWeight:800,color:'#64748b'}}>{scanPart.reorder_level}</div>
+                      <div style={{fontSize:'11px',color:'#94a3b8'}}>Min Level</div>
+                    </div>
+                    <div style={{textAlign:'center'}}>
+                      <div style={{fontSize:'16px',fontWeight:700,color:'#374151'}}>{scanPart.unit||'pcs'}</div>
+                      <div style={{fontSize:'11px',color:'#94a3b8'}}>Unit</div>
+                    </div>
+                  </div>
+                  <div style={{fontSize:'12px',color:'#374151',lineHeight:1.9}}>
+                    {scanPart.location&&<div>📍 <strong>Location:</strong> {scanPart.location}</div>}
+                    {scanPart.used_on_asset&&<div>🏭 <strong>Used on:</strong> {scanPart.used_on_asset}</div>}
+                    {canManage&&scanPart.unit_cost!=null&&<div>💰 <strong>Unit Price:</strong> RM {scanPart.unit_cost.toFixed(2)}</div>}
+                    {scanPart.barcode&&<div>🔲 <strong>Barcode:</strong> <span style={{fontFamily:'monospace'}}>{scanPart.barcode}</span></div>}
+                  </div>
+                  {scanPart.is_low_stock&&(
+                    <div style={{marginTop:'10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'8px 12px',fontSize:'12px',color:'#991b1b',fontWeight:600}}>
+                      ⚠️ Low stock — below minimum level!
+                    </div>
+                  )}
+                </div>
+              )}
+              {moveResult&&(
+                <div style={{background:moveResult.low_stock?'#fef2f2':mode==='out'?'#fefce8':'#f0fdf4',border:`2px solid ${moveResult.low_stock?'#fca5a5':mode==='out'?'#fde68a':'#bbf7d0'}`,borderRadius:'12px',padding:'14px'}}>
+                  <div style={{fontWeight:700,fontSize:'14px',marginBottom:'8px',color:moveResult.low_stock?'#991b1b':mode==='out'?'#b45309':'#16a34a'}}>
+                    {mode==='out'?'📤 Stock Out Complete':'📥 Stock In Complete'}
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px'}}>
+                    {[
+                      {label:'Before',value:moveResult.qty_before},
+                      {label:mode==='out'?'Removed':'Added',value:(mode==='out'?'−':'+')+(moveResult.qty_after!==undefined?Math.abs(moveResult.qty_after-moveResult.qty_before):0)},
+                      {label:'After', value:moveResult.qty_after},
+                    ].map((s,i)=>(
+                      <div key={i} style={{textAlign:'center',background:'rgba(255,255,255,0.7)',borderRadius:'8px',padding:'8px'}}>
+                        <div style={{fontSize:'20px',fontWeight:800,color:'#1e293b'}}>{s.value}</div>
+                        <div style={{fontSize:'11px',color:'#64748b'}}>{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
+
+// ── Stock Movement History (kept separate) ─────────────────────────────────
+function StockHistoryTab(){
+  const [history,setHistory]=useState([]);
+  const [histLoading,setHistLoading]=useState(false);
+  const [histFilter,setHistFilter]=useState('');
+  const [histDateFrom,setHistDateFrom]=useState('');
+  const [histDateTo,setHistDateTo]=useState('');
+
+  async function loadHistory(){
+    setHistLoading(true);
+    try{
+      let url='/stock/history?limit=200';
+      if(histFilter)   url+='&movement='+histFilter;
+      if(histDateFrom) url+='&date_from='+histDateFrom;
+      if(histDateTo)   url+='&date_to='+histDateTo;
+      setHistory(await api(url));
+    }catch(e){toast(e.message,'err');}
+    finally{setHistLoading(false);}
+  }
+  useEffect(()=>{loadHistory();},[histFilter,histDateFrom,histDateTo]);
+  useWS('inventory',loadHistory);
+
+  function fmtDT(d){
+    if(!d) return '—';
+    const s=String(d); const dt=toUTC(s.endsWith('Z')||s.includes('+') ? s : s+'Z');
+    return dt.toLocaleString('en-MY',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  }
+
+  const moveColor = {
+    stock_in: {bg:'#dcfce7',color:'#166534',label:'Stock In',icon:'📥'},
+    stock_out:{bg:'#fef9c3',color:'#854d0e',label:'Stock Out',icon:'📤'},
+    restock:  {bg:'#dbeafe',color:'#1e40af',label:'Restock',  icon:'🔄'},
+    adjustment:{bg:'#f1f5f9',color:'#475569',label:'Adjust',  icon:'⚙️'},
+  };
+
+  return (
+    <div>
+      {/* Filter bar */}
+      <div style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #f1f5f9',marginBottom:'16px',display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-end'}}>
+        <div style={{minWidth:'160px'}}>
+          <label className="lbl">Movement Type</label>
+          <select className="inp" value={histFilter} onChange={e=>setHistFilter(e.target.value)}>
+            <option value="">All movements</option>
+            <option value="stock_in">📥 Stock In</option>
+            <option value="stock_out">📤 Stock Out</option>
+            <option value="restock">🔄 Restock</option>
+          </select>
+        </div>
+        <div style={{minWidth:'140px'}}>
+          <label className="lbl">From Date</label>
+          <input type="date" className="inp" value={histDateFrom} onChange={e=>setHistDateFrom(e.target.value)}/>
+        </div>
+        <div style={{minWidth:'140px'}}>
+          <label className="lbl">To Date</label>
+          <input type="date" className="inp" value={histDateTo} onChange={e=>setHistDateTo(e.target.value)}/>
+        </div>
+        <button className="btn btn-primary" onClick={loadHistory}>🔍 Search</button>
+        <button className="btn btn-secondary" onClick={()=>downloadFile('/stock/history/export.xlsx'+(histFilter?'?movement='+histFilter:''),'StockHistory.xlsx')}>
+          📊 Export Excel
+        </button>
+      </div>
+
+      {/* Summary cards */}
+      {history.length>0&&(()=>{
+        const inCount  = history.filter(h=>h.movement==='stock_in').length;
+        const outCount = history.filter(h=>h.movement==='stock_out').length;
+        const inQty    = history.filter(h=>h.movement==='stock_in').reduce((s,h)=>s+(h.quantity||0),0);
+        const outQty   = history.filter(h=>h.movement==='stock_out').reduce((s,h)=>s+(h.quantity||0),0);
+        return (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'12px',marginBottom:'16px'}}>
+            {[
+              {icon:'📋',label:'Total Movements',value:history.length,bg:'#eff6ff',color:'#2563eb'},
+              {icon:'📥',label:'Stock In (txn)',value:inCount,bg:'#f0fdf4',color:'#16a34a'},
+              {icon:'📤',label:'Stock Out (txn)',value:outCount,bg:'#fefce8',color:'#b45309'},
+              {icon:'📦',label:'Net Qty Change',value:(inQty-outQty>=0?'+':''+(inQty-outQty)),bg:'#f5f3ff',color:'#5b21b6'},
+            ].map((s,i)=>(
+              <div key={i} className="kpi" style={{padding:'14px'}}>
+                <div className="kpi-icon" style={{background:s.bg,width:'38px',height:'38px',fontSize:'16px'}}>{s.icon}</div>
+                <div>
+                  <div style={{fontSize:'22px',fontWeight:800,color:s.color,lineHeight:1}}>{s.value}</div>
+                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>{s.label}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* History table */}
+      <div className="card" style={{padding:0}}>
+        {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
+          <div className="ovf"><table>
+            <thead><tr>
+              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}</th>)}
+            </tr></thead>
+            <tbody>{history.map((h,i)=>{
+              const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
+              const sign=h.movement==='stock_out'?'−':'+';
+              return (
+                <tr key={i}>
+                  <td style={{whiteSpace:'nowrap',fontSize:'12px',color:'#64748b'}}>{fmtDT(h.created_at)}</td>
+                  <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{h.part_code}</span></td>
+                  <td style={{fontWeight:600}}>{h.part_name}</td>
+                  <td>
+                    <span style={{background:mc.bg,color:mc.color,padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,whiteSpace:'nowrap'}}>
+                      {mc.icon} {mc.label||h.movement}
+                    </span>
+                  </td>
+                  <td style={{textAlign:'right',fontWeight:700,color:h.movement==='stock_out'?'#ea580c':'#16a34a',fontSize:'14px'}}>
+                    {sign}{h.quantity}
+                  </td>
+                  <td style={{textAlign:'right',color:'#64748b'}}>{h.qty_before}</td>
+                  <td style={{textAlign:'right',fontWeight:600,color:'#1e293b'}}>{h.qty_after}</td>
+                  <td style={{color:'#64748b',fontSize:'12px'}}>{h.reason||'—'}</td>
+                  <td style={{fontFamily:'monospace',fontSize:'12px',color:'#2563eb'}}>{h.reference||'—'}</td>
+                  <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{h.performed_by_name}</td>
+                </tr>
+              );
+            })}</tbody>
+          </table></div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 
 function PMSchedules(){
   const [schedules,setSchedules]=useState([]);
@@ -1903,520 +2330,121 @@ function PMSchedules(){
 }
 
 
-// ── Stock Scanner ──────────────────────────────────────────────────────────
-function StockScanner(){
-  const [mode,setMode]       = useState('out');       // 'in' | 'out'
-  const [barcode,setBarcode] = useState('');
-  const [scanning,setScanning]= useState(false);
-  const [part,setPart]       = useState(null);
-  const [qty,setQty]         = useState(1);
-  const [reason,setReason]   = useState('');
-  const [reference,setReference]= useState('');
-  const [result,setResult]   = useState(null);        // last action result
-  const [history,setHistory] = useState([]);
-  const [histLoading,setHistLoading]= useState(false);
-  const [histFilter,setHistFilter]= useState('');
-  const [histDateFrom,setHistDateFrom]= useState('');
-  const [histDateTo,setHistDateTo]= useState('');
-  const [activeTab,setActiveTab]= useState('scan');   // 'scan' | 'history'
-  const barcodeRef = useRef(null);
-
-  // Auto-focus barcode input when tab is scan
-  useEffect(()=>{ if(activeTab==='scan') barcodeRef.current?.focus(); },[activeTab]);
-
-  // Load history
-  async function loadHistory(){
-    setHistLoading(true);
-    try{
-      let url='/stock/history?limit=200';
-      if(histFilter)   url+='&movement='+histFilter;
-      if(histDateFrom) url+='&date_from='+histDateFrom;
-      if(histDateTo)   url+='&date_to='+histDateTo;
-      setHistory(await api(url));
-    }catch(e){toast(e.message,'err');}
-    finally{setHistLoading(false);}
-  }
-
-  useEffect(()=>{ if(activeTab==='history') loadHistory(); },[activeTab,histFilter,histDateFrom,histDateTo]);
-  useWS('inventory', ev=>{
-    if(activeTab==='history') loadHistory();
-    // Refresh part card if it's the same part
-    if(part && (ev.payload?.part_id===part.id)) lookupBarcode(barcode);
-  });
-
-  // Lookup by barcode
-  async function lookupBarcode(code){
-    const b = (code||barcode).trim();
-    if(!b) return;
-    setScanning(true); setPart(null); setResult(null); setQty(1); setReason(''); setReference('');
-    try{
-      const data = await api('/stock/scan/'+encodeURIComponent(b));
-      setPart(data);
-      // Auto-focus qty field after scan
-      setTimeout(()=>document.getElementById('qty-input')?.focus(), 100);
-    }catch(e){
-      toast(e.message,'err');
-      setPart(null);
-    }finally{setScanning(false);}
-  }
-
-  // Handle barcode input — scan on Enter key
-  function onBarcodeKey(e){
-    if(e.key==='Enter'){
-      e.preventDefault();
-      lookupBarcode();
-    }
-  }
-
-  // Submit stock in or out
-  async function submitMove(){
-    if(!part){ toast('Please scan a part first','err'); return; }
-    if(qty<1){ toast('Quantity must be at least 1','err'); return; }
-    if(mode==='out' && qty>part.quantity_on_hand){
-      toast(`Only ${part.quantity_on_hand} ${part.unit||'pcs'} available`,'err'); return;
-    }
-    try{
-      const endpoint = mode==='in' ? '/stock/in' : '/stock/out';
-      const data = await api(endpoint,{
-        method:'POST',
-        body:JSON.stringify({
-          part_id:   part.id,
-          quantity:  qty,
-          reason:    reason||null,
-          reference: reference||null,
-        }),
-      });
-      setResult(data);
-      toast(data.message, data.low_stock?'err':'ok');
-      // Refresh part card with new qty
-      setPart(data.part);
-      // Clear fields for next scan
-      setQty(1); setReason(''); setReference('');
-      setBarcode('');
-      // Re-focus barcode for next item
-      setTimeout(()=>barcodeRef.current?.focus(), 200);
-    }catch(e){ toast(e.message,'err'); }
-  }
-
-  function fmtDT(d){
-    if(!d) return '—';
-    const s=String(d); const dt=toUTC(s.endsWith('Z')||s.includes('+') ? s : s+'Z');
-    return dt.toLocaleString('en-MY',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
-  }
-
-  const moveColor = {
-    stock_in: {bg:'#dcfce7',color:'#166534',label:'Stock In',icon:'📥'},
-    stock_out:{bg:'#fef9c3',color:'#854d0e',label:'Stock Out',icon:'📤'},
-    restock:  {bg:'#dbeafe',color:'#1e40af',label:'Restock',  icon:'🔄'},
-    adjustment:{bg:'#f1f5f9',color:'#475569',label:'Adjust',  icon:'⚙️'},
-  };
-
-  return (
-    <div>
-      {/* Header */}
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-        <div>
-          <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Stock Scanner</h1>
-          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Scan barcode to stock in or out spare parts</p>
-        </div>
-        <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>downloadFile('/stock/history/export.xlsx','StockHistory.xlsx')}>
-          📊 Export History
-        </button>
-      </div>
-
-      {/* Tabs */}
-      <div style={{display:'flex',gap:'8px',marginBottom:'20px'}}>
-        {[['scan','🔍 Scan & Move'],['history','📋 Movement History']].map(([k,l])=>(
-          <button key={k} onClick={()=>setActiveTab(k)} style={{
-            padding:'8px 20px',borderRadius:'8px',border:'none',cursor:'pointer',
-            fontSize:'14px',fontWeight:600,
-            background:activeTab===k?'#2563eb':'#f1f5f9',
-            color:activeTab===k?'#fff':'#64748b',
-          }}>{l}</button>
-        ))}
-      </div>
-
-      {/* ── SCAN TAB ── */}
-      {activeTab==='scan'&&(
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
-
-          {/* Left: Scanner input */}
-          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-
-            {/* Mode toggle */}
-            <div className="card" style={{padding:'16px'}}>
-              <div className="section-title" style={{marginBottom:'12px'}}>Transaction Type</div>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-                <div onClick={()=>setMode('out')} style={{
-                  padding:'16px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
-                  border:mode==='out'?'2px solid #f59e0b':'2px solid #e2e8f0',
-                  background:mode==='out'?'#fefce8':'#fff',
-                }}>
-                  <div style={{fontSize:'28px',marginBottom:'4px'}}>📤</div>
-                  <div style={{fontWeight:700,color:mode==='out'?'#b45309':'#64748b',fontSize:'14px'}}>Stock Out</div>
-                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Take parts from store</div>
-                </div>
-                <div onClick={()=>setMode('in')} style={{
-                  padding:'16px',borderRadius:'12px',cursor:'pointer',textAlign:'center',
-                  border:mode==='in'?'2px solid #16a34a':'2px solid #e2e8f0',
-                  background:mode==='in'?'#f0fdf4':'#fff',
-                }}>
-                  <div style={{fontSize:'28px',marginBottom:'4px'}}>📥</div>
-                  <div style={{fontWeight:700,color:mode==='in'?'#16a34a':'#64748b',fontSize:'14px'}}>Stock In</div>
-                  <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Add parts to store</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Barcode input */}
-            <div className="card" style={{padding:'16px'}}>
-              <div className="section-title" style={{marginBottom:'12px'}}>Scan Barcode</div>
-              <div style={{display:'flex',gap:'8px',marginBottom:'12px'}}>
-                <input
-                  ref={barcodeRef}
-                  className="inp"
-                  placeholder="Scan or type barcode / part No…"
-                  value={barcode}
-                  onChange={e=>setBarcode(e.target.value)}
-                  onKeyDown={onBarcodeKey}
-                  style={{fontSize:'16px',letterSpacing:'1px'}}
-                  autoComplete="off"
-                />
-                <button className="btn btn-primary" onClick={()=>lookupBarcode()} disabled={scanning||!barcode.trim()} style={{whiteSpace:'nowrap',minWidth:'80px'}}>
-                  {scanning?'…':'🔍 Find'}
-                </button>
-              </div>
-              <div style={{fontSize:'12px',color:'#94a3b8',display:'flex',alignItems:'center',gap:'6px'}}>
-                <span style={{fontSize:'16px'}}>💡</span>
-                Point a barcode scanner at the item — it types and submits automatically.
-                Or type the part No and press <strong style={{color:'#374151'}}>Enter</strong>.
-              </div>
-            </div>
-
-            {/* Qty + reason */}
-            {part&&(
-              <div className="card" style={{padding:'16px'}}>
-                <div className="section-title" style={{marginBottom:'12px'}}>
-                  {mode==='out'?'📤 Stock Out Details':'📥 Stock In Details'}
-                </div>
-                <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-                  <div>
-                    <label className="lbl">Quantity <span style={{color:'#ef4444'}}>*</span></label>
-                    <input
-                      id="qty-input"
-                      type="number"
-                      min={1}
-                      max={mode==='out'?part.quantity_on_hand:9999}
-                      className="inp"
-                      style={{fontSize:'20px',fontWeight:700,textAlign:'center'}}
-                      value={qty}
-                      onChange={e=>setQty(parseInt(e.target.value)||1)}
-                      onKeyDown={e=>e.key==='Enter'&&submitMove()}
-                    />
-                    {mode==='out'&&<div style={{fontSize:'12px',color:'#64748b',marginTop:'4px'}}>
-                      Available: <strong>{part.quantity_on_hand}</strong> {part.unit||'pcs'}
-                    </div>}
-                  </div>
-                  <div>
-                    <label className="lbl">Reason <small style={{fontWeight:400,color:'#94a3b8'}}>(optional)</small></label>
-                    <select className="inp" value={reason} onChange={e=>setReason(e.target.value)}>
-                      <option value="">Select reason…</option>
-                      {mode==='out'
-                        ?['Used for repair','Preventive maintenance','Machine breakdown','Testing','Others'].map(r=><option key={r} value={r}>{r}</option>)
-                        :['Purchase received','Returned unused','Stock adjustment','Transfer in','Others'].map(r=><option key={r} value={r}>{r}</option>)
-                      }
-                    </select>
-                  </div>
-                  <div>
-                    <label className="lbl">Reference <small style={{fontWeight:400,color:'#94a3b8'}}>(WO No / PO No)</small></label>
-                    <input className="inp" placeholder="e.g. WO-202506-0012" value={reference} onChange={e=>setReference(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitMove()}/>
-                  </div>
-                  <button
-                    className={mode==='out'?'btn':'btn btn-success'}
-                    style={{
-                      padding:'13px',fontSize:'15px',fontWeight:700,
-                      background:mode==='out'?'#d97706':'#16a34a',color:'#fff',
-                    }}
-                    onClick={submitMove}
-                  >
-                    {mode==='out'?`📤 Confirm Stock Out (−${qty})`:`📥 Confirm Stock In (+${qty})`}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Right: Part card + result */}
-          <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-
-            {/* Part card */}
-            {!part&&!scanning&&(
-              <div className="card" style={{
-                display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
-                padding:'60px 20px',textAlign:'center',background:'#f8fafc',border:'2px dashed #e2e8f0',
-              }}>
-                <div style={{fontSize:'56px',marginBottom:'16px'}}>🔲</div>
-                <div style={{fontWeight:700,color:'#374151',fontSize:'16px',marginBottom:'8px'}}>Ready to scan</div>
-                <div style={{color:'#94a3b8',fontSize:'13px',lineHeight:1.6}}>
-                  Scan a barcode with your scanner device<br/>
-                  or type the barcode / part No in the field
-                </div>
-              </div>
-            )}
-
-            {scanning&&(
-              <div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'60px'}}>
-                <Spinner/>
-              </div>
-            )}
-
-            {part&&!scanning&&(
-              <div className="card" style={{
-                border: part.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',
-                background: part.is_low_stock?'#fefce8':'#fff',
-              }}>
-                {/* Part header */}
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'14px'}}>
-                  <div style={{flex:1}}>
-                    <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'13px',fontWeight:700,marginBottom:'4px'}}>
-                      {part.part_code}
-                    </div>
-                    <div style={{fontWeight:800,color:'#1e293b',fontSize:'18px',marginBottom:'4px'}}>{part.name}</div>
-                    <div style={{fontSize:'12px',color:'#64748b'}}>{part.category}{part.description&&' · '+part.description}</div>
-                  </div>
-                  <span style={{
-                    padding:'4px 14px',borderRadius:'999px',fontSize:'12px',fontWeight:700,flexShrink:0,
-                    background:part.is_low_stock?'#fef9c3':'#dcfce7',
-                    color:part.is_low_stock?'#854d0e':'#166534',
-                  }}>{part.status}</span>
-                </div>
-
-                {/* Stock level */}
-                <div style={{
-                  display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',
-                  background:'#f8fafc',borderRadius:'10px',padding:'14px',marginBottom:'14px',
-                }}>
-                  <div style={{textAlign:'center'}}>
-                    <div style={{fontSize:'28px',fontWeight:800,color:part.is_low_stock?'#ea580c':'#2563eb'}}>{part.quantity_on_hand}</div>
-                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Current Stock</div>
-                  </div>
-                  <div style={{textAlign:'center',borderLeft:'1px solid #e2e8f0',borderRight:'1px solid #e2e8f0'}}>
-                    <div style={{fontSize:'28px',fontWeight:800,color:'#64748b'}}>{part.reorder_level}</div>
-                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Min Level</div>
-                  </div>
-                  <div style={{textAlign:'center'}}>
-                    <div style={{fontSize:'18px',fontWeight:700,color:'#374151'}}>{part.unit||'pcs'}</div>
-                    <div style={{fontSize:'11px',color:'#94a3b8'}}>Unit</div>
-                  </div>
-                </div>
-
-                {/* Details */}
-                <div style={{fontSize:'13px',color:'#374151',lineHeight:2}}>
-                  {part.location&&<div>📍 <strong>Location:</strong> {part.location}</div>}
-                  {part.used_on_asset&&<div>🏭 <strong>Used on:</strong> {part.used_on_asset}</div>}
-                  {part.unit_cost&&<div>💰 <strong>Unit Price:</strong> RM {part.unit_cost.toFixed(2)}</div>}
-                  {part.barcode&&<div>🔲 <strong>Barcode:</strong> <span style={{fontFamily:'monospace'}}>{part.barcode}</span></div>}
-                </div>
-
-                {/* Low stock warning */}
-                {part.is_low_stock&&(
-                  <div style={{marginTop:'12px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px 14px',fontSize:'13px',color:'#991b1b',fontWeight:600}}>
-                    ⚠️ Low stock — below minimum level! Please restock.
-                  </div>
-                )}
-
-                {/* Recent movements */}
-                {part.recent_movements&&part.recent_movements.length>0&&(
-                  <div style={{marginTop:'14px'}}>
-                    <div style={{fontSize:'12px',fontWeight:700,color:'#64748b',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:'8px'}}>Recent Movements</div>
-                    {part.recent_movements.map((m,i)=>{
-                      const mc=moveColor[m.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️'};
-                      const sign=m.movement==='stock_out'?'−':'+';
-                      return (
-                        <div key={i} style={{display:'flex',alignItems:'center',gap:'10px',padding:'6px 0',borderBottom:'1px solid #f1f5f9'}}>
-                          <span style={{background:mc.bg,color:mc.color,padding:'2px 8px',borderRadius:'6px',fontSize:'11px',fontWeight:700,flexShrink:0}}>
-                            {mc.icon} {sign}{m.quantity}
-                          </span>
-                          <div style={{flex:1,minWidth:0}}>
-                            <div style={{fontSize:'12px',color:'#374151',fontWeight:500}}>{m.reason||'—'}</div>
-                            <div style={{fontSize:'11px',color:'#94a3b8'}}>{m.performed_by_name}</div>
-                          </div>
-                          <div style={{fontSize:'11px',color:'#94a3b8',whiteSpace:'nowrap'}}>{fmtDT(m.created_at)}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Transaction result banner */}
-            {result&&(
-              <div style={{
-                background: result.low_stock?'#fef2f2':mode==='out'?'#fefce8':'#f0fdf4',
-                border: `2px solid ${result.low_stock?'#fca5a5':mode==='out'?'#fde68a':'#bbf7d0'}`,
-                borderRadius:'12px',padding:'16px',
-              }}>
-                <div style={{fontWeight:700,fontSize:'15px',marginBottom:'8px',color:result.low_stock?'#991b1b':mode==='out'?'#b45309':'#16a34a'}}>
-                  {mode==='out'?'📤 Stock Out Complete':'📥 Stock In Complete'}
-                </div>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'8px',marginBottom:'8px'}}>
-                  {[
-                    {label:'Before',value:result.qty_before},
-                    {label:mode==='out'?'Removed':'Added',value:(mode==='out'?'−':'+')+(result.qty_after!==undefined?Math.abs(result.qty_after-result.qty_before):0)},
-                    {label:'After', value:result.qty_after},
-                  ].map((s,i)=>(
-                    <div key={i} style={{textAlign:'center',background:'rgba(255,255,255,0.7)',borderRadius:'8px',padding:'8px'}}>
-                      <div style={{fontSize:'22px',fontWeight:800,color:'#1e293b'}}>{s.value}</div>
-                      <div style={{fontSize:'11px',color:'#64748b'}}>{s.label}</div>
-                    </div>
-                  ))}
-                </div>
-                {result.low_stock&&<div style={{fontSize:'12px',color:'#991b1b',fontWeight:600}}>⚠️ Stock is now below minimum level — please restock!</div>}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── HISTORY TAB ── */}
-      {activeTab==='history'&&(
-        <div>
-          {/* Filter bar */}
-          <div style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #f1f5f9',marginBottom:'16px',display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-end'}}>
-            <div style={{minWidth:'160px'}}>
-              <label className="lbl">Movement Type</label>
-              <select className="inp" value={histFilter} onChange={e=>setHistFilter(e.target.value)}>
-                <option value="">All movements</option>
-                <option value="stock_in">📥 Stock In</option>
-                <option value="stock_out">📤 Stock Out</option>
-                <option value="restock">🔄 Restock</option>
-              </select>
-            </div>
-            <div style={{minWidth:'140px'}}>
-              <label className="lbl">From Date</label>
-              <input type="date" className="inp" value={histDateFrom} onChange={e=>setHistDateFrom(e.target.value)}/>
-            </div>
-            <div style={{minWidth:'140px'}}>
-              <label className="lbl">To Date</label>
-              <input type="date" className="inp" value={histDateTo} onChange={e=>setHistDateTo(e.target.value)}/>
-            </div>
-            <button className="btn btn-primary" onClick={loadHistory}>🔍 Search</button>
-            <button className="btn btn-secondary" onClick={()=>downloadFile('/stock/history/export.xlsx'+(histFilter?'?movement='+histFilter:''),'StockHistory.xlsx')}>
-              📊 Export Excel
-            </button>
-          </div>
-
-          {/* Summary cards */}
-          {history.length>0&&(()=>{
-            const inCount  = history.filter(h=>h.movement==='stock_in').length;
-            const outCount = history.filter(h=>h.movement==='stock_out').length;
-            const inQty    = history.filter(h=>h.movement==='stock_in').reduce((s,h)=>s+(h.quantity||0),0);
-            const outQty   = history.filter(h=>h.movement==='stock_out').reduce((s,h)=>s+(h.quantity||0),0);
-            return (
-              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'12px',marginBottom:'16px'}}>
-                {[
-                  {icon:'📋',label:'Total Movements',value:history.length,bg:'#eff6ff',color:'#2563eb'},
-                  {icon:'📥',label:'Stock In (txn)',value:inCount,bg:'#f0fdf4',color:'#16a34a'},
-                  {icon:'📤',label:'Stock Out (txn)',value:outCount,bg:'#fefce8',color:'#b45309'},
-                  {icon:'📦',label:'Net Qty Change',value:(inQty-outQty>=0?'+':''+(inQty-outQty)),bg:'#f5f3ff',color:'#5b21b6'},
-                ].map((s,i)=>(
-                  <div key={i} className="kpi" style={{padding:'14px'}}>
-                    <div className="kpi-icon" style={{background:s.bg,width:'38px',height:'38px',fontSize:'16px'}}>{s.icon}</div>
-                    <div>
-                      <div style={{fontSize:'22px',fontWeight:800,color:s.color,lineHeight:1}}>{s.value}</div>
-                      <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>{s.label}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            );
-          })()}
-
-          {/* History table */}
-          <div className="card" style={{padding:0}}>
-            {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
-              <div className="ovf"><table>
-                <thead><tr>
-                  {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}</th>)}
-                </tr></thead>
-                <tbody>{history.map((h,i)=>{
-                  const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
-                  const sign=h.movement==='stock_out'?'−':'+';
-                  return (
-                    <tr key={i}>
-                      <td style={{whiteSpace:'nowrap',fontSize:'12px',color:'#64748b'}}>{fmtDT(h.created_at)}</td>
-                      <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{h.part_code}</span></td>
-                      <td style={{fontWeight:600}}>{h.part_name}</td>
-                      <td>
-                        <span style={{background:mc.bg,color:mc.color,padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,whiteSpace:'nowrap'}}>
-                          {mc.icon} {mc.label||h.movement}
-                        </span>
-                      </td>
-                      <td style={{textAlign:'right',fontWeight:700,color:h.movement==='stock_out'?'#ea580c':'#16a34a',fontSize:'14px'}}>
-                        {sign}{h.quantity}
-                      </td>
-                      <td style={{textAlign:'right',color:'#64748b'}}>{h.qty_before}</td>
-                      <td style={{textAlign:'right',fontWeight:600,color:'#1e293b'}}>{h.qty_after}</td>
-                      <td style={{color:'#64748b',fontSize:'12px'}}>{h.reason||'—'}</td>
-                      <td style={{fontFamily:'monospace',fontSize:'12px',color:'#2563eb'}}>{h.reference||'—'}</td>
-                      <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{h.performed_by_name}</td>
-                    </tr>
-                  );
-                })}</tbody>
-              </table></div>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── App Shell ──────────────────────────────────────────────────────────────
 function UsersManagement(){
+  const {user:me}=useAuth();
   const [users,setUsers]=useState([]);
   const [loading,setLoading]=useState(true);
   const [modal,setModal]=useState(false);
+  const [editing,setEditing]=useState(null);
   const [saving,setSaving]=useState(false);
+  const [toggling,setToggling]=useState(null); // id being toggled
   const [form,setForm]=useState({name:'',email:'',password:'',role:'technician'});
+
   async function load(){setLoading(true);try{setUsers(await api('/users/'));}catch(e){toast(e.message,'err');}finally{setLoading(false);}}
   useEffect(()=>{load();},[]);
+  useWS('users',load);
+
+  function close(){setModal(false);setEditing(null);setForm({name:'',email:'',password:'',role:'technician'});}
+  function edit(u){setEditing(u);setForm({name:u.name,email:u.email,password:'',role:u.role});setModal(true);}
+
   async function save(){
-    if(!form.name.trim()||!form.email.trim()||!form.password.trim()){toast('Name, email and password are required','err');return;}
+    if(!form.name.trim()||!form.email.trim()||(!editing&&!form.password.trim())){toast('Name, email and password are required','err');return;}
     setSaving(true);
-    try{await api('/users/',{method:'POST',body:JSON.stringify(form)});toast('User added');setModal(false);setForm({name:'',email:'',password:'',role:'technician'});load();}
+    try{
+      if(editing) await api('/users/'+editing.id,{method:'PATCH',body:JSON.stringify({name:form.name,role:form.role})});
+      else await api('/users/',{method:'POST',body:JSON.stringify(form)});
+      toast(editing?'User updated':'User added');close();load();
+    }
     catch(e){toast(e.message,'err');}
     finally{setSaving(false);}
   }
+
+  async function togglePresent(u){
+    setToggling(u.id);
+    try{
+      await api('/users/'+u.id,{method:'PATCH',body:JSON.stringify({is_present:!u.is_present})});
+      toast((!u.is_present?'✅ Marked present: ':'❌ Marked absent: ')+u.name);
+      load();
+    }catch(e){toast(e.message,'err');}
+    finally{setToggling(null);}
+  }
+
+  async function del(u){
+    if(!confirm('Delete '+u.name+'?')) return;
+    try{await api('/users/'+u.id,{method:'DELETE'});toast('User deleted');load();}
+    catch(e){toast(e.message,'err');}
+  }
+
+  const presentCount=users.filter(u=>u.is_present).length;
+
   return <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
-      <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Users</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Add technicians, managers, viewers, and admins</p></div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px'}}>
+      <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Users</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Add, edit, and manage staff attendance</p></div>
       <button className="btn btn-primary" onClick={()=>setModal(true)}>+ Add User</button>
     </div>
-    <div className="card" style={{padding:0}}>{loading?<Spinner/>:users.length===0?<Empty msg="No users found"/>:<div className="ovf"><table>
-      <thead><tr>{['Name','Email','Role','Status'].map(h=><th key={h}>{h}</th>)}</tr></thead>
-      <tbody>{users.map(u=><tr key={u.id}><td style={{fontWeight:700}}>{u.name}</td><td style={{color:'#64748b'}}>{u.email}</td><td><Badge value={u.role}/></td><td><Badge value={u.is_active?'active':'inactive'}/></td></tr>)}</tbody>
-    </table></div>}</div>
-    {modal&&<Modal title="Add User" onClose={()=>setModal(false)}><div style={{display:'grid',gap:'12px'}}>
+
+    {/* Attendance summary */}
+    <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'10px',padding:'12px 16px',marginBottom:'16px',display:'flex',alignItems:'center',gap:'10px'}}>
+      <span style={{fontSize:'20px'}}>🟢</span>
+      <div>
+        <div style={{fontWeight:700,color:'#166534',fontSize:'14px'}}>{presentCount} of {users.length} staff present today</div>
+        <div style={{fontSize:'12px',color:'#16a34a'}}>Only present staff appear as assignable on the Alert Board</div>
+      </div>
+    </div>
+
+    <div className="card" style={{padding:0}}>
+      {loading?<Spinner/>:users.length===0?<Empty msg="No users found"/>:<div className="ovf"><table>
+        <thead><tr>{['Name','Email','Role','Status','Present Today','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+        <tbody>{users.map(u=>(
+          <tr key={u.id}>
+            <td style={{fontWeight:700}}>{u.name}</td>
+            <td style={{color:'#64748b'}}>{u.email}</td>
+            <td><Badge value={u.role}/></td>
+            <td><Badge value={u.is_active?'active':'inactive'}/></td>
+            <td>
+              <button
+                onClick={()=>togglePresent(u)}
+                disabled={toggling===u.id}
+                style={{
+                  display:'inline-flex',alignItems:'center',gap:'5px',
+                  padding:'4px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:600,cursor:'pointer',
+                  border: u.is_present?'1px solid #86efac':'1px solid #d1d5db',
+                  background: u.is_present?'#dcfce7':'#f3f4f6',
+                  color: u.is_present?'#166534':'#6b7280',
+                  opacity: toggling===u.id?0.6:1,
+                }}
+              >
+                {toggling===u.id?'...':(u.is_present?'✅ Present':'⬜ Absent')}
+              </button>
+            </td>
+            <td>
+              <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px',marginRight:'6px'}} onClick={()=>edit(u)}>Edit</button>
+              <button className="btn" style={{fontSize:'11px',padding:'3px 8px',background:'#fee2e2',color:'#991b1b'}} onClick={()=>del(u)}>Delete</button>
+            </td>
+          </tr>
+        ))}</tbody>
+      </table></div>}
+    </div>
+
+    {modal&&<Modal title={editing?'Edit User':'Add User'} onClose={close}><div style={{display:'grid',gap:'12px'}}>
       <div><label className="lbl">Name *</label><input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></div>
-      <div><label className="lbl">Email *</label><input className="inp" type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></div>
-      <div><label className="lbl">Password *</label><input className="inp" type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></div>
-      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','viewer','admin','production'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
-      <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}><button className="btn btn-primary" style={{flex:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save User'}</button><button className="btn btn-secondary" style={{flex:1}} onClick={()=>setModal(false)}>Cancel</button></div>
+      <div><label className="lbl">Email *</label><input className="inp" type="email" value={form.email} disabled={!!editing} onChange={e=>setForm({...form,email:e.target.value})}/></div>
+      {!editing&&<div><label className="lbl">Password *</label><input className="inp" type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></div>}
+      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','production','viewer','admin'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
+      <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}><button className="btn btn-primary" style={{flex:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save User'}</button><button className="btn btn-secondary" style={{flex:1}} onClick={close}>Cancel</button></div>
     </div></Modal>}
   </div>;
 }
 
 const NAV=[
   {key:'dashboard', label:'Dashboard',    icon:'📊'},
-  {key:'inbox',     label:'Admin Inbox',  icon:'📥'},
+  {key:'alert',     label:'Alert Board',  icon:'🚨'},
   {key:'board',     label:'Work Orders',  icon:'📋'},
   {key:'history',   label:'History Log',  icon:'🗂️'},
   {key:'qr',        label:'QR Code',      icon:'🔲'},
   {key:'assets',    label:'Assets',       icon:'🏭'},
-  {key:'inventory', label:'Inventory',    icon:'📦'},
-  {key:'stock',     label:'Stock In/Out', icon:'🔲'},
+  {key:'inventory', label:'Inventory & Stock', icon:'📦'},
   //{key:'pm',        label:'PM Schedules', icon:'📅'},
   {key:'users',     label:'Users',        icon:'👥'},
 ];
@@ -2429,9 +2457,13 @@ function App(){
     if(token) api('/auth/me').then(setUser).catch(()=>localStorage.removeItem('cmms_token'));
   },[]);
   if(!user) return <Login onLogin={setUser}/>;
-  const pages={dashboard:Dashboard,inbox:AdminInbox,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:Inventory,stock:StockScanner,pm:PMSchedules,users:UsersManagement};
-  const PageComp=pages[page]||Dashboard;
+  const isAdminOrManager=user.role==='admin'||user.role==='manager';
+  const visibleNav=NAV.filter(n=>n.key!=='users'||isAdminOrManager);
+  const safePage=(page==='users'&&!isAdminOrManager)?'dashboard':page;
+  const pages={dashboard:Dashboard,alert:MaintenanceAlertBoard,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:InventoryAndStock,pm:PMSchedules,users:UsersManagement};
+  const PageComp=pages[safePage]||Dashboard;
   return (
+    <AuthCtx.Provider value={{user}}>
     <div>
       <div className="sidebar">
         <div style={{padding:'20px 16px',borderBottom:'1px solid #334155'}}>
@@ -2441,8 +2473,8 @@ function App(){
           </div>
         </div>
         <nav style={{flex:1,padding:'12px 8px'}}>
-          {NAV.map(n=>(
-            <div key={n.key} className={'nav-link'+(page===n.key?' active':'')} onClick={()=>setPage(n.key)}>
+          {visibleNav.map(n=>(
+            <div key={n.key} className={'nav-link'+(safePage===n.key?' active':'')} onClick={()=>setPage(n.key)}>
               <span>{n.icon}</span><span>{n.label}</span>
             </div>
           ))}
@@ -2459,6 +2491,7 @@ function App(){
       </div>
       <div className="main-content"><PageComp/></div>
     </div>
+    </AuthCtx.Provider>
   );
 }
 

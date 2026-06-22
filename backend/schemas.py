@@ -31,6 +31,7 @@ class UserUpdate(BaseModel):
     name: Optional[str] = None
     role: Optional[UserRole] = None
     is_active: Optional[bool] = None
+    is_present: Optional[bool] = None
 
 class UserOut(BaseModel):
     id: UUID
@@ -38,6 +39,7 @@ class UserOut(BaseModel):
     email: str
     role: UserRole
     is_active: bool
+    is_present: bool
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -106,6 +108,7 @@ class WorkOrderUpdate(BaseModel):
     estimated_hours: Optional[float] = None
     actual_hours: Optional[float] = None
     affected_downtime: Optional[bool] = None
+    completed_at: Optional[datetime] = None
 
 class WorkOrderOut(BaseModel):
     id: UUID

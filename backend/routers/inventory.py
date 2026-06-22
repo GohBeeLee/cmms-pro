@@ -46,10 +46,10 @@ class PartIn(BaseModel):
     unit:             Optional[str]   = "pcs"
 
 
-def _dict(p: SparePart) -> dict:
+def _dict(p: SparePart, show_cost: bool = True) -> dict:
     qty   = p.quantity_on_hand or 0
     reord = p.reorder_level    or 0
-    return {
+    d = {
         "id":               str(p.id),
         "part_code":        p.part_code,
         "name":             p.name,
@@ -57,8 +57,6 @@ def _dict(p: SparePart) -> dict:
         "description":      p.description,
         "quantity_on_hand": qty,
         "reorder_level":    reord,
-        "unit_cost":        p.unit_cost,
-        "total_amount":     round(qty * p.unit_cost, 2) if p.unit_cost else None,
         "supplier":         p.supplier,
         "location":         p.location,
         "barcode":          getattr(p, "barcode",        None),
@@ -69,6 +67,19 @@ def _dict(p: SparePart) -> dict:
         "created_at":       p.created_at.isoformat() if p.created_at else None,
         "updated_at":       p.updated_at.isoformat() if p.updated_at else None,
     }
+    if show_cost:
+        d["unit_cost"]    = p.unit_cost
+        d["total_amount"] = round(qty * p.unit_cost, 2) if p.unit_cost else None
+    return d
+
+
+def _can_view_cost(user: User) -> bool:
+    return user.role.value in ("admin", "manager")
+
+
+def _require_admin_or_manager(user: User):
+    if user.role.value not in ("admin", "manager"):
+        raise HTTPException(403, "Only admins and managers can manage inventory items")
 
 
 async def _get(part_id: UUID, db: AsyncSession) -> SparePart:
@@ -210,9 +221,10 @@ async def download_template(_: User = Depends(get_current_user)):
 async def import_excel(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Import inventory from Excel. Accepts your existing format."""
+    _require_admin_or_manager(current_user)
     if not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(400, "Only .xlsx files accepted")
     try:
@@ -360,9 +372,10 @@ async def export_excel(
     category:  Optional[str] = None,
     low_stock: bool = False,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Export inventory in YOUR exact column format."""
+    _require_admin_or_manager(current_user)
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -449,23 +462,38 @@ async def export_excel(
 # PATH PARAMETER ROUTES — after all static routes
 # ══════════════════════════════════════════════════════════════════════════
 
+@router.get("/categories")
+async def list_categories(
+    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        select(SparePart.category)
+        .where(SparePart.category.isnot(None), SparePart.category != "")
+        .distinct()
+        .order_by(SparePart.category)
+    )
+    return [row[0] for row in result.all()]
+
+
 @router.get("/")
 async def list_parts(
     low_stock:bool=False, category:Optional[str]=None,
     skip:int=0, limit:int=500,
-    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
+    db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
     q = select(SparePart)
     if low_stock: q=q.where(SparePart.quantity_on_hand<=SparePart.reorder_level)
     if category:  q=q.where(SparePart.category==category)
     q=q.offset(skip).limit(limit).order_by(SparePart.category,SparePart.name)
-    return [_dict(p) for p in (await db.execute(q)).scalars().all()]
+    show_cost=_can_view_cost(current_user)
+    return [_dict(p,show_cost) for p in (await db.execute(q)).scalars().all()]
 
 
 @router.post("/", status_code=201)
 async def create_part(
-    body:PartIn, db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
+    body:PartIn, db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
+    _require_admin_or_manager(current_user)
     if not body.part_code: raise HTTPException(400,"part_code required")
     if not body.name:      raise HTTPException(400,"name required")
     if (await db.execute(select(SparePart).where(SparePart.part_code==body.part_code))).scalar_one_or_none():
@@ -483,19 +511,20 @@ async def create_part(
     _safe_set(p,"used_on_asset",body.used_on_asset)
     db.add(p); await db.flush(); await db.refresh(p)
     await ws_manager.broadcast_event(ROOM,"inventory.created",{"id":str(p.id),"name":p.name})
-    return _dict(p)
+    return _dict(p,_can_view_cost(current_user))
 
 
 @router.get("/{part_id}")
-async def get_part(part_id:UUID,db:AsyncSession=Depends(get_db),_:User=Depends(get_current_user)):
-    return _dict(await _get(part_id,db))
+async def get_part(part_id:UUID,db:AsyncSession=Depends(get_db),current_user:User=Depends(get_current_user)):
+    return _dict(await _get(part_id,db),_can_view_cost(current_user))
 
 
 @router.patch("/{part_id}")
 async def update_part(
     part_id:UUID, body:PartIn,
-    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
+    db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
+    _require_admin_or_manager(current_user)
     p=await _get(part_id,db)
     updates=body.model_dump(exclude_unset=True,exclude_none=True)
     for k,v in updates.items():
@@ -506,11 +535,12 @@ async def update_part(
     p.updated_at=datetime.utcnow()
     await db.flush()
     await ws_manager.broadcast_event(ROOM,"inventory.updated",{"id":str(p.id),"name":p.name})
-    return _dict(p)
+    return _dict(p,_can_view_cost(current_user))
 
 
 @router.delete("/{part_id}",status_code=204)
-async def delete_part(part_id:UUID,db:AsyncSession=Depends(get_db),_:User=Depends(get_current_user)):
+async def delete_part(part_id:UUID,db:AsyncSession=Depends(get_db),current_user:User=Depends(get_current_user)):
+    _require_admin_or_manager(current_user)
     p=await _get(part_id,db)
     await db.delete(p)
     await ws_manager.broadcast_event(ROOM,"inventory.deleted",{"id":str(part_id)})
@@ -519,7 +549,7 @@ async def delete_part(part_id:UUID,db:AsyncSession=Depends(get_db),_:User=Depend
 @router.post("/{part_id}/restock")
 async def restock(
     part_id:UUID, quantity:int,
-    db:AsyncSession=Depends(get_db), _:User=Depends(get_current_user),
+    db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
     if quantity<1: raise HTTPException(400,"Quantity must be at least 1")
     p=await _get(part_id,db)
@@ -527,4 +557,4 @@ async def restock(
     p.updated_at=datetime.utcnow()
     await db.flush()
     await ws_manager.broadcast_event(ROOM,"inventory.restocked",{"id":str(p.id),"name":p.name,"new_qty":p.quantity_on_hand})
-    return _dict(p)
+    return _dict(p,_can_view_cost(current_user))

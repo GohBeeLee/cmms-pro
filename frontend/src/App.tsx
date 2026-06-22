@@ -9,6 +9,7 @@ import WorkOrdersPage from './pages/WorkOrdersPage'
 import InventoryPage from './pages/InventoryPage'
 import PMSchedulesPage from './pages/PMSchedulesPage'
 import UsersPage from './pages/UsersPage'
+import MaintenanceAlertPage from './pages/MaintenanceAlertPage'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { token } = useAuthStore()
@@ -34,6 +35,7 @@ export default function App() {
               <Layout>
                 <Routes>
                   <Route path="/"            element={<DashboardPage />} />
+                  <Route path="/alert"       element={<MaintenanceAlertPage />} />
                   <Route path="/assets"      element={<AssetsPage />} />
                   <Route path="/work-orders" element={<WorkOrdersPage />} />
                   <Route path="/inventory"   element={<InventoryPage />} />

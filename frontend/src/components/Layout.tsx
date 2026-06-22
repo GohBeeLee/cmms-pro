@@ -7,6 +7,7 @@ import { useAuthStore } from '../store/authStore'
 
 const NAV = [
   { to: '/',           icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/alert',      icon: Bell,            label: 'Alert Board' },
   { to: '/assets',     icon: Wrench,          label: 'Assets' },
   { to: '/work-orders',icon: ClipboardList,   label: 'Work Orders' },
   { to: '/inventory',  icon: Package,         label: 'Inventory' },

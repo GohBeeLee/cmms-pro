@@ -190,6 +190,74 @@ function Modal({title,onClose,children,large}) {
 function Spinner(){return <div className="spinner"></div>;}
 function Empty({msg}){return <div style={{textAlign:'center',padding:'40px',color:'#94a3b8',fontSize:'14px'}}>{msg}</div>;}
 
+// ── Multi-select dropdown (checkbox list) ───────────────────────────────────
+function MultiSelectDropdown({options,selectedIds,onToggle,onClear,colors,placeholder}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef(null);
+  useEffect(()=>{
+    function onClickOutside(e){ if(ref.current&&!ref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener('mousedown',onClickOutside);
+    return ()=>document.removeEventListener('mousedown',onClickOutside);
+  },[]);
+
+  const selectedLabel = selectedIds.length===0
+    ? (placeholder||'Select…')
+    : selectedIds.length===1
+      ? (options.find(o=>o.id===selectedIds[0])?.name || '1 selected')
+      : selectedIds.length+' machines selected';
+
+  return (
+    <div ref={ref} style={{position:'relative',maxWidth:'420px'}}>
+      <button
+        onClick={()=>setOpen(o=>!o)}
+        style={{
+          width:'100%',display:'flex',justifyContent:'space-between',alignItems:'center',gap:'8px',
+          padding:'10px 14px',borderRadius:'8px',border:'1px solid #cbd5e1',background:'#fff',
+          cursor:'pointer',fontSize:'13px',fontWeight:600,color:selectedIds.length?'#1e293b':'#94a3b8',
+        }}
+      >
+        <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{selectedLabel}</span>
+        <span style={{transform:open?'rotate(180deg)':'none',transition:'transform .15s',color:'#64748b'}}>▾</span>
+      </button>
+
+      {open&&(
+        <div style={{
+          position:'absolute',top:'calc(100% + 4px)',left:0,right:0,zIndex:30,
+          background:'#fff',border:'1px solid #e2e8f0',borderRadius:'10px',
+          boxShadow:'0 8px 24px rgba(0,0,0,.12)',maxHeight:'280px',overflowY:'auto',padding:'6px',
+        }}>
+          {options.length===0?(
+            <div style={{padding:'12px',fontSize:'12px',color:'#94a3b8',textAlign:'center'}}>No options available</div>
+          ):options.map((o,i)=>{
+            const isSel=selectedIds.includes(o.id);
+            const color=colors?colors[i%colors.length]:'#2563eb';
+            return (
+              <label key={o.id} style={{
+                display:'flex',alignItems:'center',gap:'10px',padding:'8px 10px',borderRadius:'8px',
+                cursor:'pointer',background:isSel?color+'14':'transparent',
+              }}>
+                <input type="checkbox" checked={isSel} onChange={()=>onToggle(o.id)} style={{width:'15px',height:'15px',accentColor:color,cursor:'pointer'}}/>
+                <span style={{width:'8px',height:'8px',borderRadius:'50%',background:color,flexShrink:0}}/>
+                <span style={{fontSize:'13px',fontWeight:isSel?700:500,color:isSel?color:'#374151'}}>{o.name}</span>
+              </label>
+            );
+          })}
+          {selectedIds.length>0&&(
+            <div style={{borderTop:'1px solid #f1f5f9',marginTop:'4px',paddingTop:'6px'}}>
+              <button
+                onClick={()=>{onClear();}}
+                style={{width:'100%',padding:'8px',fontSize:'12px',fontWeight:600,color:'#dc2626',background:'#fef2f2',border:'none',borderRadius:'6px',cursor:'pointer'}}
+              >
+                ✕ Clear all ({selectedIds.length})
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function useWS(room,onEvent){
   const ref=useRef(null);
   useEffect(()=>{
@@ -330,11 +398,11 @@ function Login({onLogin}){
         </div>
         <form onSubmit={submit}>
           <div style={{marginBottom:'14px'}}><label className="lbl">Email</label><input className="inp" type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="admin@cmms.com" required/></div>
-          <div style={{marginBottom:'18px'}}><label className="lbl">Password</label><input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password" required/></div>
+          <div style={{marginBottom:'18px'}}><label className="lbl">Password</label><input className="inp" type="password" value={pw} onChange={e=>setPw(e.target.value)} placeholder="password123" required/></div>
           {err&&<div style={{background:'#fee2e2',color:'#991b1b',padding:'10px 14px',borderRadius:'8px',fontSize:'13px',marginBottom:'14px'}}>{err}</div>}
           <button className="btn btn-primary" type="submit" disabled={loading} style={{width:'100%',padding:'10px'}}>{loading?'Signing in…':'Sign in'}</button>
         </form>
-        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}><strong>NOTE:</strong> Please contact ADMIN if you forgot password</div>
+        <div style={{marginTop:'18px',padding:'14px',background:'#f8fafc',borderRadius:'10px',fontSize:'12px',color:'#64748b'}}><strong>Demo:</strong> admin@cmms.com / password123</div>
       </div>
     </div>
   );
@@ -1034,7 +1102,41 @@ function HistoryLog(){
   const [locations,setLocations]=useState([]);
   const [analysis,setAnalysis]=useState(null);
   const [analysisLoading,setAnalysisLoading]=useState(true);
+  // ── Per-machine comparison ──
+  const [allAssets,setAllAssets]=useState([]);
+  const [selectedAssetIds,setSelectedAssetIds]=useState([]);
+  const [machineTimeline,setMachineTimeline]=useState(null);
+  const [machineTimelineLoading,setMachineTimelineLoading]=useState(true);
+  // ── Real-time uptime ──
+  const [uptime,setUptime]=useState(null);
+  const [hoursPerDay,setHoursPerDay]=useState(19);
+  const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine'
   const RC=window.Recharts;
+  const MACHINE_COLORS=['#2563eb','#dc2626','#16a34a','#d97706','#7c3aed','#0891b2','#db2777','#65a30d','#ea580c','#0d9488'];
+
+  async function loadAssetsList(){
+    try{setAllAssets(await api('/analysis/assets'));}catch(e){}
+  }
+  async function loadMachineTimeline(){
+    setMachineTimelineLoading(true);
+    try{
+      const qs=[];
+      if(dateFrom) qs.push('date_from='+encodeURIComponent(dateFrom));
+      if(dateTo) qs.push('date_to='+encodeURIComponent(dateTo));
+      if(selectedAssetIds.length>0) qs.push('asset_ids='+encodeURIComponent(selectedAssetIds.join(',')));
+      setMachineTimeline(await api('/analysis/by-machine-timeline'+(qs.length?'?'+qs.join('&'):'')));
+    }catch(e){toast(e.message,'err');}finally{setMachineTimelineLoading(false);}
+  }
+  async function loadUptime(){
+    try{
+      const qs=['hours_per_day='+(parseFloat(hoursPerDay)||19)];
+      if(locationFilter) qs.push('location='+encodeURIComponent(locationFilter));
+      setUptime(await api('/analysis/uptime?'+qs.join('&')));
+    }catch(e){}
+  }
+  function toggleAssetSelect(id){
+    setSelectedAssetIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  }
 
   async function load(){
     setLoading(true);
@@ -1061,8 +1163,11 @@ function HistoryLog(){
   useEffect(()=>{load();},[statusFilter]);
   useEffect(()=>{loadAnalysis();},[dateFrom,dateTo,locationFilter]);
   useEffect(()=>{const t=setInterval(loadAnalysis,30000);return()=>clearInterval(t);},[dateFrom,dateTo,locationFilter]);
-  useEffect(()=>{loadLocations();},[]);
-  useWS('work_orders',()=>{load();loadAnalysis();});
+  useEffect(()=>{loadLocations();loadAssetsList();},[]);
+  useEffect(()=>{loadMachineTimeline();},[dateFrom,dateTo,selectedAssetIds]);
+  useEffect(()=>{loadUptime();},[hoursPerDay,locationFilter]);
+  useEffect(()=>{const t=setInterval(loadUptime,60000);return()=>clearInterval(t);},[hoursPerDay,locationFilter]); // refresh uptime every 60s
+  useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();});
 
   // Extract all embedded base64 photos from description
   // Handles both [OPERATOR_PHOTOS] and [COMPLETION_PHOTOS] sections
@@ -1177,6 +1282,87 @@ function HistoryLog(){
         <button className="btn btn-primary" onClick={load}>🔄 Refresh</button>
       </div>
 
+      {/* ── Analysis Tabs ── */}
+      <div style={{display:'flex',gap:'8px',marginBottom:'16px',flexWrap:'wrap'}}>
+        {[
+          ['uptime','📈 Production Line Uptime'],
+          ['downtime','📊 Downtime Analysis'],
+          ['by_machine','🏭 Downtime by Machine'],
+        ].map(([k,l])=>(
+          <button key={k} onClick={()=>setAnalysisTab(k)} style={{
+            padding:'9px 20px',borderRadius:'8px',border:'none',cursor:'pointer',
+            fontSize:'13px',fontWeight:700,
+            background:analysisTab===k?'#1e293b':'#f1f5f9',
+            color:analysisTab===k?'#fff':'#64748b',
+          }}>{l}</button>
+        ))}
+      </div>
+
+      {/* ── Real-time Production Line Uptime ── */}
+      {analysisTab==='uptime'&&!uptime&&(
+        <div className="card" style={{marginBottom:'16px'}}><Spinner/></div>
+      )}
+      {analysisTab==='uptime'&&uptime&&(()=>{
+        const MONTH_NAMES=['January','February','March','April','May','June','July','August','September','October','November','December'];
+        const pct=uptime.uptime_pct;
+        const color=pct>=95?'#16a34a':pct>=85?'#d97706':'#dc2626';
+        const bg=pct>=95?'#f0fdf4':pct>=85?'#fffbeb':'#fef2f2';
+        return (
+          <div className="card" style={{marginBottom:'16px',background:bg,border:'1px solid '+color+'33'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'16px'}}>
+              <div>
+                <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+                  <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Production Line Uptime</div>
+                  {uptime.is_current_month&&<span className="new-pulse" style={{background:'#dcfce7',color:'#16a34a',padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700}}>● LIVE</span>}
+                </div>
+                <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>
+                  {MONTH_NAMES[uptime.month-1]} {uptime.year} · {uptime.location?('Line: '+uptime.location):'All locations'} · Affected downtime only
+                </div>
+              </div>
+              <div style={{textAlign:'right'}}>
+                <div style={{fontSize:'42px',fontWeight:900,color,lineHeight:1}}>{pct}%</div>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Uptime this month</div>
+              </div>
+            </div>
+
+            {/* Editable hours/day + location-aware note */}
+            <div style={{display:'flex',alignItems:'center',gap:'10px',marginTop:'12px',flexWrap:'wrap'}}>
+              <label style={{fontSize:'12px',color:'#475569',fontWeight:600,display:'flex',alignItems:'center',gap:'6px'}}>
+                Operating hours/day:
+                <input
+                  type="number" min="1" max="24" step="0.5"
+                  value={hoursPerDay}
+                  onChange={e=>setHoursPerDay(e.target.value)}
+                  style={{width:'70px',padding:'4px 8px',borderRadius:'6px',border:'1px solid #cbd5e1',fontSize:'13px',fontWeight:700,textAlign:'center'}}
+                />
+                h
+              </label>
+              {locationFilter&&<span style={{fontSize:'11px',background:'#eff6ff',color:'#2563eb',padding:'3px 10px',borderRadius:'999px',fontWeight:600}}>📍 Scoped to: {locationFilter}</span>}
+              {!locationFilter&&<span style={{fontSize:'11px',color:'#94a3b8'}}>💡 Use the Location filter above to scope uptime to a specific production line</span>}
+            </div>
+
+            <div style={{marginTop:'14px',height:'10px',borderRadius:'999px',background:'#e2e8f0',overflow:'hidden'}}>
+              <div style={{height:'100%',width:pct+'%',background:color,borderRadius:'999px',transition:'width .4s ease'}}/>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:'10px',marginTop:'14px'}}>
+              <div style={{textAlign:'center',background:'rgba(255,255,255,.6)',borderRadius:'8px',padding:'8px'}}>
+                <div style={{fontSize:'15px',fontWeight:700,color:'#1e293b'}}>{uptime.days_in_month} days</div>
+                <div style={{fontSize:'11px',color:'#94a3b8'}}>Days in Month</div>
+              </div>
+              <div style={{textAlign:'center',background:'rgba(255,255,255,.6)',borderRadius:'8px',padding:'8px'}}>
+                <div style={{fontSize:'15px',fontWeight:700,color:'#1e293b'}}>{uptime.total_available_hours}h</div>
+                <div style={{fontSize:'11px',color:'#94a3b8'}}>Total Available Hrs</div>
+              </div>
+              <div style={{textAlign:'center',background:'rgba(255,255,255,.6)',borderRadius:'8px',padding:'8px'}}>
+                <div style={{fontSize:'15px',fontWeight:700,color:'#dc2626'}}>{uptime.affected_downtime_hours}h</div>
+                <div style={{fontSize:'11px',color:'#94a3b8'}}>Affected Downtime</div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {analysisTab==='downtime'&&(
       <div className="card" style={{marginBottom:'16px'}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'14px'}}>
           <div>
@@ -1214,6 +1400,53 @@ function HistoryLog(){
           </RC.ResponsiveContainer>
         )}
       </div>
+      )}
+
+      {/* ── Downtime by Machine comparison ── */}
+      {analysisTab==='by_machine'&&(
+      <div className="card" style={{marginBottom:'16px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px',marginBottom:'14px',flexWrap:'wrap'}}>
+          <div>
+            <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Downtime by Machine</div>
+            <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Select machines from the dropdown to compare their downtime over the chosen date range</div>
+          </div>
+        </div>
+
+        {/* Machine multi-select dropdown */}
+        <div style={{marginBottom:'16px'}}>
+          <MultiSelectDropdown
+            options={allAssets}
+            selectedIds={selectedAssetIds}
+            onToggle={toggleAssetSelect}
+            onClear={()=>setSelectedAssetIds([])}
+            colors={MACHINE_COLORS}
+            placeholder="Select machines to compare…"
+          />
+        </div>
+
+        {selectedAssetIds.length===0?(
+          <Empty msg="Select one or more machines above to compare their downtime"/>
+        ):machineTimelineLoading?<Spinner/>:(machineTimeline?.chart_data||[]).length===0?(
+          <Empty msg="No downtime data for the selected machines and date range"/>
+        ):(
+          <RC.ResponsiveContainer width="100%" height={320}>
+            <RC.BarChart data={machineTimeline.chart_data}>
+              <RC.CartesianGrid strokeDasharray="3 3" vertical={false}/>
+              <RC.XAxis dataKey="date" tick={{fontSize:12}}/>
+              <RC.YAxis tick={{fontSize:12}} label={{value:'Downtime (hrs)',angle:-90,position:'insideLeft',fontSize:11,fill:'#94a3b8'}}/>
+              <RC.Tooltip formatter={(v)=>v+'h'}/>
+              <RC.Legend/>
+              {machineTimeline.machines.map((m,i)=>(
+                <RC.Bar key={m} dataKey={m} name={m}
+                  fill={MACHINE_COLORS[allAssets.findIndex(x=>x.name===m)%MACHINE_COLORS.length] || MACHINE_COLORS[i%MACHINE_COLORS.length]}
+                  radius={[3,3,0,0]}
+                />
+              ))}
+            </RC.BarChart>
+          </RC.ResponsiveContainer>
+        )}
+      </div>
+      )}
 
       <div style={{fontSize:'12px',color:'#94a3b8',marginBottom:'10px'}}>{filtered.length} records found</div>
 

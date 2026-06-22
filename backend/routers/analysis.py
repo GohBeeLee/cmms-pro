@@ -1,4 +1,5 @@
 from datetime import datetime
+from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -233,6 +234,166 @@ async def analyse_work_orders(
         "date_from":     date_from,
         "date_to":       date_to,
         "location":      location,
+    }
+
+
+@router.get("/by-machine-timeline")
+async def analyse_by_machine_timeline(
+    date_from: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    date_to:   Optional[str] = Query(None, description="End date YYYY-MM-DD"),
+    asset_ids: Optional[str] = Query(None, description="Comma-separated asset IDs to compare"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """
+    Returns downtime grouped by date (X-axis) with one series per selected
+    machine, so multiple machines' downtime can be compared on the same chart
+    over the chosen time range.
+    """
+    q = (
+        select(
+            WorkOrder.actual_hours,
+            WorkOrder.affected_downtime,
+            WorkOrder.created_at,
+            WorkOrder.completed_at,
+            Asset.id.label("asset_id"),
+            Asset.name.label("asset_name"),
+        )
+        .join(Asset, WorkOrder.asset_id == Asset.id)
+    )
+
+    if date_from:
+        try:
+            dt_from = datetime.strptime(date_from, "%Y-%m-%d")
+            q = q.where(WorkOrder.created_at >= dt_from)
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+            q = q.where(WorkOrder.created_at <= dt_to)
+        except ValueError:
+            pass
+
+    asset_id_list = None
+    if asset_ids:
+        try:
+            asset_id_list = [UUID(a.strip()) for a in asset_ids.split(",") if a.strip()]
+        except ValueError:
+            asset_id_list = []  # invalid id supplied — return empty result rather than erroring
+    if asset_id_list is not None:
+        if len(asset_id_list) == 0:
+            # No valid IDs — short-circuit to an empty result instead of matching everything
+            return {"machines": [], "chart_data": [], "date_from": date_from, "date_to": date_to}
+        q = q.where(WorkOrder.asset_id.in_(asset_id_list))
+
+    result = await db.execute(q)
+    rows = result.fetchall()
+
+    # Build { date: { machine_name: downtime_hours } }
+    pivot: dict[str, dict[str, float]] = {}
+    machine_names: set[str] = set()
+
+    for r in rows:
+        downtime = r.actual_hours
+        if downtime is None and r.completed_at and r.created_at:
+            downtime = round((r.completed_at - r.created_at).total_seconds() / 3600, 2)
+        if not downtime:
+            continue
+
+        day = r.created_at.strftime("%Y-%m-%d") if r.created_at else "Unknown"
+        name = r.asset_name
+        machine_names.add(name)
+
+        pivot.setdefault(day, {})
+        pivot[day][name] = round(pivot[day].get(name, 0.0) + downtime, 2)
+
+    machine_list = sorted(machine_names)
+    chart_data = []
+    for day in sorted(pivot.keys()):
+        row = {"date": day}
+        for m in machine_list:
+            row[m] = pivot[day].get(m, 0)
+        chart_data.append(row)
+
+    return {
+        "machines": machine_list,
+        "chart_data": chart_data,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+@router.get("/uptime")
+async def get_uptime(
+    year:  Optional[int] = Query(None, description="Year, defaults to current"),
+    month: Optional[int] = Query(None, description="Month 1-12, defaults to current"),
+    hours_per_day: float = Query(19.0, description="Operating hours per day used in the uptime formula"),
+    location: Optional[str] = Query(None, description="Filter by asset/production line location"),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """
+    Computes real-time production line uptime % for the given month using:
+        ((days_in_month * hours_per_day - affected_downtime_hours) /
+         (days_in_month * hours_per_day)) * 100
+    Only AFFECTED downtime counts against uptime — non-affected downtime
+    (maintenance with no production loss) does not reduce uptime.
+    Can be scoped to a specific production line / location.
+    """
+    import calendar
+
+    now = datetime.utcnow()
+    yr = year or now.year
+    mo = month or now.month
+
+    days_in_month = calendar.monthrange(yr, mo)[1]
+    total_available_hours = days_in_month * hours_per_day
+
+    month_start = datetime(yr, mo, 1)
+    if mo == 12:
+        month_end = datetime(yr + 1, 1, 1)
+    else:
+        month_end = datetime(yr, mo + 1, 1)
+
+    q = (
+        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at)
+        .join(Asset, WorkOrder.asset_id == Asset.id)
+        .where(
+            WorkOrder.created_at >= month_start,
+            WorkOrder.created_at < month_end,
+            WorkOrder.affected_downtime == True,
+        )
+    )
+    if location:
+        q = q.where(Asset.location == location)
+
+    rows = (await db.execute(q)).fetchall()
+
+    affected_downtime_hours = 0.0
+    for r in rows:
+        h = r.actual_hours
+        if h is None and r.completed_at and r.created_at:
+            h = (r.completed_at - r.created_at).total_seconds() / 3600
+        affected_downtime_hours += h or 0
+
+    affected_downtime_hours = round(affected_downtime_hours, 2)
+    uptime_pct = (
+        round(((total_available_hours - affected_downtime_hours) / total_available_hours) * 100, 2)
+        if total_available_hours > 0 else 0
+    )
+    uptime_pct = max(0, min(100, uptime_pct))
+
+    return {
+        "year": yr,
+        "month": mo,
+        "days_in_month": days_in_month,
+        "hours_per_day": hours_per_day,
+        "location": location,
+        "total_available_hours": round(total_available_hours, 2),
+        "affected_downtime_hours": affected_downtime_hours,
+        "uptime_pct": uptime_pct,
+        "is_current_month": (yr == now.year and mo == now.month),
     }
 
 

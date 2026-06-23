@@ -2286,7 +2286,7 @@ function PartsAndScannerTab({canManage}){
       {/* ── Scanner modal ── */}
       {scanOpen&&(
         <Modal title="🔲 Scan to Stock In / Out" onClose={closeScanner} large>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+          <div style={{display:'grid',gridTemplateColumns:(scanPart||scanning)?'1fr 1fr':'1fr',gap:'20px'}}>
             {/* Left: scanner input */}
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
               <div className="card" style={{padding:'16px'}}>
@@ -2410,13 +2410,6 @@ function PartsAndScannerTab({canManage}){
 
             {/* Right: part card + result */}
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
-              {!scanPart&&!scanning&&(
-                <div className="card" style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'50px 20px',textAlign:'center',background:'#f8fafc',border:'2px dashed #e2e8f0'}}>
-                  <div style={{fontSize:'48px',marginBottom:'14px'}}>🔲</div>
-                  <div style={{fontWeight:700,color:'#374151',fontSize:'15px',marginBottom:'6px'}}>Ready to scan</div>
-                  <div style={{color:'#94a3b8',fontSize:'12px',lineHeight:1.6}}>Scan a barcode or type the part No</div>
-                </div>
-              )}
               {scanning&&<div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'50px'}}><Spinner/></div>}
               {scanPart&&!scanning&&(
                 <div className="card" style={{border:scanPart.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',background:scanPart.is_low_stock?'#fefce8':'#fff'}}>

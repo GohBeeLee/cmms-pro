@@ -14,8 +14,14 @@
 <style>
   *{box-sizing:border-box;}
   body{font-family:'Segoe UI',system-ui,sans-serif;background:#f8fafc;margin:0;}
-  .sidebar{width:220px;min-height:100vh;background:#1e293b;position:fixed;top:0;left:0;z-index:40;display:flex;flex-direction:column;}
-  .main-content{margin-left:220px;padding:28px;}
+  .sidebar{width:220px;min-height:100vh;background:#1e293b;position:fixed;top:0;left:0;z-index:40;display:flex;flex-direction:column;transition:width .2s ease;}
+  .sidebar.collapsed{width:64px;}
+  .main-content{margin-left:220px;padding:28px;transition:margin-left .2s ease;}
+  .main-content.collapsed{margin-left:64px;}
+  .sidebar-toggle{position:absolute;top:18px;right:-13px;width:26px;height:26px;border-radius:50%;background:#2563eb;color:#fff;border:2px solid #1e293b;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:12px;z-index:50;}
+  .sidebar.collapsed .nav-label,.sidebar.collapsed .brand-text,.sidebar.collapsed .user-text{display:none;}
+  .sidebar.collapsed .nav-link{justify-content:center;padding:10px 0;}
+  .sidebar.collapsed .signout-btn span.label{display:none;}
   .nav-link{display:flex;align-items:center;gap:10px;padding:10px 14px;color:#94a3b8;border-radius:8px;margin:2px 8px;cursor:pointer;font-size:14px;transition:all 0.15s;}
   .nav-link:hover,.nav-link.active{background:#2563eb;color:#fff;}
   .card{background:#fff;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.07);border:1px solid #f1f5f9;padding:20px;}
@@ -1973,17 +1979,27 @@ function PartsAndScannerTab({canManage}){
     setCameraOpen(true);setCameraError('');setCameraStarting(true);
     setTimeout(async()=>{
       try{
-        if(!html5QrRef.current) html5QrRef.current=new Html5Qrcode('camera-view');
+        if(!html5QrRef.current) html5QrRef.current=new Html5Qrcode('camera-view',{
+          // Use the browser's fast native barcode decoder on devices that
+          // support it (most Android Chrome). Falls back to the JS decoder
+          // automatically if unsupported (e.g. iOS Safari).
+          useBarCodeDetectorIfSupported:true,
+          verbose:false,
+        });
         const config={
-          fps:10,
-          qrbox:(vw,vh)=>{const size=Math.floor(Math.min(vw,vh)*0.7);return {width:size,height:Math.floor(size*0.5)};},
-          formatsToSupport:typeof Html5QrcodeSupportedFormats!=='undefined'?[
-            Html5QrcodeSupportedFormats.EAN_13,Html5QrcodeSupportedFormats.EAN_8,
-            Html5QrcodeSupportedFormats.UPC_A,Html5QrcodeSupportedFormats.UPC_E,
-            Html5QrcodeSupportedFormats.CODE_128,Html5QrcodeSupportedFormats.CODE_39,
-            Html5QrcodeSupportedFormats.CODE_93,Html5QrcodeSupportedFormats.QR_CODE,
-            Html5QrcodeSupportedFormats.ITF,
-          ]:undefined,
+          fps:8, // lower fps gives the camera more time to focus each frame — improves 1D barcode reads
+          // Wide rectangular box matches the shape of real barcodes (EAN/UPC/Code128)
+          // far better than a square box, which is the #1 reason 1D barcodes fail to scan.
+          qrbox:(vw,vh)=>{
+            const w=Math.floor(Math.min(vw,vh)*0.85);
+            return {width:w,height:Math.floor(w*0.4)};
+          },
+          aspectRatio:1.7777778, // 16:9 — wider view helps fit a barcode fully in frame
+          disableFlip:false,
+          // Deliberately NOT setting formatsToSupport: restricting formats is
+          // unreliable across library versions/platforms and can silently
+          // break detection entirely. Leaving it unset scans all supported
+          // formats (QR, EAN, UPC, Code128/39/93, ITF, etc.)
         };
         await html5QrRef.current.start(
           {facingMode:'environment'},
@@ -2337,7 +2353,10 @@ function PartsAndScannerTab({canManage}){
                       </div>
                     )}
                     {!cameraError&&!cameraStarting&&(
-                      <div style={{marginTop:'6px',fontSize:'11px',color:'#94a3b8',textAlign:'center'}}>Point the camera at a barcode — it will scan automatically.</div>
+                      <div style={{marginTop:'6px',fontSize:'11px',color:'#64748b',lineHeight:1.6}}>
+                        📐 Fill the box with the barcode, hold steady ~15-20cm away, in good light.<br/>
+                        Having trouble? Type the part No / barcode digits manually below instead.
+                      </div>
                     )}
                   </div>
                 )}
@@ -2788,10 +2807,18 @@ const NAV=[
 function App(){
   const [user,setUser]=useState(null);
   const [page,setPage]=useState('dashboard');
+  const [sidebarCollapsed,setSidebarCollapsed]=useState(()=>localStorage.getItem('cmms_sidebar_collapsed')==='1');
   useEffect(()=>{
     const token=localStorage.getItem('cmms_token');
     if(token) api('/auth/me').then(setUser).catch(()=>localStorage.removeItem('cmms_token'));
   },[]);
+  function toggleSidebar(){
+    setSidebarCollapsed(prev=>{
+      const next=!prev;
+      localStorage.setItem('cmms_sidebar_collapsed',next?'1':'0');
+      return next;
+    });
+  }
   if(!user) return <Login onLogin={setUser}/>;
   const isAdminOrManager=user.role==='admin'||user.role==='manager';
   const visibleNav=NAV.filter(n=>n.key!=='users'||isAdminOrManager);
@@ -2801,31 +2828,36 @@ function App(){
   return (
     <AuthCtx.Provider value={{user}}>
     <div>
-      <div className="sidebar">
-        <div style={{padding:'20px 16px',borderBottom:'1px solid #334155'}}>
-          <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
-            <div style={{width:'36px',height:'36px',background:'#2563eb',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'18px'}}>🔧</div>
-            <div><div style={{color:'#fff',fontWeight:800,fontSize:'14px'}}>CMMS Pro</div><div style={{color:'#64748b',fontSize:'11px'}}>Maintenance System</div></div>
+      <div className={'sidebar'+(sidebarCollapsed?' collapsed':'')}>
+        <div className="sidebar-toggle" onClick={toggleSidebar} title={sidebarCollapsed?'Expand sidebar':'Collapse sidebar'}>
+          {sidebarCollapsed?'›':'‹'}
+        </div>
+        <div style={{padding:sidebarCollapsed?'20px 8px':'20px 16px',borderBottom:'1px solid #334155'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'10px',justifyContent:sidebarCollapsed?'center':'flex-start'}}>
+            <div style={{width:'36px',height:'36px',background:'#2563eb',borderRadius:'10px',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'18px',flexShrink:0}}>🔧</div>
+            <div className="brand-text"><div style={{color:'#fff',fontWeight:800,fontSize:'14px'}}>CMMS Pro</div><div style={{color:'#64748b',fontSize:'11px'}}>Maintenance System</div></div>
           </div>
         </div>
         <nav style={{flex:1,padding:'12px 8px'}}>
           {visibleNav.map(n=>(
-            <div key={n.key} className={'nav-link'+(safePage===n.key?' active':'')} onClick={()=>setPage(n.key)}>
-              <span>{n.icon}</span><span>{n.label}</span>
+            <div key={n.key} className={'nav-link'+(safePage===n.key?' active':'')} onClick={()=>setPage(n.key)} title={sidebarCollapsed?n.label:''}>
+              <span>{n.icon}</span><span className="nav-label">{n.label}</span>
             </div>
           ))}
         </nav>
-        <div style={{padding:'16px',borderTop:'1px solid #334155'}}>
-          <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'10px'}}>
-            <div style={{width:'32px',height:'32px',background:'#2563eb',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:'13px'}}>
+        <div style={{padding:sidebarCollapsed?'16px 8px':'16px',borderTop:'1px solid #334155'}}>
+          <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'10px',justifyContent:sidebarCollapsed?'center':'flex-start'}}>
+            <div style={{width:'32px',height:'32px',background:'#2563eb',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontWeight:700,fontSize:'13px',flexShrink:0}}>
               {user.name?user.name.charAt(0).toUpperCase():'U'}
             </div>
-            <div><div style={{color:'#fff',fontSize:'12px',fontWeight:600}}>{user.name}</div><div style={{color:'#64748b',fontSize:'11px',textTransform:'capitalize'}}>{user.role}</div></div>
+            <div className="user-text"><div style={{color:'#fff',fontSize:'12px',fontWeight:600}}>{user.name}</div><div style={{color:'#64748b',fontSize:'11px',textTransform:'capitalize'}}>{user.role}</div></div>
           </div>
-          <button onClick={()=>{localStorage.removeItem('cmms_token');setUser(null);}} style={{width:'100%',background:'none',border:'1px solid #334155',color:'#94a3b8',padding:'7px',borderRadius:'8px',cursor:'pointer',fontSize:'12px'}}>Sign out</button>
+          <button className="signout-btn" onClick={()=>{localStorage.removeItem('cmms_token');setUser(null);}} style={{width:'100%',background:'none',border:'1px solid #334155',color:'#94a3b8',padding:'7px',borderRadius:'8px',cursor:'pointer',fontSize:'12px'}} title={sidebarCollapsed?'Sign out':''}>
+            {sidebarCollapsed?'⏻':<span className="label">Sign out</span>}
+          </button>
         </div>
       </div>
-      <div className="main-content"><PageComp/></div>
+      <div className={'main-content'+(sidebarCollapsed?' collapsed':'')}><PageComp/></div>
     </div>
     </AuthCtx.Provider>
   );

@@ -9,6 +9,7 @@
 <script src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.10/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
 <style>
   *{box-sizing:border-box;}
@@ -1864,6 +1865,12 @@ function PartsAndScannerTab({canManage}){
   const [reference,setReference]=useState('');
   const [moveResult,setMoveResult]=useState(null);
   const barcodeRef=useRef(null);
+  // ── Camera scanning ──
+  const [cameraOpen,setCameraOpen]=useState(false);
+  const [cameraError,setCameraError]=useState('');
+  const [cameraStarting,setCameraStarting]=useState(false);
+  const html5QrRef=useRef(null);
+  const cameraStartedRef=useRef(false);
 
   const emptyForm={
     part_code:'',name:'',category:'',description:'',unit:'pcs',
@@ -1886,6 +1893,13 @@ function PartsAndScannerTab({canManage}){
   useWS('inventory',load);
 
   useEffect(()=>{ if(scanOpen) setTimeout(()=>barcodeRef.current?.focus(),150); },[scanOpen]);
+  useEffect(()=>{
+    return ()=>{
+      if(html5QrRef.current&&cameraStartedRef.current){
+        html5QrRef.current.stop().then(()=>html5QrRef.current.clear()).catch(()=>{});
+      }
+    };
+  },[]);
 
   async function save(){
     if(!canManage){toast('Only admins and managers can edit parts','err');return;}
@@ -1950,6 +1964,65 @@ function PartsAndScannerTab({canManage}){
   }
   function onBarcodeKey(e){ if(e.key==='Enter'){e.preventDefault();lookupBarcode();} }
 
+  // ── Camera-based barcode scanning (phone camera via html5-qrcode) ──
+  async function startCamera(){
+    if(typeof Html5Qrcode==='undefined'){
+      setCameraError('Camera scanner library failed to load. Check your internet connection.');
+      return;
+    }
+    setCameraOpen(true);setCameraError('');setCameraStarting(true);
+    setTimeout(async()=>{
+      try{
+        if(!html5QrRef.current) html5QrRef.current=new Html5Qrcode('camera-view');
+        const config={
+          fps:10,
+          qrbox:(vw,vh)=>{const size=Math.floor(Math.min(vw,vh)*0.7);return {width:size,height:Math.floor(size*0.5)};},
+          formatsToSupport:typeof Html5QrcodeSupportedFormats!=='undefined'?[
+            Html5QrcodeSupportedFormats.EAN_13,Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.UPC_A,Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.CODE_128,Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.CODE_93,Html5QrcodeSupportedFormats.QR_CODE,
+            Html5QrcodeSupportedFormats.ITF,
+          ]:undefined,
+        };
+        await html5QrRef.current.start(
+          {facingMode:'environment'},
+          config,
+          (decodedText)=>{ onCameraDetected(decodedText); },
+          ()=>{ /* per-frame decode miss — ignore, this fires constantly while scanning */ },
+        );
+        cameraStartedRef.current=true;
+      }catch(err){
+        setCameraError(
+          err && err.toString && err.toString().includes('NotAllowedError')
+            ? 'Camera permission denied. Please allow camera access and try again.'
+            : 'Could not start camera: '+(err?.message||err)
+        );
+        cameraStartedRef.current=false;
+      }finally{
+        setCameraStarting(false);
+      }
+    },50);
+  }
+
+  async function stopCamera(){
+    try{
+      if(html5QrRef.current&&cameraStartedRef.current){
+        await html5QrRef.current.stop();
+        html5QrRef.current.clear();
+      }
+    }catch(e){/* already stopped */}
+    cameraStartedRef.current=false;
+    setCameraOpen(false);setCameraError('');
+  }
+
+  function onCameraDetected(decodedText){
+    if(!decodedText) return;
+    stopCamera();
+    setBarcode(decodedText);
+    lookupBarcode(decodedText);
+  }
+
   async function submitMove(){
     if(!scanPart){toast('Please scan a part first','err');return;}
     if(qty<1){toast('Quantity must be at least 1','err');return;}
@@ -1972,7 +2045,7 @@ function PartsAndScannerTab({canManage}){
     setScanOpen(true);setScanPart(null);setMoveResult(null);setBarcode(prefillBarcode||'');setQty(1);setReason('');setReference('');
     if(prefillBarcode) setTimeout(()=>lookupBarcode(prefillBarcode),50);
   }
-  function closeScanner(){setScanOpen(false);setScanPart(null);setMoveResult(null);setBarcode('');}
+  function closeScanner(){stopCamera();setScanOpen(false);setScanPart(null);setMoveResult(null);setBarcode('');}
 
   const filtered=parts.filter(p=>
     p.name.toLowerCase().includes(search.toLowerCase())||
@@ -2239,7 +2312,37 @@ function PartsAndScannerTab({canManage}){
                     {scanning?'…':'🔍 Find'}
                   </button>
                 </div>
-                <div style={{fontSize:'12px',color:'#94a3b8'}}>💡 Scan with a device or type the part No and press Enter.</div>
+                <button
+                  onClick={cameraOpen?stopCamera:startCamera}
+                  style={{
+                    width:'100%',padding:'11px',fontSize:'14px',fontWeight:700,borderRadius:'8px',cursor:'pointer',
+                    border:cameraOpen?'2px solid #dc2626':'2px solid #2563eb',
+                    background:cameraOpen?'#fef2f2':'#eff6ff',
+                    color:cameraOpen?'#dc2626':'#2563eb',
+                    marginBottom:'8px',
+                  }}
+                >
+                  {cameraOpen?'✕ Stop Camera':'📷 Scan with Phone Camera'}
+                </button>
+
+                {cameraOpen&&(
+                  <div style={{marginBottom:'8px'}}>
+                    <div id="camera-view" style={{width:'100%',borderRadius:'10px',overflow:'hidden',background:'#000',minHeight:'220px'}}/>
+                    {cameraStarting&&(
+                      <div style={{textAlign:'center',padding:'10px',fontSize:'12px',color:'#64748b'}}>Starting camera…</div>
+                    )}
+                    {cameraError&&(
+                      <div style={{marginTop:'8px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#991b1b'}}>
+                        ⚠️ {cameraError}
+                      </div>
+                    )}
+                    {!cameraError&&!cameraStarting&&(
+                      <div style={{marginTop:'6px',fontSize:'11px',color:'#94a3b8',textAlign:'center'}}>Point the camera at a barcode — it will scan automatically.</div>
+                    )}
+                  </div>
+                )}
+
+                <div style={{fontSize:'12px',color:'#94a3b8'}}>💡 Use a Bluetooth/USB scanner (auto-fills above), tap the camera button, or type the part No and press Enter.</div>
               </div>
 
               {scanPart&&(

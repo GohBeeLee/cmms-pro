@@ -70,6 +70,8 @@ async def ensure_schema_updates():
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_spare_parts_barcode ON spare_parts (barcode)"))
         if "used_on_asset" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN used_on_asset VARCHAR(200)"))
+        if "photo_url" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_url TEXT"))
         user_columns = (await conn.execute(text("PRAGMA table_info(users)"))).mappings().all()
         user_names = {col["name"] for col in user_columns}
         if "is_present" not in user_names:

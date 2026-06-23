@@ -61,6 +61,8 @@ def _dict(p: SparePart, show_cost: bool = True) -> dict:
         "location":         p.location,
         "barcode":          getattr(p, "barcode",        None),
         "used_on_asset":    getattr(p, "used_on_asset",  None),
+        "photo_url":        getattr(p, "photo_url",      None),
+        "has_photo":        bool(getattr(p, "photo_url", None)),
         "unit":             p.unit or "pcs",
         "status":           "Topup" if qty <= reord else "Enough",
         "is_low_stock":     qty <= reord,
@@ -558,3 +560,48 @@ async def restock(
     await db.flush()
     await ws_manager.broadcast_event(ROOM,"inventory.restocked",{"id":str(p.id),"name":p.name,"new_qty":p.quantity_on_hand})
     return _dict(p,_can_view_cost(current_user))
+
+
+class PhotoUpload(BaseModel):
+    data: str  # base64 data URL, e.g. "data:image/jpeg;base64,/9j/4AAQ..."
+
+
+@router.put("/{part_id}/photo")
+async def upload_part_photo(
+    part_id: UUID, body: PhotoUpload,
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    """
+    Upload or replace the reference photo for a part. Stored as a base64
+    data URL directly on the row (same lightweight approach used for repair
+    request photos) — no filesystem dependency.
+    Max ~800KB raw image to keep page loads reasonable for the parts table.
+    """
+    _require_admin_or_manager(current_user)
+    p = await _get(part_id, db)
+
+    data_url = body.data if body.data.startswith("data:") else f"data:image/jpeg;base64,{body.data}"
+    raw_b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
+    size_kb = len(raw_b64) * 0.75 / 1024
+    if size_kb > 800:
+        raise HTTPException(400, f"Photo too large ({size_kb:.0f}KB) — please use an image under ~800KB")
+
+    p.photo_url = data_url
+    p.updated_at = datetime.utcnow()
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "inventory.updated", {"id": str(p.id), "name": p.name})
+    return _dict(p, _can_view_cost(current_user))
+
+
+@router.delete("/{part_id}/photo")
+async def delete_part_photo(
+    part_id: UUID,
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
+):
+    _require_admin_or_manager(current_user)
+    p = await _get(part_id, db)
+    p.photo_url = None
+    p.updated_at = datetime.utcnow()
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "inventory.updated", {"id": str(p.id), "name": p.name})
+    return _dict(p, _can_view_cost(current_user))

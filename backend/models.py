@@ -172,6 +172,7 @@ class SparePart(Base):
     location: Mapped[str | None] = mapped_column(String(100))
     barcode: Mapped[str | None] = mapped_column(String(100), index=True)
     used_on_asset: Mapped[str | None] = mapped_column(String(200))
+    photo_url: Mapped[str | None] = mapped_column(Text)  # base64 data URL, e.g. "data:image/jpeg;base64,..."
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

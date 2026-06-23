@@ -1859,6 +1859,12 @@ function PartsAndScannerTab({canManage}){
   const [importResult,setImportResult]=useState(null);
   const [importing,setImporting]=useState(false);
   const importRef=useRef(null);
+  // ── Photo upload ──
+  const [photoModal,setPhotoModal]=useState(null); // part being photographed
+  const [photoPreview,setPhotoPreview]=useState('');
+  const [photoUploading,setPhotoUploading]=useState(false);
+  const photoFileRef=useRef(null);
+  const [lightboxPhoto,setLightboxPhoto]=useState(null); // {url,name} for full-size view
 
   // ── Scanner state ──
   const [scanOpen,setScanOpen]=useState(false);
@@ -1954,6 +1960,71 @@ function PartsAndScannerTab({canManage}){
       load();
     }catch(ex){setImportResult({error:ex.message});}
     finally{setImporting(false);e.target.value='';}
+  }
+
+  // ── Photo upload (resize client-side to keep payload small) ──
+  function openPhotoModal(part){
+    setPhotoModal(part);
+    setPhotoPreview(part.photo_url||'');
+  }
+  function closePhotoModal(){setPhotoModal(null);setPhotoPreview('');}
+
+  function resizeImage(file,maxDim=800,quality=0.75){
+    return new Promise((resolve,reject)=>{
+      const reader=new FileReader();
+      reader.onload=()=>{
+        const img=new Image();
+        img.onload=()=>{
+          let {width,height}=img;
+          if(width>height&&width>maxDim){height=Math.round(height*maxDim/width);width=maxDim;}
+          else if(height>maxDim){width=Math.round(width*maxDim/height);height=maxDim;}
+          const canvas=document.createElement('canvas');
+          canvas.width=width;canvas.height=height;
+          canvas.getContext('2d').drawImage(img,0,0,width,height);
+          resolve(canvas.toDataURL('image/jpeg',quality));
+        };
+        img.onerror=()=>reject(new Error('Could not read image'));
+        img.src=reader.result;
+      };
+      reader.onerror=()=>reject(new Error('Could not read file'));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function handlePhotoSelect(e){
+    const file=e.target.files[0];
+    if(!file) return;
+    if(!file.type.startsWith('image/')){toast('Please select an image file','err');return;}
+    try{
+      const dataUrl=await resizeImage(file);
+      setPhotoPreview(dataUrl);
+    }catch(err){toast('Could not process image','err');}
+    finally{e.target.value='';}
+  }
+
+  async function savePhoto(){
+    if(!photoModal||!photoPreview) return;
+    setPhotoUploading(true);
+    try{
+      await api('/inventory/'+photoModal.id+'/photo',{method:'PUT',body:JSON.stringify({data:photoPreview})});
+      toast('Photo saved');
+      closePhotoModal();
+      load();
+    }catch(e){toast(e.message,'err');}
+    finally{setPhotoUploading(false);}
+  }
+
+  async function removePhoto(){
+    if(!photoModal) return;
+    if(!confirm('Remove this photo?')) return;
+    setPhotoUploading(true);
+    try{
+      await api('/inventory/'+photoModal.id+'/photo',{method:'DELETE'});
+      toast('Photo removed');
+      closePhotoModal();
+      load();
+    }catch(e){toast(e.message,'err');}
+    finally{setPhotoUploading(false);}
   }
 
   // ── Scanner logic ──
@@ -2123,7 +2194,7 @@ function PartsAndScannerTab({canManage}){
           <div className="ovf"><table>
             <thead><tr>
               {[
-                'No','Part Item','Category','Description','Qty','Rack No','Use at',
+                'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
                 ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
                 'Barcode','Threshold','Status','Actions',
               ].map(h=><th key={h}>{h}</th>)}
@@ -2135,6 +2206,18 @@ function PartsAndScannerTab({canManage}){
               return(
                 <tr key={p.id} style={{background:rowBg}}>
                   <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{p.part_code}</span></td>
+                  <td>
+                    {p.photo_url?(
+                      <img src={p.photo_url} alt={p.name} onClick={()=>setLightboxPhoto({url:p.photo_url,name:p.name})}
+                        style={{width:'42px',height:'42px',objectFit:'cover',borderRadius:'6px',cursor:'pointer',border:'1px solid #e2e8f0'}}/>
+                    ):(
+                      <div onClick={()=>canManage&&openPhotoModal(p)} style={{
+                        width:'42px',height:'42px',borderRadius:'6px',background:'#f1f5f9',
+                        display:'flex',alignItems:'center',justifyContent:'center',fontSize:'16px',color:'#cbd5e1',
+                        cursor:canManage?'pointer':'default',
+                      }} title={canManage?'Add photo':''}>🖼️</div>
+                    )}
+                  </td>
                   <td style={{fontWeight:600}}>{p.name}</td>
                   <td><span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'999px',background:'#f1f5f9',color:'#374151'}}>{p.category||'—'}</span></td>
                   <td style={{color:'#64748b',fontSize:'12px',maxWidth:'140px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={p.description||''}>{p.description||'—'}</td>
@@ -2157,6 +2240,7 @@ function PartsAndScannerTab({canManage}){
                   <td style={{whiteSpace:'nowrap'}}>
                     <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
+                      <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.photo_url?'Photo':'+ Photo'}</button>
                       <button onClick={()=>{setEditPart(p);setForm({
                         part_code:p.part_code,name:p.name,category:p.category||'',
                         description:p.description||'',unit:p.unit||'pcs',
@@ -2281,6 +2365,61 @@ function PartsAndScannerTab({canManage}){
             </div>
           )}
         </Modal>
+      )}
+
+      {/* ── Photo upload modal — admin/manager only ── */}
+      {photoModal&&canManage&&(
+        <Modal title={'Photo: '+photoModal.part_code+' — '+photoModal.name} onClose={closePhotoModal}>
+          <div style={{display:'flex',flexDirection:'column',gap:'14px',alignItems:'center'}}>
+            <div style={{
+              width:'100%',aspectRatio:'1',maxWidth:'280px',borderRadius:'12px',overflow:'hidden',
+              background:'#f8fafc',border:'2px dashed #e2e8f0',display:'flex',alignItems:'center',justifyContent:'center',
+            }}>
+              {photoPreview?(
+                <img src={photoPreview} alt={photoModal.name} style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+              ):(
+                <div style={{textAlign:'center',color:'#94a3b8'}}>
+                  <div style={{fontSize:'40px',marginBottom:'6px'}}>🖼️</div>
+                  <div style={{fontSize:'12px'}}>No photo yet</div>
+                </div>
+              )}
+            </div>
+
+            <label style={{width:'100%',cursor:'pointer'}}>
+              <span className="btn btn-secondary" style={{width:'100%',display:'block',textAlign:'center'}}>
+                📷 Choose Photo
+              </span>
+              <input ref={photoFileRef} type="file" accept="image/*" style={{display:'none'}} onChange={handlePhotoSelect}/>
+            </label>
+
+            <div style={{fontSize:'11px',color:'#94a3b8',textAlign:'center'}}>Photos are automatically resized — JPG/PNG recommended.</div>
+
+            <div style={{display:'flex',gap:'10px',width:'100%'}}>
+              <button className="btn btn-primary" style={{flex:1}} onClick={savePhoto} disabled={!photoPreview||photoUploading}>
+                {photoUploading?'Saving…':'💾 Save Photo'}
+              </button>
+              {photoModal.photo_url&&(
+                <button className="btn" style={{flex:1,background:'#fef2f2',color:'#dc2626'}} onClick={removePhoto} disabled={photoUploading}>
+                  🗑️ Remove
+                </button>
+              )}
+            </div>
+            <button className="btn btn-secondary" style={{width:'100%'}} onClick={closePhotoModal}>Cancel</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Photo lightbox (full-size view, all roles) ── */}
+      {lightboxPhoto&&(
+        <div onClick={()=>setLightboxPhoto(null)} style={{
+          position:'fixed',top:0,left:0,right:0,bottom:0,background:'rgba(0,0,0,.85)',
+          zIndex:200,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px',cursor:'zoom-out',
+        }}>
+          <div style={{maxWidth:'90vw',maxHeight:'90vh',textAlign:'center'}}>
+            <img src={lightboxPhoto.url} alt={lightboxPhoto.name} style={{maxWidth:'100%',maxHeight:'80vh',borderRadius:'10px',objectFit:'contain'}}/>
+            <div style={{color:'#fff',marginTop:'10px',fontSize:'14px',fontWeight:600}}>{lightboxPhoto.name}</div>
+          </div>
+        </div>
       )}
 
       {/* ── Scanner modal ── */}
@@ -2413,7 +2552,11 @@ function PartsAndScannerTab({canManage}){
               {scanning&&<div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'50px'}}><Spinner/></div>}
               {scanPart&&!scanning&&(
                 <div className="card" style={{border:scanPart.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',background:scanPart.is_low_stock?'#fefce8':'#fff'}}>
-                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'12px'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'12px',gap:'12px'}}>
+                    {scanPart.photo_url&&(
+                      <img src={scanPart.photo_url} alt={scanPart.name} onClick={()=>setLightboxPhoto({url:scanPart.photo_url,name:scanPart.name})}
+                        style={{width:'64px',height:'64px',objectFit:'cover',borderRadius:'10px',border:'1px solid #e2e8f0',flexShrink:0,cursor:'zoom-in'}}/>
+                    )}
                     <div style={{flex:1}}>
                       <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700,marginBottom:'4px'}}>{scanPart.part_code}</div>
                       <div style={{fontWeight:800,color:'#1e293b',fontSize:'16px',marginBottom:'4px'}}>{scanPart.name}</div>

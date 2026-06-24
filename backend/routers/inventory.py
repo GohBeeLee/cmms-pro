@@ -9,6 +9,7 @@ IMPORTANT: Static routes (/import/*, /export/*) declared BEFORE
            /{part_id} routes to avoid FastAPI path conflicts.
 """
 import io
+import re
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -289,6 +290,8 @@ async def import_excel(
     valid_cats = {"Electrical","Mechanical","Pneumatic","Hydraulic","Consumable","Other"}
 
     inserted, updated, skipped = 0, 0, []
+    seen_codes_this_import: dict[str, int] = {}  # base_code -> count seen so far, to detect collisions
+    disambiguated = 0  # rows whose "No" collided with another row and got a -2/-3... suffix
 
     def gcol(rv, key, default=""):
         idx = col_map.get(key)
@@ -303,18 +306,53 @@ async def import_excel(
     for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
         if all(v is None or str(v).strip()=='' for v in rv): continue
 
-        part_code = gcol(rv,"part_code")
-        name      = gcol(rv,"name")
-        if not part_code:
+        raw_no = gcol(rv,"part_code")
+        name   = gcol(rv,"name")
+        if not raw_no:
             skipped.append({"reason":"Missing part No"}); continue
         if not name:
-            skipped.append({"part_code":part_code,"reason":"Missing Part Item name"}); continue
+            skipped.append({"part_code":raw_no,"reason":"Missing Part Item name"}); continue
 
         cat_raw  = gcol(rv,"category") or "Other"
         category = "Other"
         for vc in valid_cats:
             if vc.lower()==cat_raw.lower() or vc.lower() in cat_raw.lower():
                 category=vc; break
+
+        # IMPORTANT: the "No" column commonly restarts at 1 for every category
+        # section in real-world spreadsheets (Mechanical 1,2,3... Pneumatic
+        # 1,2,3... etc). Using "No" alone as the unique part_code causes
+        # later categories to silently overwrite earlier ones with the same
+        # number. Combine category + No into the stored part_code so each
+        # row stays distinct, while the prefix code abbreviation keeps it
+        # short. If the sheet's "No" values are already globally unique
+        # (e.g. "E-001", "M-002"), this just adds a short category prefix
+        # and remains unique.
+        cat_prefix = {
+            "Electrical":"ELE","Mechanical":"MEC","Pneumatic":"PNE",
+            "Hydraulic":"HYD","Consumable":"CON","Other":"OTH",
+        }.get(category,"OTH")
+        base_code = f"{cat_prefix}-{raw_no}"
+
+        # Spreadsheets commonly reuse the same "No" across multiple sub-groups
+        # within one category (e.g. Mechanical bearings 1,2,3... then
+        # Mechanical belts 1,2,3... again). Detect collisions within THIS
+        # import and disambiguate with a -2, -3... suffix so every row still
+        # becomes its own distinct part instead of silently overwriting the
+        # previous row with the same code.
+        seen_count = seen_codes_this_import.get(base_code, 0)
+        if seen_count == 0 and base_code not in existing:
+            part_code = base_code
+        else:
+            # Either collided within this import, or already exists from a
+            # previous import — count up until we find a free suffix.
+            n = max(seen_count, 1)
+            part_code = f"{base_code}-{n+1}"
+            while part_code in existing:
+                n += 1
+                part_code = f"{base_code}-{n+1}"
+            disambiguated += 1
+        seen_codes_this_import[base_code] = seen_count + 1
 
         qty           = int(gnum(rv,"quantity",0) or 0)
         uc_raw        = gnum(rv,"unit_cost")
@@ -376,7 +414,7 @@ async def export_excel(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Export inventory in YOUR exact column format."""
+    """Export inventory — one sheet per category, plus a Summary sheet totaling all categories."""
     _require_admin_or_manager(current_user)
     try:
         from openpyxl import Workbook
@@ -390,68 +428,159 @@ async def export_excel(
     if low_stock: q = q.where(SparePart.quantity_on_hand <= SparePart.reorder_level)
     parts = (await db.execute(q)).scalars().all()
 
-    wb = Workbook(); ws = wb.active; ws.title = "Inventory"
     thin     = Side(style="thin",color="CCCCCC")
     border   = Border(left=thin,right=thin,top=thin,bottom=thin)
     hdr_font = Font(name="Arial",bold=True,color="FFFFFF",size=10)
     hdr_fill = PatternFill("solid",start_color="1E3A5F")
+    title_font = Font(name="Arial",bold=True,size=11,color="FFFFFF")
     data_font= Font(name="Arial",size=10)
+    bold_font= Font(name="Arial",bold=True,size=10)
     enough   = PatternFill("solid",start_color="DCFCE7")
     topup    = PatternFill("solid",start_color="FEF9C4")
+    summary_fill = PatternFill("solid",start_color="EFF6FF")
 
-    ws.merge_cells("A1:L1")
-    ws["A1"] = f"CMMS Pro — Inventory Report  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(parts)} parts"
-    ws["A1"].font = Font(name="Arial",bold=True,size=11,color="FFFFFF")
-    ws["A1"].fill = hdr_fill
-    ws["A1"].alignment = Alignment(horizontal="center")
-    ws.row_dimensions[1].height = 26
+    # Group parts by category, preserving a stable, sorted category order
+    by_category: dict[str, list] = {}
+    for p in parts:
+        cat = p.category or "Uncategorized"
+        by_category.setdefault(cat, []).append(p)
+    sorted_categories = sorted(by_category.keys())
 
-    headers = ["category","No","Part Item","Description","Quantity",
+    def _sheet_name(cat: str) -> str:
+        # Excel sheet names: max 31 chars, no \/?*[]:
+        name = re.sub(r'[\\/?*\[\]:]', '-', cat)[:31]
+        return name or "Uncategorized"
+
+    wb = Workbook()
+    wb.remove(wb.active)  # we'll add Summary first, then one sheet per category
+
+    headers = ["No","Part Item","Description","Quantity",
                "Rack No","Use at","Unit Price (RM)","Total Amount(RM)",
                "Barcode","Threshold","Status(Enough/Topup)"]
-    for c,h in enumerate(headers,1):
-        cell = ws.cell(row=2,column=c,value=h)
+    col_widths = [16,28,32,10,14,24,14,16,16,12,18]
+
+    sheet_refs: list[tuple[str, str, int]] = []  # (category, sheet_name, last_data_row) for the Summary sheet
+
+    for cat in sorted_categories:
+        cat_parts = sorted(by_category[cat], key=lambda x: x.name)
+        sheet_name = _sheet_name(cat)
+        # Guard against duplicate sheet names after sanitization
+        base_name, n = sheet_name, 2
+        while sheet_name in wb.sheetnames:
+            sheet_name = f"{base_name[:28]}-{n}"; n += 1
+
+        ws = wb.create_sheet(sheet_name)
+
+        ws.merge_cells("A1:K1")
+        ws["A1"] = f"{cat}  |  CMMS Pro Inventory  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(cat_parts)} parts"
+        ws["A1"].font = title_font
+        ws["A1"].fill = hdr_fill
+        ws["A1"].alignment = Alignment(horizontal="center")
+        ws.row_dimensions[1].height = 26
+
+        for c,h in enumerate(headers,1):
+            cell = ws.cell(row=2,column=c,value=h)
+            cell.font=hdr_font; cell.fill=hdr_fill; cell.border=border
+            cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+        ws.row_dimensions[2].height = 24
+
+        topup_n=enough_n=0
+        first_data_row = 3
+        for r,p in enumerate(cat_parts,first_data_row):
+            qty   = p.quantity_on_hand or 0
+            reord = p.reorder_level    or 0
+            sts   = "Topup" if qty<=reord else "Enough"
+            if sts=="Topup": topup_n+=1
+            else: enough_n+=1
+            row_data = [
+                p.part_code, p.name,
+                p.description or "",
+                qty,
+                p.location or "",
+                getattr(p,"used_on_asset",None) or "",
+                p.unit_cost if p.unit_cost else "",
+                None,  # Total Amount(RM) — filled as a formula below
+                getattr(p,"barcode",None) or "",
+                reord, sts,
+            ]
+            fill = enough if sts=="Enough" else topup
+            for c,v in enumerate(row_data,1):
+                cell=ws.cell(row=r,column=c,value=v)
+                cell.font=data_font; cell.fill=fill; cell.border=border
+                cell.alignment=Alignment(vertical="center",horizontal="right" if c in(4,7,8,10) else "left")
+            # Total Amount(RM) = Quantity * Unit Price, as a live formula
+            ws.cell(row=r,column=8,value=f"=D{r}*G{r}").font=data_font
+            ws.cell(row=r,column=8).fill=fill
+            ws.cell(row=r,column=8).border=border
+            ws.cell(row=r,column=8).alignment=Alignment(vertical="center",horizontal="right")
+            ws.row_dimensions[r].height=18
+
+        last_data_row = first_data_row + len(cat_parts) - 1 if cat_parts else first_data_row - 1
+        foot = last_data_row + 1
+        ws.cell(row=foot,column=1,value="TOTAL").font=bold_font
+        if cat_parts:
+            ws.cell(row=foot,column=4,value=f"=SUM(D{first_data_row}:D{last_data_row})").font=bold_font
+            ws.cell(row=foot,column=8,value=f"=SUM(H{first_data_row}:H{last_data_row})").font=bold_font
+        else:
+            ws.cell(row=foot,column=4,value=0).font=bold_font
+            ws.cell(row=foot,column=8,value=0).font=bold_font
+        ws.cell(row=foot,column=11,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
+        ws.row_dimensions[foot].height=20
+
+        for i,w in enumerate(col_widths,1):
+            ws.column_dimensions[get_column_letter(i)].width=w
+        ws.freeze_panes="A3"
+
+        sheet_refs.append((cat, sheet_name, foot))
+
+    # ── Summary sheet — totals every category, placed first ──
+    summary = wb.create_sheet("Summary", 0)
+    summary.merge_cells("A1:D1")
+    summary["A1"] = f"CMMS Pro — Inventory Summary  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(sorted_categories)} categories  |  {len(parts)} parts total"
+    summary["A1"].font = title_font
+    summary["A1"].fill = hdr_fill
+    summary["A1"].alignment = Alignment(horizontal="center")
+    summary.row_dimensions[1].height = 26
+
+    summary_headers = ["Category","Total Quantity","Total Inventory Cost (RM)","Part Count"]
+    for c,h in enumerate(summary_headers,1):
+        cell = summary.cell(row=2,column=c,value=h)
         cell.font=hdr_font; cell.fill=hdr_fill; cell.border=border
         cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-    ws.row_dimensions[2].height = 24
+    summary.row_dimensions[2].height = 24
 
-    topup_n=enough_n=0
-    for r,p in enumerate(parts,3):
-        qty   = p.quantity_on_hand or 0
-        reord = p.reorder_level    or 0
-        sts   = "Topup" if qty<=reord else "Enough"
-        if sts=="Topup": topup_n+=1
-        else: enough_n+=1
-        total = round(qty*p.unit_cost,2) if p.unit_cost else ""
-        row_data = [
-            p.category or "",
-            p.part_code, p.name,
-            p.description or "",
-            qty,
-            p.location or "",
-            getattr(p,"used_on_asset",None) or "",
-            p.unit_cost if p.unit_cost else "",
-            total,
-            getattr(p,"barcode",None) or "",
-            reord, sts,
-        ]
-        fill = enough if sts=="Enough" else topup
-        for c,v in enumerate(row_data,1):
-            cell=ws.cell(row=r,column=c,value=v)
-            cell.font=data_font; cell.fill=fill; cell.border=border
-            cell.alignment=Alignment(vertical="center",horizontal="right" if c in(5,8,9,11) else "left")
-        ws.row_dimensions[r].height=18
+    first_summary_row = 3
+    for i,(cat, sheet_name, foot_row) in enumerate(sheet_refs):
+        r = first_summary_row + i
+        summary.cell(row=r,column=1,value=cat).font=data_font
+        # Pull totals live from each category sheet via cross-sheet formula references
+        summary.cell(row=r,column=2,value=f"='{sheet_name}'!D{foot_row}").font=data_font
+        summary.cell(row=r,column=3,value=f"='{sheet_name}'!H{foot_row}").font=data_font
+        summary.cell(row=r,column=4,value=len(by_category[cat])).font=data_font
+        for c in (1,2,3,4):
+            cell=summary.cell(row=r,column=c)
+            cell.fill=summary_fill; cell.border=border
+            cell.alignment=Alignment(vertical="center",horizontal="right" if c in(2,3,4) else "left")
+        summary.row_dimensions[r].height=18
 
-    foot=len(parts)+3
-    ws.cell(row=foot,column=1,value="TOTAL").font=Font(name="Arial",bold=True,size=10)
-    ws.cell(row=foot,column=5,value=sum(p.quantity_on_hand or 0 for p in parts)).font=Font(name="Arial",bold=True)
-    ws.cell(row=foot,column=9,value=round(sum((p.quantity_on_hand or 0)*(p.unit_cost or 0) for p in parts),2)).font=Font(name="Arial",bold=True)
-    ws.cell(row=foot,column=12,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
-    ws.row_dimensions[foot].height=20
+    last_summary_row = first_summary_row + len(sheet_refs) - 1 if sheet_refs else first_summary_row - 1
+    grand_foot = last_summary_row + 1
+    summary.cell(row=grand_foot,column=1,value="GRAND TOTAL").font=bold_font
+    if sheet_refs:
+        summary.cell(row=grand_foot,column=2,value=f"=SUM(B{first_summary_row}:B{last_summary_row})").font=bold_font
+        summary.cell(row=grand_foot,column=3,value=f"=SUM(C{first_summary_row}:C{last_summary_row})").font=bold_font
+        summary.cell(row=grand_foot,column=4,value=f"=SUM(D{first_summary_row}:D{last_summary_row})").font=bold_font
+    else:
+        for c in (2,3,4):
+            summary.cell(row=grand_foot,column=c,value=0).font=bold_font
+    for c in (1,2,3,4):
+        summary.cell(row=grand_foot,column=c).fill=hdr_fill
+        summary.cell(row=grand_foot,column=c).font=Font(name="Arial",bold=True,color="FFFFFF")
+    summary.row_dimensions[grand_foot].height=20
 
-    for i,w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18],1):
-        ws.column_dimensions[get_column_letter(i)].width=w
-    ws.freeze_panes="A3"
+    for i,w in enumerate([28,18,26,14],1):
+        summary.column_dimensions[get_column_letter(i)].width=w
+    summary.freeze_panes="A3"
 
     buf=io.BytesIO(); wb.save(buf); buf.seek(0)
     fname=f"Inventory_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.xlsx"

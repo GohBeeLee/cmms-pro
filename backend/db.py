@@ -13,7 +13,19 @@ import os
 # overnight". Using an absolute path makes the database location stable
 # no matter how or from where the server process is launched.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_DB_PATH = os.path.join(BASE_DIR, "cmms.db")
+
+# On Render, set the RENDER_DISK_PATH environment variable to your
+# persistent disk's mount path (e.g. /var/data) once you've attached one.
+# Render's filesystem is otherwise EPHEMERAL — anything not on the
+# attached disk is wiped on every restart/redeploy/spin-down. When this
+# env var isn't set (e.g. running locally on your own machine), the
+# database simply lives next to this file as before.
+_render_disk = os.environ.get("RENDER_DISK_PATH")
+if _render_disk:
+    os.makedirs(_render_disk, exist_ok=True)
+    DEFAULT_DB_PATH = os.path.join(_render_disk, "cmms.db")
+else:
+    DEFAULT_DB_PATH = os.path.join(BASE_DIR, "cmms.db")
 
 class Settings(BaseSettings):
     # SQLite — stored in a local file, zero install required.

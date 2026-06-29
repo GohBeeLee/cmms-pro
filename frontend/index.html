@@ -89,11 +89,12 @@ window.API_BASE = '';
 const { useState, useEffect, useRef, useMemo } = React;
 
 const ROOT_CAUSES = [
-  "Mechanical failure","Electrical fault","Bearing failure",
-  "Belt worn / broken","Oil / fluid leakage","Overheating",
-  "Electrical trip / breaker","Sensor fault","Vibration / noise",
-  "Wear and tear","Corrosion / rust","Blockage / clogging",
-  "Alignment issue","Human error","No fault found","Others",
+  "Mechanical: Bearing","Mechanical: Chain","Mechanical: Belt", "Mechanical: Fastener","Mechanical: Wear Parts",
+  "Mechanical: Universal Joint", "Mechanical: Pneumatic","Mechanical: Alignment","Mechanical: Cutter Adjustment",
+  "Electrical: Motor","Electrical: Sensor","Electrical: PLC","Electrical: Power Trip",
+  "Electrical: Controller","Electrical: Control Panel","Electrical: Wiring", "Electrical: Inteference Signal", 
+  "Others: CV Files", "Others: Setting", "Others: Hardware", "Others: Glue Pot", "Others: Software Bug", 
+  "Others: Operation Mistake", "Others: Material"
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -304,6 +305,17 @@ function fmtDate(d){
 function fmtDT(d){
   const dt = toUTC(d);
   return dt ? dt.toLocaleString('en-MY',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+}
+function relativeTime(iso){
+  if(!iso) return 'Never';
+  const dt=toUTC(iso);
+  if(!dt) return 'Never';
+  const days=Math.floor((Date.now()-dt.getTime())/86400000);
+  if(days<1) return 'Today';
+  if(days===1) return '1 day ago';
+  if(days<30) return days+' days ago';
+  const months=Math.floor(days/30);
+  return months===1?'1 month ago':months+' months ago';
 }
 
 // Calculate downtime between two UTC timestamps
@@ -1821,7 +1833,7 @@ function Assets(){
 function InventoryAndStock(){
   const {user}=useAuth();
   const canManage=user&&(user.role==='admin'||user.role==='manager');
-  const [tab,setTab]=useState('parts'); // 'parts' | 'history'
+  const [tab,setTab]=useState('parts'); // 'parts' | 'stocktake' | 'history'
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px',flexWrap:'wrap',gap:'10px'}}>
@@ -1829,8 +1841,12 @@ function InventoryAndStock(){
           <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Inventory & Stock</h1>
           <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Scan, manage parts, and track stock movements</p>
         </div>
-        <div style={{display:'flex',gap:'8px'}}>
-          {[['parts','📦 Parts & Scanner'],['history','📋 Movement History']].map(([k,l])=>(
+        <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
+          {[
+            ['parts','📦 Parts & Scanner'],
+            ...(canManage?[['stocktake','📋 Stock Take']]:[]),
+            ['history','🗂️ Movement History'],
+          ].map(([k,l])=>(
             <button key={k} onClick={()=>setTab(k)} style={{
               padding:'9px 22px',borderRadius:'8px',border:'none',cursor:'pointer',
               fontSize:'14px',fontWeight:700,
@@ -1840,7 +1856,9 @@ function InventoryAndStock(){
           ))}
         </div>
       </div>
-      {tab==='parts'?<PartsAndScannerTab canManage={canManage}/>:<StockHistoryTab/>}
+      {tab==='parts'&&<PartsAndScannerTab canManage={canManage}/>}
+      {tab==='stocktake'&&canManage&&<StockTakeTab/>}
+      {tab==='history'&&<StockHistoryTab/>}
     </div>
   );
 }
@@ -2216,7 +2234,7 @@ function PartsAndScannerTab({canManage}){
               {[
                 'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
                 ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
-                'Barcode','Threshold','Status','Actions',
+                'Barcode','Threshold','Last Checked','Status','Actions',
               ].map(h=><th key={h}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
@@ -2250,6 +2268,12 @@ function PartsAndScannerTab({canManage}){
                   </>}
                   <td style={{color:'#64748b',fontSize:'11px',fontFamily:'monospace'}}>{p.barcode||'—'}</td>
                   <td style={{textAlign:'right',color:'#64748b'}}>{p.reorder_level}</td>
+                  <td>
+                    <span style={{
+                      fontSize:'12px',fontWeight:600,
+                      color:!p.last_stock_take_at?'#dc2626':relativeTime(p.last_stock_take_at).includes('month')?'#b45309':'#64748b',
+                    }}>{relativeTime(p.last_stock_take_at)}</span>
+                  </td>
                   <td>
                     <span style={{
                       display:'inline-block',padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,
@@ -2664,6 +2688,377 @@ function PartsAndScannerTab({canManage}){
   );
 }
 
+// ── Stock Take (physical count via barcode scan) ────────────────────────────
+function StockTakeTab(){
+  const [barcode,setBarcode]=useState('');
+  const [scanning,setScanning]=useState(false);
+  const [scanPart,setScanPart]=useState(null);
+  const [editForm,setEditForm]=useState(null); // editable copy of scanned part
+  const [saving,setSaving]=useState(false);
+  const [lastResult,setLastResult]=useState(null);
+  const [sessionLog,setSessionLog]=useState([]); // items checked this session (client-side only)
+  const barcodeRef=useRef(null);
+  // Camera
+  const [cameraOpen,setCameraOpen]=useState(false);
+  const [cameraError,setCameraError]=useState('');
+  const [cameraStarting,setCameraStarting]=useState(false);
+  const html5QrRef=useRef(null);
+  const cameraStartedRef=useRef(false);
+  // Coverage status — "what have I missed"
+  const [coverage,setCoverage]=useState(null);
+  const [coverageLoading,setCoverageLoading]=useState(true);
+  const [coverageView,setCoverageView]=useState('never'); // 'never' | 'stale' | 'done'
+  const [showCoverage,setShowCoverage]=useState(true);
+
+  async function loadCoverage(){
+    setCoverageLoading(true);
+    try{ setCoverage(await api('/inventory/stock-take-status?stale_after_days=30')); }
+    catch(e){ /* silent — non-critical panel */ }
+    finally{ setCoverageLoading(false); }
+  }
+  useEffect(()=>{ loadCoverage(); },[]);
+  useWS('inventory',loadCoverage);
+
+  useEffect(()=>{ barcodeRef.current?.focus(); },[]);
+  useEffect(()=>{
+    return ()=>{
+      if(html5QrRef.current&&cameraStartedRef.current){
+        html5QrRef.current.stop().then(()=>html5QrRef.current.clear()).catch(()=>{});
+      }
+    };
+  },[]);
+
+  async function lookupBarcode(code){
+    const b=(code||barcode).trim();
+    if(!b) return;
+    setScanning(true);setScanPart(null);setEditForm(null);setLastResult(null);
+    try{
+      const data=await api('/stock/scan/'+encodeURIComponent(b));
+      setScanPart(data);
+      setEditForm({
+        quantity_on_hand:data.quantity_on_hand,
+        name:data.name,category:data.category||'',
+        description:data.description||'',location:data.location||'',
+        used_on_asset:data.used_on_asset||'',
+        unit_cost:data.unit_cost!=null?data.unit_cost:'',
+        reorder_level:data.reorder_level,
+      });
+    }catch(e){toast(e.message,'err');setScanPart(null);}
+    finally{setScanning(false);}
+  }
+  function onBarcodeKey(e){ if(e.key==='Enter'){e.preventDefault();lookupBarcode();} }
+
+  async function startCamera(){
+    if(typeof Html5Qrcode==='undefined'){
+      setCameraError('Camera scanner library failed to load. Check your internet connection.');
+      return;
+    }
+    setCameraOpen(true);setCameraError('');setCameraStarting(true);
+    setTimeout(async()=>{
+      try{
+        if(!html5QrRef.current) html5QrRef.current=new Html5Qrcode('camera-view-stocktake',{
+          useBarCodeDetectorIfSupported:true,
+          verbose:false,
+        });
+        const config={
+          fps:8,
+          qrbox:(vw,vh)=>{
+            const w=Math.floor(Math.min(vw,vh)*0.85);
+            return {width:w,height:Math.floor(w*0.4)};
+          },
+          aspectRatio:1.7777778,
+          disableFlip:false,
+        };
+        await html5QrRef.current.start(
+          {facingMode:'environment'},
+          config,
+          (decodedText)=>{ onCameraDetected(decodedText); },
+          ()=>{},
+        );
+        cameraStartedRef.current=true;
+      }catch(err){
+        setCameraError(
+          err && err.toString && err.toString().includes('NotAllowedError')
+            ? 'Camera permission denied. Please allow camera access and try again.'
+            : 'Could not start camera: '+(err?.message||err)
+        );
+        cameraStartedRef.current=false;
+      }finally{
+        setCameraStarting(false);
+      }
+    },50);
+  }
+  async function stopCamera(){
+    try{
+      if(html5QrRef.current&&cameraStartedRef.current){
+        await html5QrRef.current.stop();
+        html5QrRef.current.clear();
+      }
+    }catch(e){}
+    cameraStartedRef.current=false;
+    setCameraOpen(false);setCameraError('');
+  }
+  function onCameraDetected(decodedText){
+    if(!decodedText) return;
+    stopCamera();
+    setBarcode(decodedText);
+    lookupBarcode(decodedText);
+  }
+
+  function resetScan(){
+    setScanPart(null);setEditForm(null);setBarcode('');setLastResult(null);
+    setTimeout(()=>barcodeRef.current?.focus(),100);
+  }
+
+  function jumpToPart(entry){
+    // Coverage list entries don't carry barcode, but part_code always
+    // works as a fallback lookup key in /stock/scan/{code}
+    setBarcode(entry.part_code);
+    lookupBarcode(entry.part_code);
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+
+  async function saveCount(){
+    if(!scanPart||!editForm) return;
+    setSaving(true);
+    try{
+      const body={
+        part_id:scanPart.id,
+        new_quantity:parseInt(editForm.quantity_on_hand)||0,
+        name:editForm.name!==scanPart.name?editForm.name:undefined,
+        category:editForm.category!==(scanPart.category||'')?editForm.category:undefined,
+        description:editForm.description!==(scanPart.description||'')?editForm.description:undefined,
+        location:editForm.location!==(scanPart.location||'')?editForm.location:undefined,
+        used_on_asset:editForm.used_on_asset!==(scanPart.used_on_asset||'')?editForm.used_on_asset:undefined,
+        unit_cost:editForm.unit_cost!==''&&parseFloat(editForm.unit_cost)!==scanPart.unit_cost?parseFloat(editForm.unit_cost):undefined,
+        reorder_level:parseInt(editForm.reorder_level)!==scanPart.reorder_level?parseInt(editForm.reorder_level):undefined,
+      };
+      const result=await api('/stock/adjust',{method:'POST',body:JSON.stringify(body)});
+      setLastResult(result);
+      toast(result.changed?'✅ Stock take saved':'No changes — already matches');
+      setSessionLog(prev=>[{
+        part_code:scanPart.part_code,name:scanPart.name,
+        qty_before:result.qty_before,qty_after:result.qty_after,
+        changed:result.changed,time:new Date(),
+      },...prev]);
+      loadCoverage();
+    }catch(e){toast(e.message,'err');}
+    finally{setSaving(false);}
+  }
+
+  const qtyChanged = editForm && scanPart && parseInt(editForm.quantity_on_hand)!==scanPart.quantity_on_hand;
+
+  return (
+    <div>
+      <div style={{background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'10px',padding:'12px 16px',marginBottom:'16px',fontSize:'13px',color:'#1e40af'}}>
+        📋 <strong>Stock Take:</strong> Scan each item's barcode, compare the displayed quantity/details against what's physically on the shelf, and correct anything that doesn't match. Every correction is recorded in Movement History with reason "[STOCK TAKE]".
+      </div>
+
+      {/* ── Coverage summary: what have I missed ── */}
+      <div className="card" style={{marginBottom:'16px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:showCoverage?'14px':0,cursor:'pointer'}} onClick={()=>setShowCoverage(s=>!s)}>
+          <div className="section-title" style={{margin:0}}>📊 Stock Take Coverage</div>
+          <span style={{fontSize:'12px',color:'#94a3b8'}}>{showCoverage?'▲ Hide':'▼ Show'}</span>
+        </div>
+
+        {showCoverage&&(coverageLoading?<Spinner/>:!coverage?<Empty msg="Could not load coverage status"/>:(
+          <div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'10px',marginBottom:'14px'}}>
+              {[
+                ['never','Never Checked',coverage.never_checked_count,'#fef2f2','#dc2626'],
+                ['stale','Stale (>30 days)',coverage.stale_count,'#fefce8','#b45309'],
+                ['done','Up to Date',coverage.up_to_date_count,'#f0fdf4','#16a34a'],
+              ].map(([key,label,count,bg,color])=>(
+                <div key={key} onClick={()=>setCoverageView(key)} style={{
+                  cursor:'pointer',textAlign:'center',padding:'14px',borderRadius:'10px',background:bg,
+                  border:coverageView===key?'2px solid '+color:'2px solid transparent',
+                }}>
+                  <div style={{fontSize:'26px',fontWeight:800,color}}>{count}</div>
+                  <div style={{fontSize:'12px',color:'#475569',fontWeight:600,marginTop:'2px'}}>{label}</div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{fontSize:'12px',color:'#94a3b8',marginBottom:'8px'}}>
+              {coverage.total_parts} parts total · click a card above to view that list · click any item below to scan it directly
+            </div>
+
+            <div style={{maxHeight:'220px',overflowY:'auto',border:'1px solid #f1f5f9',borderRadius:'8px'}}>
+              {(coverage[coverageView==='never'?'never_checked':coverageView==='stale'?'stale':'up_to_date']||[]).length===0?(
+                <div style={{padding:'20px',textAlign:'center',color:'#94a3b8',fontSize:'13px'}}>
+                  {coverageView==='never'?'🎉 Everything has been checked at least once!':
+                   coverageView==='stale'?'🎉 Nothing is overdue!':
+                   'No items checked yet.'}
+                </div>
+              ):(coverage[coverageView==='never'?'never_checked':coverageView==='stale'?'stale':'up_to_date']).map(entry=>(
+                <div key={entry.id} onClick={()=>jumpToPart(entry)} style={{
+                  display:'flex',justifyContent:'space-between',alignItems:'center',
+                  padding:'10px 14px',borderBottom:'1px solid #f8fafc',cursor:'pointer',
+                }}
+                onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'}
+                onMouseLeave={e=>e.currentTarget.style.background='transparent'}
+                >
+                  <div>
+                    <span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',marginRight:'8px'}}>{entry.part_code}</span>
+                    <span style={{fontWeight:600,fontSize:'13px'}}>{entry.name}</span>
+                    {entry.location&&<span style={{fontSize:'11px',color:'#94a3b8',marginLeft:'8px'}}>📍 {entry.location}</span>}
+                  </div>
+                  <div style={{textAlign:'right',fontSize:'12px'}}>
+                    <div style={{color:entry.days_since==null?'#dc2626':entry.days_since>30?'#b45309':'#16a34a',fontWeight:600}}>
+                      {relativeTime(entry.last_stock_take_at)}
+                    </div>
+                    {entry.last_stock_take_by&&<div style={{color:'#94a3b8',fontSize:'11px'}}>by {entry.last_stock_take_by}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:(scanPart||scanning)?'1fr 1fr':'1fr',gap:'20px'}}>
+        {/* Left: scan input */}
+        <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+          <div className="card" style={{padding:'16px'}}>
+            <div className="section-title" style={{marginBottom:'12px'}}>Scan Item</div>
+            <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
+              <input
+                ref={barcodeRef}
+                className="inp"
+                placeholder="Scan or type barcode / part No…"
+                value={barcode}
+                onChange={e=>setBarcode(e.target.value)}
+                onKeyDown={onBarcodeKey}
+                style={{fontSize:'16px',letterSpacing:'1px'}}
+                autoComplete="off"
+              />
+              <button className="btn btn-primary" onClick={()=>lookupBarcode()} disabled={scanning||!barcode.trim()} style={{whiteSpace:'nowrap',minWidth:'80px'}}>
+                {scanning?'…':'🔍 Find'}
+              </button>
+            </div>
+            <button
+              onClick={cameraOpen?stopCamera:startCamera}
+              style={{
+                width:'100%',padding:'11px',fontSize:'14px',fontWeight:700,borderRadius:'8px',cursor:'pointer',
+                border:cameraOpen?'2px solid #dc2626':'2px solid #2563eb',
+                background:cameraOpen?'#fef2f2':'#eff6ff',
+                color:cameraOpen?'#dc2626':'#2563eb',
+                marginBottom:'8px',
+              }}
+            >
+              {cameraOpen?'✕ Stop Camera':'📷 Scan with Phone Camera'}
+            </button>
+            {cameraOpen&&(
+              <div style={{marginBottom:'8px'}}>
+                <div id="camera-view-stocktake" style={{width:'100%',borderRadius:'10px',overflow:'hidden',background:'#000',minHeight:'220px'}}/>
+                {cameraStarting&&<div style={{textAlign:'center',padding:'10px',fontSize:'12px',color:'#64748b'}}>Starting camera…</div>}
+                {cameraError&&(
+                  <div style={{marginTop:'8px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#991b1b'}}>
+                    ⚠️ {cameraError}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Session log — what's been checked so far this sitting */}
+          {sessionLog.length>0&&(
+            <div className="card" style={{padding:'16px'}}>
+              <div className="section-title" style={{marginBottom:'10px'}}>This Session ({sessionLog.length} checked)</div>
+              <div style={{display:'flex',flexDirection:'column',gap:'6px',maxHeight:'260px',overflowY:'auto'}}>
+                {sessionLog.map((s,i)=>(
+                  <div key={i} style={{
+                    display:'flex',justifyContent:'space-between',alignItems:'center',
+                    padding:'8px 10px',borderRadius:'8px',fontSize:'12px',
+                    background:s.changed?'#fefce8':'#f0fdf4',
+                  }}>
+                    <div>
+                      <span style={{fontFamily:'monospace',color:'#2563eb',marginRight:'6px'}}>{s.part_code}</span>
+                      <span style={{fontWeight:600}}>{s.name}</span>
+                    </div>
+                    <span style={{fontWeight:700,color:s.changed?'#b45309':'#16a34a'}}>
+                      {s.changed?`${s.qty_before}→${s.qty_after}`:'✓ Matched'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Right: scanned part details + edit form */}
+        <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
+          {scanning&&<div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'50px'}}><Spinner/></div>}
+
+          {scanPart&&editForm&&!scanning&&(
+            <div className="card" style={{border:'2px solid #e2e8f0'}}>
+              <div style={{display:'flex',gap:'12px',marginBottom:'14px'}}>
+                {scanPart.photo_url&&(
+                  <img src={scanPart.photo_url} alt={scanPart.name} style={{width:'56px',height:'56px',objectFit:'cover',borderRadius:'8px',border:'1px solid #e2e8f0',flexShrink:0}}/>
+                )}
+                <div style={{flex:1}}>
+                  <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{scanPart.part_code}</div>
+                  <div style={{fontWeight:800,fontSize:'15px',color:'#1e293b'}}>{scanPart.name}</div>
+                </div>
+              </div>
+
+              {/* Quantity comparison — the core of stock take */}
+              <div style={{background:qtyChanged?'#fefce8':'#f0fdf4',border:'1px solid '+(qtyChanged?'#fde68a':'#bbf7d0'),borderRadius:'10px',padding:'14px',marginBottom:'14px'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr auto 1fr',gap:'10px',alignItems:'center'}}>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginBottom:'2px'}}>System Qty</div>
+                    <div style={{fontSize:'24px',fontWeight:800,color:'#64748b'}}>{scanPart.quantity_on_hand}</div>
+                  </div>
+                  <div style={{fontSize:'18px',color:'#94a3b8'}}>→</div>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'11px',color:'#94a3b8',marginBottom:'2px'}}>Actual Count *</div>
+                    <input type="number" min="0" value={editForm.quantity_on_hand}
+                      onChange={e=>setEditForm({...editForm,quantity_on_hand:e.target.value})}
+                      style={{width:'100%',fontSize:'22px',fontWeight:800,textAlign:'center',color:qtyChanged?'#b45309':'#16a34a',border:'2px solid '+(qtyChanged?'#f59e0b':'#86efac'),borderRadius:'8px',padding:'4px'}}
+                    />
+                  </div>
+                </div>
+                {qtyChanged&&<div style={{textAlign:'center',fontSize:'12px',color:'#b45309',fontWeight:600,marginTop:'8px'}}>⚠️ Mismatch detected — will be recorded as an adjustment</div>}
+              </div>
+
+              {/* Detail corrections */}
+              <div className="section-title" style={{marginBottom:'8px',fontSize:'12px'}}>Correct Details (if wrong)</div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                <div><label className="lbl">Name</label><input className="inp" value={editForm.name} onChange={e=>setEditForm({...editForm,name:e.target.value})}/></div>
+                <div><label className="lbl">Category</label><input className="inp" value={editForm.category} onChange={e=>setEditForm({...editForm,category:e.target.value})}/></div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'8px'}}>
+                <div><label className="lbl">Rack No</label><input className="inp" value={editForm.location} onChange={e=>setEditForm({...editForm,location:e.target.value})}/></div>
+                <div><label className="lbl">Use at</label><input className="inp" value={editForm.used_on_asset} onChange={e=>setEditForm({...editForm,used_on_asset:e.target.value})}/></div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px',marginBottom:'14px'}}>
+                <div><label className="lbl">Unit Price (RM)</label><input type="number" step="0.01" className="inp" value={editForm.unit_cost} onChange={e=>setEditForm({...editForm,unit_cost:e.target.value})}/></div>
+                <div><label className="lbl">Threshold</label><input type="number" className="inp" value={editForm.reorder_level} onChange={e=>setEditForm({...editForm,reorder_level:e.target.value})}/></div>
+              </div>
+
+              <div style={{display:'flex',gap:'8px'}}>
+                <button className="btn btn-primary" style={{flex:1}} onClick={saveCount} disabled={saving}>
+                  {saving?'Saving…':'💾 Save Count'}
+                </button>
+                <button className="btn btn-secondary" style={{flex:1}} onClick={resetScan}>Next Item →</button>
+              </div>
+            </div>
+          )}
+
+          {lastResult&&(
+            <div style={{background:lastResult.changed?'#fefce8':'#f0fdf4',border:'2px solid '+(lastResult.changed?'#fde68a':'#bbf7d0'),borderRadius:'12px',padding:'14px',fontSize:'13px'}}>
+              <div style={{fontWeight:700,color:lastResult.changed?'#b45309':'#16a34a',marginBottom:'4px'}}>
+                {lastResult.changed?'✏️ Recorded as adjustment':'✓ No changes needed'}
+              </div>
+              <div style={{color:'#64748b'}}>{lastResult.message}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Stock Movement History (kept separate) ─────────────────────────────────
 function StockHistoryTab(){
   const [history,setHistory]=useState([]);
@@ -2968,7 +3363,7 @@ function UsersManagement(){
       <div><label className="lbl">Name *</label><input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></div>
       <div><label className="lbl">Email *</label><input className="inp" type="email" value={form.email} disabled={!!editing} onChange={e=>setForm({...form,email:e.target.value})}/></div>
       {!editing&&<div><label className="lbl">Password *</label><input className="inp" type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></div>}
-      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','production','viewer','admin'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
+      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','admin'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
       <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}><button className="btn btn-primary" style={{flex:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save User'}</button><button className="btn btn-secondary" style={{flex:1}} onClick={close}>Cancel</button></div>
     </div></Modal>}
   </div>;

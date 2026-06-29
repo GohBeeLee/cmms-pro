@@ -25,6 +25,11 @@ from websocket_manager import ws_manager
 router = APIRouter(prefix="/stock", tags=["stock"])
 
 
+def _require_admin_or_manager(user: User):
+    if user.role.value not in ("admin", "manager"):
+        raise HTTPException(403, "Only admins and managers can perform a stock take")
+
+
 # ── Stock movement log stored in a simple JSON table ─────────────────────
 # We store in a dedicated table via raw SQL so we don't need a migration.
 # On first call, the table is created if it doesn't exist.
@@ -107,6 +112,9 @@ def _part_summary(p: SparePart) -> dict:
         "location":         p.location,
         "barcode":          getattr(p, "barcode",       None),
         "used_on_asset":    getattr(p, "used_on_asset", None),
+        "photo_url":        getattr(p, "photo_url",     None),
+        "last_stock_take_at": p.last_stock_take_at.isoformat() if getattr(p, "last_stock_take_at", None) else None,
+        "last_stock_take_by": getattr(p, "last_stock_take_by", None),
         "unit":             p.unit or "pcs",
         "status":           "Topup" if qty <= reord else "Enough",
         "is_low_stock":     qty <= reord,
@@ -126,6 +134,20 @@ class StockMoveOut(BaseModel):
     quantity:  int   = 1
     reason:    Optional[str] = None
     reference: Optional[str] = None   # e.g. WO number
+
+class StockTakeAdjust(BaseModel):
+    part_id:          str
+    new_quantity:     int
+    reason:           Optional[str] = None   # e.g. "Physical count mismatch"
+    # Optional detail corrections found during the physical count —
+    # any field left as None is left unchanged.
+    name:             Optional[str]   = None
+    category:         Optional[str]   = None
+    description:      Optional[str]   = None
+    location:          Optional[str]   = None
+    used_on_asset:    Optional[str]   = None
+    unit_cost:        Optional[float] = None
+    reorder_level:    Optional[int]   = None
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -301,6 +323,100 @@ async def stock_out(
         "qty_before": qty_before,
         "qty_after":  qty_after,
         "low_stock":  qty_after <= (part.reorder_level or 0),
+    }
+
+
+# ── Stock Take (physical count adjustment) ──────────────────────────────────
+
+@router.post("/adjust")
+async def stock_take_adjust(
+    body: StockTakeAdjust,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Admin/manager only. Used during a physical stock take: scan a part,
+    compare its system quantity (and details) against what's actually on
+    the shelf, then correct anything that doesn't match. Always logged as
+    an "adjustment" movement so there's a full audit trail of every
+    correction — who made it, when, what changed, and why.
+    """
+    _require_admin_or_manager(current_user)
+    await _ensure_table(db)
+
+    part = (await db.execute(
+        select(SparePart).where(SparePart.id == UUID(body.part_id))
+    )).scalar_one_or_none()
+    if not part:
+        raise HTTPException(404, "Part not found")
+
+    qty_before = part.quantity_on_hand or 0
+    qty_after  = body.new_quantity
+    if qty_after < 0:
+        raise HTTPException(400, "Quantity cannot be negative")
+
+    field_changes = []
+
+    if qty_after != qty_before:
+        part.quantity_on_hand = qty_after
+        field_changes.append(f"Qty {qty_before} -> {qty_after}")
+
+    # Optional detail corrections — only touch fields actually supplied
+    detail_fields = {
+        "name": body.name, "category": body.category,
+        "description": body.description, "location": body.location,
+        "used_on_asset": body.used_on_asset, "unit_cost": body.unit_cost,
+        "reorder_level": body.reorder_level,
+    }
+    for field, new_value in detail_fields.items():
+        if new_value is not None:
+            old_value = getattr(part, field, None)
+            if str(old_value) != str(new_value):
+                setattr(part, field, new_value)
+                field_changes.append(f"{field}: '{old_value}' -> '{new_value}'")
+
+    if not field_changes:
+        part.last_stock_take_at = datetime.utcnow()
+        part.last_stock_take_by = current_user.name
+        await db.flush()
+        return {
+            "success": True,
+            "message": "No changes detected — part already matches the count.",
+            "part": _part_summary(part),
+            "qty_before": qty_before,
+            "qty_after": qty_after,
+            "changed": False,
+        }
+
+    part.updated_at = datetime.utcnow()
+    part.last_stock_take_at = datetime.utcnow()
+    part.last_stock_take_by = current_user.name
+
+    change_summary = "; ".join(field_changes)
+    full_reason = f"[STOCK TAKE] {body.reason or 'Physical count adjustment'} — {change_summary}"
+
+    await _log_movement(
+        db, part, "adjustment", abs(qty_after - qty_before),
+        qty_before, qty_after, current_user,
+        reason=full_reason, reference="Stock Take",
+    )
+    await db.flush()
+
+    await ws_manager.broadcast_event("inventory", "inventory.adjustment", {
+        "part_id":   str(part.id),
+        "part_name": part.name,
+        "qty_before": qty_before,
+        "qty_after":  qty_after,
+        "by":         current_user.name,
+    })
+
+    return {
+        "success": True,
+        "message": f"Stock take saved: {change_summary}",
+        "part": _part_summary(part),
+        "qty_before": qty_before,
+        "qty_after": qty_after,
+        "changed": True,
     }
 
 

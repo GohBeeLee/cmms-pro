@@ -72,6 +72,10 @@ async def ensure_schema_updates():
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN used_on_asset VARCHAR(200)"))
         if "photo_url" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_url TEXT"))
+        if "last_stock_take_at" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN last_stock_take_at DATETIME"))
+        if "last_stock_take_by" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN last_stock_take_by VARCHAR(150)"))
         user_columns = (await conn.execute(text("PRAGMA table_info(users)"))).mappings().all()
         user_names = {col["name"] for col in user_columns}
         if "is_present" not in user_names:

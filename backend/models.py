@@ -173,6 +173,8 @@ class SparePart(Base):
     barcode: Mapped[str | None] = mapped_column(String(100), index=True)
     used_on_asset: Mapped[str | None] = mapped_column(String(200))
     photo_url: Mapped[str | None] = mapped_column(Text)  # base64 data URL, e.g. "data:image/jpeg;base64,..."
+    last_stock_take_at: Mapped[datetime | None] = mapped_column(DateTime)  # set only when verified via the Stock Take tab
+    last_stock_take_by: Mapped[str | None] = mapped_column(String(150))    # name of who performed that check
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

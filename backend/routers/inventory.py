@@ -10,7 +10,7 @@ IMPORTANT: Static routes (/import/*, /export/*) declared BEFORE
 """
 import io
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -64,6 +64,8 @@ def _dict(p: SparePart, show_cost: bool = True) -> dict:
         "used_on_asset":    getattr(p, "used_on_asset",  None),
         "photo_url":        getattr(p, "photo_url",      None),
         "has_photo":        bool(getattr(p, "photo_url", None)),
+        "last_stock_take_at": p.last_stock_take_at.isoformat() if getattr(p, "last_stock_take_at", None) else None,
+        "last_stock_take_by": getattr(p, "last_stock_take_by", None),
         "unit":             p.unit or "pcs",
         "status":           "Topup" if qty <= reord else "Enough",
         "is_low_stock":     qty <= reord,
@@ -604,6 +606,58 @@ async def list_categories(
         .order_by(SparePart.category)
     )
     return [row[0] for row in result.all()]
+
+
+@router.get("/stock-take-status")
+async def stock_take_status(
+    stale_after_days: int = 30,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Reports which parts have never been physically verified via the Stock
+    Take tab, and which were checked but are now "stale" (older than
+    stale_after_days). Sorted so the most overdue / never-checked items
+    appear first — gives a direct answer to "what have I missed".
+    """
+    _require_admin_or_manager(current_user)
+    result = await db.execute(select(SparePart).order_by(SparePart.category, SparePart.name))
+    parts = result.scalars().all()
+
+    now = datetime.utcnow()
+    cutoff = now - timedelta(days=stale_after_days)
+
+    never_checked, stale, up_to_date = [], [], []
+    for p in parts:
+        last = getattr(p, "last_stock_take_at", None)
+        entry = {
+            "id": str(p.id), "part_code": p.part_code, "name": p.name,
+            "category": p.category, "location": p.location,
+            "last_stock_take_at": last.isoformat() if last else None,
+            "last_stock_take_by": getattr(p, "last_stock_take_by", None),
+            "days_since": (now - last).days if last else None,
+        }
+        if not last:
+            never_checked.append(entry)
+        elif last < cutoff:
+            stale.append(entry)
+        else:
+            up_to_date.append(entry)
+
+    # Most overdue first within each bucket
+    stale.sort(key=lambda x: x["days_since"], reverse=True)
+    up_to_date.sort(key=lambda x: x["days_since"], reverse=True)
+
+    return {
+        "stale_after_days": stale_after_days,
+        "total_parts": len(parts),
+        "never_checked_count": len(never_checked),
+        "stale_count": len(stale),
+        "up_to_date_count": len(up_to_date),
+        "never_checked": never_checked,
+        "stale": stale,
+        "up_to_date": up_to_date,
+    }
 
 
 @router.get("/")

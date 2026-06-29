@@ -402,4 +402,5 @@ async def parts_availability(
         "is_low_stock":     p.quantity_on_hand <= p.reorder_level,
         "unit_cost":        p.unit_cost,
         "location":         p.location,
+        "barcode":          getattr(p, "barcode", None),
     } for p in result.scalars().all()]

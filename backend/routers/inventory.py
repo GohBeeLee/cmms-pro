@@ -29,6 +29,17 @@ from websocket_manager import ws_manager
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 ROOM  = "inventory"
 
+# Default spare-part categories — always offered in dropdowns/filters even
+# before any part exists in them yet. Categories found in an Excel import
+# that don't match one of these are NOT discarded or forced into "Other" —
+# they're kept exactly as written and simply become additional categories.
+DEFAULT_CATEGORIES = [
+    "Bearing","Belt and Chain","Filter","Electrical Components",
+    "Electronic Components","Wear Parts","Fastener and Hardware",
+    "Lubricants and Grease","Pneumatic Components","Pneumatic Fitting",
+    "Sensor and Instrumentation",
+]
+
 
 # ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -289,7 +300,15 @@ async def import_excel(
             f"Found: {list(col_map.keys())}")
 
     existing = {p.part_code: p for p in (await db.execute(select(SparePart))).scalars().all()}
-    valid_cats = {"Electrical","Mechanical","Pneumatic","Hydraulic","Consumable","Other"}
+    # Default categories — admin/manager-managed, shown first in dropdowns.
+    # Any category found in the Excel file that ISN'T in this list is not
+    # discarded or forced into "Other" — it's kept exactly as written and
+    # simply becomes a new category going forward (see matching logic below).
+    # Default categories — admin/manager-managed, shown first in dropdowns.
+    # Any category found in the Excel file that ISN'T in this list is not
+    # discarded or forced into "Other" — it's kept exactly as written and
+    # simply becomes a new category going forward (see matching logic below).
+    valid_cats = set(DEFAULT_CATEGORIES)
 
     inserted, updated, skipped = 0, 0, []
     seen_codes_this_import: dict[str, int] = {}  # base_code -> count seen so far, to detect collisions
@@ -316,10 +335,16 @@ async def import_excel(
             skipped.append({"part_code":raw_no,"reason":"Missing Part Item name"}); continue
 
         cat_raw  = gcol(rv,"category") or "Other"
-        category = "Other"
+        category = cat_raw.strip()  # keep the imported category as-is by default
         for vc in valid_cats:
-            if vc.lower()==cat_raw.lower() or vc.lower() in cat_raw.lower():
+            # If it's a close/fuzzy match to one of the default categories,
+            # normalize it to that exact default spelling (so "bearings"
+            # and "Bearing" don't become two different categories).
+            if vc.lower()==category.lower() or vc.lower() in category.lower():
                 category=vc; break
+        # Anything that doesn't match a default category is kept exactly as
+        # typed in the spreadsheet — it simply becomes a new category that
+        # will show up everywhere (filters, dropdowns) going forward.
 
         # IMPORTANT: the "No" column commonly restarts at 1 for every category
         # section in real-world spreadsheets (Mechanical 1,2,3... Pneumatic
@@ -330,10 +355,19 @@ async def import_excel(
         # short. If the sheet's "No" values are already globally unique
         # (e.g. "E-001", "M-002"), this just adds a short category prefix
         # and remains unique.
-        cat_prefix = {
-            "Electrical":"ELE","Mechanical":"MEC","Pneumatic":"PNE",
-            "Hydraulic":"HYD","Consumable":"CON","Other":"OTH",
-        }.get(category,"OTH")
+        # Generate a short, readable prefix for ANY category, not just a
+        # fixed predefined set — so brand-new categories from an Excel
+        # import still get a sensible part_code prefix instead of always
+        # falling back to "OTH". Uses first 3 letters of the first word,
+        # plus the first letter of each subsequent word — e.g.
+        # "Bearing" -> "BEA", "Fastener and Hardware" -> "FASAH"
+        # (kept short but distinct, reducing collisions between similarly
+        # named categories like "Electrical/Electronic Components").
+        _words = [w for w in category.split() if w]
+        if _words:
+            cat_prefix = (_words[0][:3] + "".join(w[0] for w in _words[1:])).upper()
+        else:
+            cat_prefix = "OTH"
         base_code = f"{cat_prefix}-{raw_no}"
 
         # Spreadsheets commonly reuse the same "No" across multiple sub-groups
@@ -599,13 +633,22 @@ async def export_excel(
 async def list_categories(
     db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
 ):
+    """
+    Always includes the default category list (so they're selectable even
+    before any part uses them yet), plus any additional categories that
+    already exist in the data — e.g. ones introduced by an Excel import
+    that didn't match a default category. Default categories are listed
+    first, in their defined order; anything extra is appended after,
+    alphabetically.
+    """
     result = await db.execute(
         select(SparePart.category)
         .where(SparePart.category.isnot(None), SparePart.category != "")
         .distinct()
-        .order_by(SparePart.category)
     )
-    return [row[0] for row in result.all()]
+    existing = {row[0] for row in result.all()}
+    extra = sorted(existing - set(DEFAULT_CATEGORIES))
+    return DEFAULT_CATEGORIES + extra
 
 
 @router.get("/stock-take-status")

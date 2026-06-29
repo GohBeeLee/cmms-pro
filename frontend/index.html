@@ -88,14 +88,22 @@ window.API_BASE = '';
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useRef, useMemo } = React;
 
-const ROOT_CAUSES = [
-  "Mechanical: Bearing","Mechanical: Chain","Mechanical: Belt", "Mechanical: Fastener","Mechanical: Wear Parts",
-  "Mechanical: Universal Joint", "Mechanical: Pneumatic","Mechanical: Alignment","Mechanical: Cutter Adjustment",
-  "Electrical: Motor","Electrical: Sensor","Electrical: PLC","Electrical: Power Trip",
-  "Electrical: Controller","Electrical: Control Panel","Electrical: Wiring", "Electrical: Inteference Signal", 
-  "Others: CV Files", "Others: Setting", "Others: Hardware", "Others: Glue Pot", "Others: Software Bug", 
-  "Others: Operation Mistake", "Others: Material"
-];
+const ROOT_CAUSE_GROUPS = {
+  "Mechanical": [
+    "Bearing","Chain","Belt","Fastener","Wear Parts",
+    "Universal Joint","Pneumatic","Alignment","Cutter Adjustment",
+  ],
+  "Electrical": [
+    "Motor","Sensor","PLC","Power Trip","Controller",
+    "Control Panel","Wiring","Interference Signal",
+  ],
+  "Others": [
+    "CV Files","Setting","Hardware","Glue Pot","Software Bug",
+    "Operator Mistake","Material",
+  ],
+};
+// Flat list kept for any code that still expects a plain array (e.g. validation)
+const ROOT_CAUSES = Object.values(ROOT_CAUSE_GROUPS).flat();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function toast(msg, type) {
@@ -836,6 +844,13 @@ function TechnicianBoard(){
   const [submitting,setSubmitting]=useState(false);
   const [autoDowntime,setAutoDowntime]=useState({hours:0,display:'—'});
   const timerRef=useRef(null);
+  // Parts Used — search & barcode scan
+  const [partsSearch,setPartsSearch]=useState('');
+  const [partsScanOpen,setPartsScanOpen]=useState(false);
+  const [partsScanError,setPartsScanError]=useState('');
+  const [partsScanStarting,setPartsScanStarting]=useState(false);
+  const partsHtml5QrRef=useRef(null);
+  const partsCameraStartedRef=useRef(false);
 
   async function load(){
     try{
@@ -861,7 +876,7 @@ function TechnicianBoard(){
 
   function openComplete(wo){
     setCompleting(wo);
-    setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);
+    setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);setPartsSearch('');
     loadParts(wo.id);
   }
 
@@ -871,6 +886,79 @@ function TechnicianBoard(){
     else setUsedParts([...usedParts,{spare_part_id:part.id,quantity_used:1,name:part.name,available:part.quantity_on_hand}]);
   }
   function updateQty(id,qty){setUsedParts(usedParts.map(p=>p.spare_part_id===id?{...p,quantity_used:parseInt(qty)||1}:p));}
+
+  // ── Parts Used: barcode scan to find + auto-tick a part ──
+  async function startPartsCamera(){
+    if(typeof Html5Qrcode==='undefined'){
+      setPartsScanError('Camera scanner library failed to load. Check your internet connection.');
+      return;
+    }
+    setPartsScanOpen(true);setPartsScanError('');setPartsScanStarting(true);
+    setTimeout(async()=>{
+      try{
+        if(!partsHtml5QrRef.current) partsHtml5QrRef.current=new Html5Qrcode('camera-view-partsused',{
+          useBarCodeDetectorIfSupported:true,
+          verbose:false,
+        });
+        const config={
+          fps:8,
+          qrbox:(vw,vh)=>{
+            const w=Math.floor(Math.min(vw,vh)*0.85);
+            return {width:w,height:Math.floor(w*0.4)};
+          },
+          aspectRatio:1.7777778,
+          disableFlip:false,
+        };
+        await partsHtml5QrRef.current.start(
+          {facingMode:'environment'},
+          config,
+          (decodedText)=>{ onPartsCodeDetected(decodedText); },
+          ()=>{},
+        );
+        partsCameraStartedRef.current=true;
+      }catch(err){
+        setPartsScanError(
+          err && err.toString && err.toString().includes('NotAllowedError')
+            ? 'Camera permission denied. Please allow camera access and try again.'
+            : 'Could not start camera: '+(err?.message||err)
+        );
+        partsCameraStartedRef.current=false;
+      }finally{
+        setPartsScanStarting(false);
+      }
+    },50);
+  }
+  async function stopPartsCamera(){
+    try{
+      if(partsHtml5QrRef.current&&partsCameraStartedRef.current){
+        await partsHtml5QrRef.current.stop();
+        partsHtml5QrRef.current.clear();
+      }
+    }catch(e){}
+    partsCameraStartedRef.current=false;
+    setPartsScanOpen(false);setPartsScanError('');
+  }
+  function onPartsCodeDetected(decodedText){
+    if(!decodedText) return;
+    stopPartsCamera();
+    const code=decodedText.trim().toLowerCase();
+    const match=parts.find(p=>(p.barcode||'').toLowerCase()===code||(p.part_code||'').toLowerCase()===code);
+    if(!match){
+      toast('No part found for "'+decodedText+'"','err');
+      setPartsSearch(decodedText);
+      return;
+    }
+    if(!usedParts.find(x=>x.spare_part_id===match.id)) togglePart(match);
+    setPartsSearch('');
+    toast('✅ Added: '+match.name);
+  }
+  useEffect(()=>{
+    return ()=>{
+      if(partsHtml5QrRef.current&&partsCameraStartedRef.current){
+        partsHtml5QrRef.current.stop().then(()=>partsHtml5QrRef.current.clear()).catch(()=>{});
+      }
+    };
+  },[]);
 
   async function submitCompletion(){
     if(!rootCause){toast('Please select a root cause','err');return;}
@@ -1036,7 +1124,11 @@ function TechnicianBoard(){
                 <label className="lbl">Root Cause <span style={{color:'#ef4444'}}>*</span></label>
                 <select className="inp" value={rootCause} onChange={e=>setRootCause(e.target.value)}>
                   <option value="">Select root cause…</option>
-                  {ROOT_CAUSES.map(rc=><option key={rc} value={rc}>{rc}</option>)}
+                  {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
+                    <optgroup key={group} label={group}>
+                      {items.map(rc=><option key={rc} value={rc}>{rc}</option>)}
+                    </optgroup>
+                  ))}
                 </select>
               </div>
 
@@ -1059,25 +1151,76 @@ function TechnicianBoard(){
             {/* Right column — parts */}
             <div>
               <div className="section-title">Parts Used</div>
-              <div style={{fontSize:'12px',color:'#64748b',marginBottom:'10px'}}>Tick each part used. Stock will be auto-deducted.</div>
-              <div style={{maxHeight:'360px',overflowY:'auto',border:'1px solid #f1f5f9',borderRadius:'8px',padding:'8px'}}>
-                {parts.length===0?<Empty msg="No parts in inventory"/>:parts.map(p=>{
-                  const used=usedParts.find(x=>x.spare_part_id===p.id);
-                  return (
-                    <div key={p.id} style={{display:'flex',alignItems:'center',gap:'8px',padding:'6px 0',borderBottom:'1px solid #f8fafc'}}>
-                      <input type="checkbox" checked={!!used} onChange={()=>togglePart(p)} style={{width:'16px',height:'16px',cursor:'pointer'}}/>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:'13px',fontWeight:600,color:'#1e293b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</div>
-                        <div style={{fontSize:'11px',color:p.quantity_on_hand===0?'#dc2626':p.is_low_stock?'#ea580c':'#64748b'}}>
-                          Stock: {p.quantity_on_hand} {p.unit}
-                        </div>
-                      </div>
-                      {used&&<input type="number" min={1} max={p.quantity_on_hand} value={used.quantity_used}
-                        onChange={e=>updateQty(p.id,e.target.value)}
-                        style={{width:'56px',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'4px 6px',fontSize:'13px',textAlign:'center'}}/>}
+              <div style={{fontSize:'12px',color:'#64748b',marginBottom:'10px'}}>Search, scan, or tick each part used. Stock will be auto-deducted.</div>
+
+              <div style={{display:'flex',gap:'8px',marginBottom:'8px'}}>
+                <input
+                  className="inp"
+                  placeholder="Search part name / code, or type barcode…"
+                  value={partsSearch}
+                  onChange={e=>setPartsSearch(e.target.value)}
+                  style={{fontSize:'13px'}}
+                />
+                <button
+                  onClick={partsScanOpen?stopPartsCamera:startPartsCamera}
+                  style={{
+                    whiteSpace:'nowrap',padding:'0 14px',fontSize:'13px',fontWeight:700,borderRadius:'8px',cursor:'pointer',
+                    border:partsScanOpen?'2px solid #dc2626':'2px solid #2563eb',
+                    background:partsScanOpen?'#fef2f2':'#eff6ff',
+                    color:partsScanOpen?'#dc2626':'#2563eb',
+                  }}
+                >
+                  {partsScanOpen?'✕ Stop':'📷 Scan'}
+                </button>
+              </div>
+
+              {partsScanOpen&&(
+                <div style={{marginBottom:'10px'}}>
+                  <div id="camera-view-partsused" style={{width:'100%',borderRadius:'10px',overflow:'hidden',background:'#000',minHeight:'200px'}}/>
+                  {partsScanStarting&&<div style={{textAlign:'center',padding:'10px',fontSize:'12px',color:'#64748b'}}>Starting camera…</div>}
+                  {partsScanError&&(
+                    <div style={{marginTop:'8px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#991b1b'}}>
+                      ⚠️ {partsScanError}
                     </div>
-                  );
-                })}
+                  )}
+                  {!partsScanError&&!partsScanStarting&&(
+                    <div style={{marginTop:'6px',fontSize:'11px',color:'#64748b',textAlign:'center'}}>Point at the part's barcode — it'll be added automatically.</div>
+                  )}
+                </div>
+              )}
+
+              <div style={{maxHeight:'360px',overflowY:'auto',border:'1px solid #f1f5f9',borderRadius:'8px',padding:'8px'}}>
+                {parts.length===0?<Empty msg="No parts in inventory"/>:(()=>{
+                  const q=partsSearch.trim().toLowerCase();
+                  const visible=parts.filter(p=>{
+                    const isSelected=usedParts.some(x=>x.spare_part_id===p.id);
+                    if(!q) return true;
+                    // Always keep already-selected parts visible even while searching,
+                    // so the technician doesn't lose track of what's been added.
+                    if(isSelected) return true;
+                    return p.name.toLowerCase().includes(q)
+                      ||(p.part_code||'').toLowerCase().includes(q)
+                      ||(p.barcode||'').toLowerCase().includes(q);
+                  });
+                  if(visible.length===0) return <Empty msg={'No parts match "'+partsSearch+'"'}/>;
+                  return visible.map(p=>{
+                    const used=usedParts.find(x=>x.spare_part_id===p.id);
+                    return (
+                      <div key={p.id} style={{display:'flex',alignItems:'center',gap:'8px',padding:'6px 0',borderBottom:'1px solid #f8fafc',background:used?'#f0fdf4':'transparent'}}>
+                        <input type="checkbox" checked={!!used} onChange={()=>togglePart(p)} style={{width:'16px',height:'16px',cursor:'pointer'}}/>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:'13px',fontWeight:600,color:'#1e293b',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{p.name}</div>
+                          <div style={{fontSize:'11px',color:p.quantity_on_hand===0?'#dc2626':p.is_low_stock?'#ea580c':'#64748b'}}>
+                            {p.part_code} · Stock: {p.quantity_on_hand} {p.unit}
+                          </div>
+                        </div>
+                        {used&&<input type="number" min={1} max={p.quantity_on_hand} value={used.quantity_used}
+                          onChange={e=>updateQty(p.id,e.target.value)}
+                          style={{width:'56px',border:'1px solid #e2e8f0',borderRadius:'6px',padding:'4px 6px',fontSize:'13px',textAlign:'center'}}/>}
+                      </div>
+                    );
+                  });
+                })()}
               </div>
               {usedParts.length>0&&<div style={{marginTop:'8px',padding:'8px 12px',background:'#f0fdf4',borderRadius:'8px',fontSize:'12px',color:'#166534'}}>
                 ✅ {usedParts.length} part{usedParts.length>1?'s':''} selected
@@ -3363,7 +3506,7 @@ function UsersManagement(){
       <div><label className="lbl">Name *</label><input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></div>
       <div><label className="lbl">Email *</label><input className="inp" type="email" value={form.email} disabled={!!editing} onChange={e=>setForm({...form,email:e.target.value})}/></div>
       {!editing&&<div><label className="lbl">Password *</label><input className="inp" type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></div>}
-      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','admin'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
+      <div><label className="lbl">Role</label><select className="inp" value={form.role} onChange={e=>setForm({...form,role:e.target.value})}>{['technician','manager','production','viewer','admin'].map(r=><option key={r} value={r}>{r}</option>)}</select></div>
       <div style={{display:'flex',gap:'10px',paddingTop:'4px'}}><button className="btn btn-primary" style={{flex:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save User'}</button><button className="btn btn-secondary" style={{flex:1}} onClick={close}>Cancel</button></div>
     </div></Modal>}
   </div>;

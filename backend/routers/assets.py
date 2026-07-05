@@ -12,11 +12,11 @@ from sqlalchemy.orm import selectinload
 from db import get_db
 from models import Asset, WorkOrder, AssetStatus
 from schemas import AssetCreate, AssetUpdate, AssetOut
-from auth import get_current_user
+from auth import get_current_user, forbid_viewer
 from models import User
 from websocket_manager import ws_manager
 
-router = APIRouter(prefix="/assets", tags=["assets"])
+router = APIRouter(prefix="/assets", tags=["assets"], dependencies=[Depends(forbid_viewer)])
 ROOM = "assets"
 
 

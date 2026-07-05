@@ -116,6 +116,14 @@ class WorkOrder(Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    # Soft delete — admin can delete a work order from History Log and
+    # restore it later. Nothing is ever hard-deleted from the DB this way,
+    # and we keep a light audit trail of who deleted/restored it and when.
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    deleted_by: Mapped[str | None] = mapped_column(String(150))
+    restored_at: Mapped[datetime | None] = mapped_column(DateTime)
+    restored_by: Mapped[str | None] = mapped_column(String(150))
 
     asset: Mapped["Asset"] = relationship(back_populates="work_orders")
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="work_order")

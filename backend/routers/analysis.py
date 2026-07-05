@@ -1,4 +1,5 @@
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
@@ -6,11 +7,92 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
 from db import get_db
-from models import WorkOrder, Asset
-from auth import get_current_user
+from models import WorkOrder, Asset, WorkOrderStatus
+from auth import get_current_user, forbid_viewer
 from models import User
 
-router = APIRouter(prefix="/analysis", tags=["analysis"])
+router = APIRouter(prefix="/analysis", tags=["analysis"], dependencies=[Depends(forbid_viewer)])
+
+
+# ── Production shift schedule (Malaysia local time, UTC+8, no DST) ──────────
+# Shift 1: 08:30–18:30   Shift 2: 19:30–06:30 (next day)
+# Rest break (inside Shift 1): 12:30–13:30 daily, except Friday 13:00–14:00.
+# Mirrors calcDowntime()/workingMsBetween() in frontend/index.html so the
+# live Alert Board counters and these reports always agree. Only elapsed
+# time actually inside a running shift counts as downtime — the two
+# shift-change gaps (06:30-08:30, 18:30-19:30) and the daily rest break
+# are excluded.
+MY_TZ_OFFSET = timedelta(hours=8)
+
+
+def _shift_windows_for_day(day: datetime):
+    """`day` is a naive datetime at 00:00 representing a Malaysia-local
+    calendar date. Returns the 3 working windows for that date as naive-UTC
+    (start, end) datetime pairs."""
+    is_friday = day.weekday() == 4  # Monday=0 ... Friday=4
+    rest_start = day.replace(hour=13, minute=0) if is_friday else day.replace(hour=12, minute=30)
+    rest_end   = day.replace(hour=14, minute=0) if is_friday else day.replace(hour=13, minute=30)
+    shift1_start = day.replace(hour=8, minute=30)
+    shift1_end   = day.replace(hour=18, minute=30)
+    shift2_start = day.replace(hour=19, minute=30)
+    shift2_end   = (day + timedelta(days=1)).replace(hour=6, minute=30)
+    windows_local = [
+        (shift1_start, rest_start),
+        (rest_end, shift1_end),
+        (shift2_start, shift2_end),
+    ]
+    return [(s - MY_TZ_OFFSET, e - MY_TZ_OFFSET) for s, e in windows_local]
+
+
+def working_hours_between(start: Optional[datetime], end: Optional[datetime]) -> float:
+    """
+    Hours of `start`..`end` (naive UTC datetimes, as stored by the DB) that
+    fall inside a production shift, excluding shift-change gaps and the
+    daily rest break. Used as the fallback whenever a work order doesn't
+    have a manually-entered actual_hours value.
+    """
+    if not start or not end or end <= start:
+        return 0.0
+    start_local = start + MY_TZ_OFFSET
+    end_local = end + MY_TZ_OFFSET
+    day = datetime(start_local.year, start_local.month, start_local.day) - timedelta(days=1)
+    last_day = datetime(end_local.year, end_local.month, end_local.day)
+    total = timedelta()
+    while day <= last_day:
+        for seg_start, seg_end in _shift_windows_for_day(day):
+            clip_start = max(seg_start, start)
+            clip_end = min(seg_end, end)
+            if clip_end > clip_start:
+                total += (clip_end - clip_start)
+        day += timedelta(days=1)
+    return round(total.total_seconds() / 3600, 2)
+
+
+def _parse_field(desc: Optional[str], field: str) -> Optional[str]:
+    """Mirrors the frontend's parseField(): finds a line like 'Field  : value'
+    inside the free-text description and returns the value, or None."""
+    if not desc:
+        return None
+    for line in desc.split("\n"):
+        if line.strip().startswith(field):
+            parts = line.split(":", 1)
+            if len(parts) > 1 and parts[1].strip():
+                return parts[1].strip()
+    return None
+
+
+# Mirrors ROOT_CAUSE_GROUPS in frontend/index.html — used to roll individual
+# root causes (e.g. "Bearing", "Motor") up into their broader group
+# (Mechanical / Electrical / Others) for the History Log's root-cause report.
+_ROOT_CAUSE_GROUPS = {
+    "Mechanical": ["Bearing", "Chain", "Belt", "Fastener", "Wear Parts",
+                   "Universal Joint", "Pneumatic", "Alignment", "Cutter Adjustment"],
+    "Electrical": ["Motor", "Sensor", "PLC", "Power Trip", "Controller",
+                   "Control Panel", "Wiring", "Interference Signal"],
+    "Others": ["CV Files", "Setting", "Hardware", "Glue Pot", "Software Bug",
+               "Operator Mistake", "Material"],
+}
+_ROOT_CAUSE_GROUP_LOOKUP = {rc: group for group, items in _ROOT_CAUSE_GROUPS.items() for rc in items}
 
 
 @router.get("/work-orders")
@@ -84,13 +166,21 @@ async def analyse_work_orders(
         if r.actual_hours:
             downtime = r.actual_hours
         elif r.completed_at and r.created_at:
-            diff = (r.completed_at - r.created_at).total_seconds() / 3600
-            downtime = round(diff, 2)
+            downtime = working_hours_between(r.created_at, r.completed_at)
+
+        # The technician selects a Root Cause (e.g. "Bearing", "Motor") from
+        # a fixed list when completing the work order — it's embedded in the
+        # description as a "Root cause  : X" line. Open/in-progress work
+        # orders haven't reached that step yet, so they won't have one.
+        root_cause = _parse_field(r.description, "Root cause")
+        if not root_cause:
+            root_cause = "Pending diagnosis" if r.status.value != "completed" else "Not recorded"
 
         work_orders.append({
             "id":             str(r.id),
             "title":          r.title,
-            "root_cause":     r.description or "Not specified",
+            "root_cause":     root_cause,
+            "root_cause_group": _ROOT_CAUSE_GROUP_LOOKUP.get(root_cause, "Other"),
             "type":           r.type.value,
             "priority":       r.priority.value,
             "status":         r.status.value,
@@ -140,41 +230,48 @@ async def analyse_work_orders(
         m["affected_downtime"] = round(m["affected_downtime"], 2)
         m["non_affected_downtime"] = round(m["non_affected_downtime"], 2)
 
-    # ── Summary by root cause (description keywords) ──────────────────────
+    # ── Summary by root cause ───────────────────────────────────────────────
+    # Groups completed (and in-progress) work orders by the technician's
+    # selected Root Cause, reporting case count + downtime hours per cause —
+    # sorted by total downtime hours so the biggest-impact causes surface
+    # first. This is the whole point of the report: find what's actually
+    # costing the most machine downtime, not just what happens most often.
     root_cause_summary = {}
     for wo in work_orders:
-        rc = wo["root_cause"] if wo["root_cause"] and wo["root_cause"] != "Not specified" else "Unknown"
-        # Truncate long descriptions to use as key
-        rc_key = rc[:60] + "..." if len(rc) > 60 else rc
-        if rc_key not in root_cause_summary:
-            root_cause_summary[rc_key] = {
-                "root_cause":     rc_key,
+        rc = wo["root_cause"]
+        if rc not in root_cause_summary:
+            root_cause_summary[rc] = {
+                "root_cause":     rc,
+                "group":          wo["root_cause_group"],
                 "total_cases":    0,
                 "total_downtime": 0.0,
                 "affected_downtime": 0.0,
                 "non_affected_downtime": 0.0,
                 "machines":       set(),
             }
-        root_cause_summary[rc_key]["total_cases"] += 1
+        root_cause_summary[rc]["total_cases"] += 1
         if wo["downtime_hours"]:
-            root_cause_summary[rc_key]["total_downtime"] += wo["downtime_hours"]
+            root_cause_summary[rc]["total_downtime"] += wo["downtime_hours"]
             if wo["affected_downtime"]:
-                root_cause_summary[rc_key]["affected_downtime"] += wo["downtime_hours"]
+                root_cause_summary[rc]["affected_downtime"] += wo["downtime_hours"]
             else:
-                root_cause_summary[rc_key]["non_affected_downtime"] += wo["downtime_hours"]
-        root_cause_summary[rc_key]["machines"].add(wo["asset_name"])
+                root_cause_summary[rc]["non_affected_downtime"] += wo["downtime_hours"]
+        root_cause_summary[rc]["machines"].add(wo["asset_name"])
 
     rc_list = []
     for rc in root_cause_summary.values():
+        cases = rc["total_cases"]
         rc_list.append({
             "root_cause":      rc["root_cause"],
-            "total_cases":     rc["total_cases"],
+            "group":           rc["group"],
+            "total_cases":     cases,
             "total_downtime":  round(rc["total_downtime"], 2),
             "affected_downtime": round(rc["affected_downtime"], 2),
             "non_affected_downtime": round(rc["non_affected_downtime"], 2),
+            "avg_downtime":    round(rc["total_downtime"] / cases, 2) if cases else 0.0,
             "machines_affected": len(rc["machines"]),
         })
-    rc_list.sort(key=lambda x: x["total_cases"], reverse=True)
+    rc_list.sort(key=lambda x: x["total_downtime"], reverse=True)
 
     # ── Overall summary ───────────────────────────────────────────────────
     total_downtime = sum(wo["downtime_hours"] or 0 for wo in work_orders)
@@ -297,7 +394,7 @@ async def analyse_by_machine_timeline(
     for r in rows:
         downtime = r.actual_hours
         if downtime is None and r.completed_at and r.created_at:
-            downtime = round((r.completed_at - r.created_at).total_seconds() / 3600, 2)
+            downtime = working_hours_between(r.created_at, r.completed_at)
         if not downtime:
             continue
 
@@ -328,7 +425,7 @@ async def analyse_by_machine_timeline(
 async def get_uptime(
     year:  Optional[int] = Query(None, description="Year, defaults to current"),
     month: Optional[int] = Query(None, description="Month 1-12, defaults to current"),
-    hours_per_day: float = Query(19.0, description="Operating hours per day used in the uptime formula"),
+    hours_per_day: float = Query(20.0, description="Operating hours per day used in the uptime formula (2 shifts minus daily rest break = 20h/day per the production schedule)"),
     location: Optional[str] = Query(None, description="Filter by asset/production line location"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
@@ -374,7 +471,7 @@ async def get_uptime(
     for r in rows:
         h = r.actual_hours
         if h is None and r.completed_at and r.created_at:
-            h = (r.completed_at - r.created_at).total_seconds() / 3600
+            h = working_hours_between(r.created_at, r.completed_at)
         affected_downtime_hours += h or 0
 
     affected_downtime_hours = round(affected_downtime_hours, 2)

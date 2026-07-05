@@ -19,7 +19,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import engine, Base, get_db, settings
 from models import PMSchedule, User, UserRole
 from websocket_manager import ws_manager
-from auth import router as auth_router, hash_password
+from auth import router as auth_router, hash_password, forbid_viewer
 from routers.assets import router as assets_router
 from routers.work_orders import router as wo_router
 from routers.inventory import router as inventory_router
@@ -63,6 +63,16 @@ async def ensure_schema_updates():
         names = {col["name"] for col in columns}
         if "affected_downtime" not in names:
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN affected_downtime BOOLEAN NOT NULL DEFAULT 1"))
+        if "is_deleted" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0"))
+        if "deleted_at" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN deleted_at DATETIME"))
+        if "deleted_by" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN deleted_by VARCHAR(150)"))
+        if "restored_at" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN restored_at DATETIME"))
+        if "restored_by" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN restored_by VARCHAR(150)"))
         spare_columns = (await conn.execute(text("PRAGMA table_info(spare_parts)"))).mappings().all()
         spare_names = {col["name"] for col in spare_columns}
         if "barcode" not in spare_names:
@@ -182,7 +192,7 @@ async def websocket_endpoint(websocket: WebSocket, room: str, token: str = Query
 
 # ── Dashboard KPI ─────────────────────────────────────────────────────────
 @app.get("/dashboard/kpi", tags=["dashboard"])
-async def get_kpi(db: AsyncSession = Depends(get_db)):
+async def get_kpi(db: AsyncSession = Depends(get_db), current_user=Depends(forbid_viewer)):
     from models import Asset, WorkOrder, SparePart, User as UserModel, AssetStatus, WorkOrderStatus
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)

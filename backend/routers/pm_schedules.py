@@ -8,10 +8,10 @@ from sqlalchemy.orm import selectinload
 from db import get_db
 from models import PMSchedule, WorkOrder, WorkOrderType, Priority, User
 from schemas import PMScheduleCreate, PMScheduleUpdate, PMScheduleOut, WorkOrderOut
-from auth import get_current_user
+from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
 
-router = APIRouter(prefix="/pm-schedules", tags=["pm_schedules"])
+router = APIRouter(prefix="/pm-schedules", tags=["pm_schedules"], dependencies=[Depends(forbid_viewer)])
 ROOM = "work_orders"
 
 

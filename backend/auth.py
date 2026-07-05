@@ -76,6 +76,18 @@ def require_roles(*roles: UserRole):
     return _check
 
 
+async def forbid_viewer(current_user: User = Depends(get_current_user)) -> User:
+    """
+    Viewer accounts are read-only observers of the Alert Board only.
+    Use this in place of get_current_user on any route (or as a whole
+    router's `dependencies=[...]`) that viewers must not be able to reach —
+    i.e. everything except GET /work-orders and GET /users/technicians.
+    """
+    if current_user.role == UserRole.viewer:
+        raise HTTPException(status_code=403, detail="Viewer accounts have read-only access to the Alert Board only")
+    return current_user
+
+
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 @router.post("/login", response_model=TokenResponse)

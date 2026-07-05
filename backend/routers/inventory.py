@@ -22,11 +22,11 @@ from pydantic import BaseModel
 
 from db import get_db
 from models import SparePart
-from auth import get_current_user
+from auth import get_current_user, forbid_viewer
 from models import User
 from websocket_manager import ws_manager
 
-router = APIRouter(prefix="/inventory", tags=["inventory"])
+router = APIRouter(prefix="/inventory", tags=["inventory"], dependencies=[Depends(forbid_viewer)])
 ROOM  = "inventory"
 
 # Default spare-part categories — always offered in dropdowns/filters even
@@ -311,8 +311,6 @@ async def import_excel(
     valid_cats = set(DEFAULT_CATEGORIES)
 
     inserted, updated, skipped = 0, 0, []
-    seen_codes_this_import: dict[str, int] = {}  # base_code -> count seen so far, to detect collisions
-    disambiguated = 0  # rows whose "No" collided with another row and got a -2/-3... suffix
 
     def gcol(rv, key, default=""):
         idx = col_map.get(key)
@@ -346,49 +344,14 @@ async def import_excel(
         # typed in the spreadsheet — it simply becomes a new category that
         # will show up everywhere (filters, dropdowns) going forward.
 
-        # IMPORTANT: the "No" column commonly restarts at 1 for every category
-        # section in real-world spreadsheets (Mechanical 1,2,3... Pneumatic
-        # 1,2,3... etc). Using "No" alone as the unique part_code causes
-        # later categories to silently overwrite earlier ones with the same
-        # number. Combine category + No into the stored part_code so each
-        # row stays distinct, while the prefix code abbreviation keeps it
-        # short. If the sheet's "No" values are already globally unique
-        # (e.g. "E-001", "M-002"), this just adds a short category prefix
-        # and remains unique.
-        # Generate a short, readable prefix for ANY category, not just a
-        # fixed predefined set — so brand-new categories from an Excel
-        # import still get a sensible part_code prefix instead of always
-        # falling back to "OTH". Uses first 3 letters of the first word,
-        # plus the first letter of each subsequent word — e.g.
-        # "Bearing" -> "BEA", "Fastener and Hardware" -> "FASAH"
-        # (kept short but distinct, reducing collisions between similarly
-        # named categories like "Electrical/Electronic Components").
-        _words = [w for w in category.split() if w]
-        if _words:
-            cat_prefix = (_words[0][:3] + "".join(w[0] for w in _words[1:])).upper()
-        else:
-            cat_prefix = "OTH"
-        base_code = f"{cat_prefix}-{raw_no}"
-
-        # Spreadsheets commonly reuse the same "No" across multiple sub-groups
-        # within one category (e.g. Mechanical bearings 1,2,3... then
-        # Mechanical belts 1,2,3... again). Detect collisions within THIS
-        # import and disambiguate with a -2, -3... suffix so every row still
-        # becomes its own distinct part instead of silently overwriting the
-        # previous row with the same code.
-        seen_count = seen_codes_this_import.get(base_code, 0)
-        if seen_count == 0 and base_code not in existing:
-            part_code = base_code
-        else:
-            # Either collided within this import, or already exists from a
-            # previous import — count up until we find a free suffix.
-            n = max(seen_count, 1)
-            part_code = f"{base_code}-{n+1}"
-            while part_code in existing:
-                n += 1
-                part_code = f"{base_code}-{n+1}"
-            disambiguated += 1
-        seen_codes_this_import[base_code] = seen_count + 1
+        # Use the "No" column exactly as written in the spreadsheet as the
+        # part_code — no auto-generated category prefix, no rewriting.
+        # The person managing the spreadsheet is responsible for keeping
+        # "No" values unique; if the same "No" appears twice in this file,
+        # the second occurrence updates the part created by the first
+        # occurrence (standard upsert behavior), matching how re-importing
+        # the same file to update quantities is expected to work.
+        part_code = raw_no
 
         qty           = int(gnum(rv,"quantity",0) or 0)
         uc_raw        = gnum(rv,"unit_cost")
@@ -706,7 +669,7 @@ async def stock_take_status(
 @router.get("/")
 async def list_parts(
     low_stock:bool=False, category:Optional[str]=None,
-    skip:int=0, limit:int=500,
+    skip:int=0, limit:int=5000,
     db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
     q = select(SparePart)

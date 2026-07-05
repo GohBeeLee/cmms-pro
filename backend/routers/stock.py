@@ -1,7 +1,7 @@
 """
 Stock Router — barcode scan, stock in/out, history log
 =======================================================
-GET  /stock/scan/{barcode}        — lookup part by barcode
+GET  /stock/scan?barcode=...      — lookup part by barcode or part_code
 POST /stock/in                    — stock in (add qty)
 POST /stock/out                   — stock out (remove qty)
 GET  /stock/history               — full stock movement log
@@ -12,17 +12,17 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, desc, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from db import get_db
 from models import SparePart, User
-from auth import get_current_user
+from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
 
-router = APIRouter(prefix="/stock", tags=["stock"])
+router = APIRouter(prefix="/stock", tags=["stock"], dependencies=[Depends(forbid_viewer)])
 
 
 def _require_admin_or_manager(user: User):
@@ -156,22 +156,28 @@ class StockTakeAdjust(BaseModel):
 
 # ── Lookup part by barcode ─────────────────────────────────────────────────
 
-@router.get("/scan/{barcode}")
+@router.get("/scan")
 async def scan_barcode(
-    barcode: str,
+    barcode: str = Query(..., description="Barcode or part_code to look up — accepts any characters including / and -"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
     """
     Look up a spare part by barcode OR part_code.
-    Called when technician scans a barcode — returns part details + current stock.
+    Uses a query parameter (?barcode=...) instead of a path segment so that
+    special characters like / - # are handled correctly without URL encoding
+    ambiguity (a / in a path parameter breaks FastAPI routing entirely).
+    Called when technician scans or types a barcode.
     """
     await _ensure_table(db)
+
+    # Normalize: trim whitespace, try exact match first
+    code = (barcode or "").strip()
 
     # Try barcode field first (new column)
     try:
         result = await db.execute(
-            select(SparePart).where(SparePart.barcode == barcode)
+            select(SparePart).where(SparePart.barcode == code)
         )
         part = result.scalar_one_or_none()
     except Exception:
@@ -180,7 +186,7 @@ async def scan_barcode(
     # Fallback: match part_code
     if not part:
         result = await db.execute(
-            select(SparePart).where(SparePart.part_code == barcode)
+            select(SparePart).where(SparePart.part_code == code)
         )
         part = result.scalar_one_or_none()
 

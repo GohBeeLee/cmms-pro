@@ -61,6 +61,10 @@
     <p>Report a machine problem to the maintenance team</p>
   </div>
 
+  <div id="prefill-banner" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;color:#1e40af;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:13px;font-weight:600;text-align:center;">
+    📍 Reporting for: <span id="prefill-asset-name"></span>
+  </div>
+
   <div id="form-section">
     <div class="error-msg" id="error-msg"></div>
 
@@ -86,6 +90,7 @@
           <option>Conveyor issue</option>
           <option>HVAC / Cooling issue</option>
           <option>Vibration / Alignment</option>
+          <option>Upkeep of Office and Factory</option>
           <option>Others</option>
         </select>
       </div>
@@ -150,7 +155,18 @@ var API = '';
 var urgency = 'medium';
 var photos = [];
 
+// A per-machine QR code links to /request/<asset_id> (path) — some older
+// codes or shared links may instead use /request?asset=<asset_id> (query
+// string). Support both so any QR that's already been printed keeps working.
+function getPrefilledAssetId() {
+  var pathParts = window.location.pathname.split('/').filter(Boolean); // e.g. ['request','<id>']
+  if (pathParts.length >= 2 && pathParts[0] === 'request') return pathParts[1];
+  var params = new URLSearchParams(window.location.search);
+  return params.get('asset') || null;
+}
+
 window.addEventListener('DOMContentLoaded', function() {
+  var prefillId = getPrefilledAssetId();
   fetch(API + '/requests/assets').then(function(r){ return r.json(); }).then(function(assets) {
     var sel = document.getElementById('asset-select');
     sel.innerHTML = '<option value="">Select machine...</option>';
@@ -160,6 +176,14 @@ window.addEventListener('DOMContentLoaded', function() {
       opt.textContent = a.name + ' (' + a.asset_code + ')' + (a.location ? ' - ' + a.location : '');
       sel.appendChild(opt);
     });
+    if (prefillId) {
+      var match = assets.filter(function(a){ return a.id === prefillId; })[0];
+      if (match) {
+        sel.value = match.id;
+        document.getElementById('prefill-asset-name').textContent = match.name + ' (' + match.asset_code + ')';
+        document.getElementById('prefill-banner').style.display = 'block';
+      }
+    }
   }).catch(function() {
     document.getElementById('asset-select').innerHTML = '<option value="">Failed to load - please refresh</option>';
   });
@@ -182,15 +206,51 @@ function onDragLeave(e) { document.getElementById('upload-zone').classList.remov
 function onDrop(e) { e.preventDefault(); document.getElementById('upload-zone').classList.remove('drag-over'); handleFiles(Array.from(e.dataTransfer.files)); }
 function onFileSelect(e) { handleFiles(Array.from(e.target.files)); e.target.value = ''; }
 
+// Compresses an image file down to (roughly) targetKB before it's turned
+// into a base64 data URL. The backend caps embedded photos at ~250KB and
+// silently drops anything bigger with no error shown, so a phone photo
+// (often 2-8MB) needs to shrink client-side first or it just vanishes.
+function compressImage(file, cb, maxDim, targetKB) {
+  maxDim = maxDim || 1280;
+  targetKB = targetKB || 180; // stay safely under the server's ~250KB cap
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var img = new Image();
+    img.onload = function() {
+      var w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) {
+        if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else { w = Math.round(w * maxDim / h); h = maxDim; }
+      }
+      var canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      var quality = 0.8;
+      function tryEncode() {
+        var dataUrl = canvas.toDataURL('image/jpeg', quality);
+        var sizeKB = (dataUrl.length * 0.75) / 1024;
+        if (sizeKB > targetKB && quality > 0.35) { quality -= 0.15; tryEncode(); }
+        else cb(dataUrl, sizeKB);
+      }
+      tryEncode();
+    };
+    img.onerror = function() { cb(e.target.result, null); }; // fallback: original if it won't decode
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
 function handleFiles(files) {
   var remaining = 3 - photos.length;
   if (remaining <= 0) { alert('Maximum 3 photos allowed.'); return; }
   files.slice(0, remaining).forEach(function(file) {
     if (!file.type.startsWith('image/')) { alert(file.name + ' is not an image.'); return; }
-    if (file.size > 5 * 1024 * 1024) { alert(file.name + ' is too large (max 5 MB).'); return; }
-    var reader = new FileReader();
-    reader.onload = function(e) { photos.push({ file: file, dataUrl: e.target.result }); renderPreviews(); };
-    reader.readAsDataURL(file);
+    if (file.size > 15 * 1024 * 1024) { alert(file.name + ' is too large (max 15 MB).'); return; }
+    compressImage(file, function(dataUrl, sizeKB) {
+      if (sizeKB && sizeKB > 250) { alert(file.name + ' is still too large after compression — please retake at a lower resolution.'); return; }
+      photos.push({ file: file, dataUrl: dataUrl });
+      renderPreviews();
+    });
   });
 }
 
@@ -261,7 +321,11 @@ async function submitRequest() {
 function resetForm() {
   document.getElementById('form-section').style.display   = 'block';
   document.getElementById('success-screen').style.display = 'none';
-  document.getElementById('asset-select').value     = '';
+  // Keep the pre-filled machine selected if this session started from a
+  // per-machine QR code — operators reporting a second issue on the same
+  // machine shouldn't have to re-scan or hunt the dropdown again.
+  var prefillId = getPrefilledAssetId();
+  document.getElementById('asset-select').value     = prefillId || '';
   document.getElementById('problem-category').value = '';
   document.getElementById('problem-desc').value     = '';
   document.getElementById('operator-name').value    = '';

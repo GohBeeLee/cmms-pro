@@ -76,6 +76,23 @@
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.75;}}
   .history-row-completed{background:#f0fdf4;}
   .history-row-open{background:#fefce8;}
+
+  /* ── Printable QR label sheet (per-asset "scan to report" stickers) ── */
+  .qr-print-sheet{display:none;}
+  @media print{
+    body *{visibility:hidden;}
+    .sidebar,.no-print{display:none!important;}
+    .qr-print-sheet,.qr-print-sheet *{visibility:visible;}
+    .qr-print-sheet{display:grid!important;position:absolute;top:0;left:0;width:100%;
+      grid-template-columns:1fr 1fr;gap:14px;padding:10px;}
+    .qr-label-card{border:2px dashed #94a3b8;border-radius:10px;padding:16px;text-align:center;
+      page-break-inside:avoid;break-inside:avoid;}
+    .qr-label-card img{width:200px;height:200px;}
+    .qr-label-card .qr-asset-name{font-size:17px;font-weight:800;color:#000;margin:8px 0 2px;}
+    .qr-label-card .qr-asset-meta{font-size:12px;color:#333;margin-bottom:8px;}
+    .qr-label-card .qr-caption{font-size:11px;color:#555;margin-top:8px;}
+    @page{margin:12mm;}
+  }
 </style>
 </head>
 <body>
@@ -325,18 +342,138 @@ function relativeTime(iso){
   const months=Math.floor(days/30);
   return months===1?'1 month ago':months+' months ago';
 }
+// Strips all whitespace before comparing so "PFICV-4/-" matches
+// "PFICV - 4 / -", "PF 6-3/8" matches "PF6-3/8", etc.
+function normalizeSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,''); }
 
 // Calculate downtime between two UTC timestamps
+// ── Production shift schedule (Malaysia local time, UTC+8, no DST) ──
+// Shift 1: 08:30–18:30   Shift 2: 19:30–06:30 (next day)
+// Rest break (inside Shift 1): 12:30–13:30 every day, except Friday 13:00–14:00.
+// Downtime must only accumulate while a shift is actually running, so the
+// two gaps between shifts (06:30–08:30 and 18:30–19:30) and the daily rest
+// break are all excluded from every downtime calculation below.
+const MY_TZ_OFFSET_MS = 8 * 3600 * 1000; // UTC+8, Malaysia has no daylight saving
+
+// Builds the true-UTC instant corresponding to a Malaysia-local wall-clock
+// date/time. JS's Date.UTC() correctly rolls day/month/year over if the
+// day argument overflows (e.g. day 32), which is exactly what we need for
+// the night shift's end time landing on "the next day".
+function myLocalInstant(y, m, d, hh, mm) {
+  return new Date(Date.UTC(y, m, d, hh, mm, 0, 0) - MY_TZ_OFFSET_MS);
+}
+
+// Returns the 3 working windows (as true-UTC [start,end] Date pairs) that
+// are anchored on the Malaysia-local calendar day (y,m,d).
+function shiftWindowsForDay(y, m, d) {
+  const dow = new Date(Date.UTC(y, m, d)).getUTCDay(); // 0=Sun..6=Sat
+  const isFriday = dow === 5;
+  const restStart = isFriday ? [13, 0] : [12, 30];
+  const restEnd   = isFriday ? [14, 0] : [13, 30];
+  return [
+    [myLocalInstant(y, m, d, 8, 30),               myLocalInstant(y, m, d, restStart[0], restStart[1])],
+    [myLocalInstant(y, m, d, restEnd[0], restEnd[1]), myLocalInstant(y, m, d, 18, 30)],
+    [myLocalInstant(y, m, d, 19, 30),               myLocalInstant(y, m, d + 1, 6, 30)], // spills into next day
+  ];
+}
+
+// Sums the milliseconds of `start`..`end` (true-UTC Dates) that fall inside
+// a working shift, skipping shift gaps and the daily rest break entirely.
+function workingMsBetween(start, end) {
+  if (!(end > start)) return 0;
+  let total = 0;
+  // Malaysia-local wall-clock fields of start, used purely to pick which
+  // calendar day to start scanning from (one day early, so an overnight
+  // Shift 2 that began "yesterday" is still accounted for).
+  const startWall = new Date(start.getTime() + MY_TZ_OFFSET_MS);
+  const endWall   = new Date(end.getTime() + MY_TZ_OFFSET_MS);
+  let cursor = new Date(Date.UTC(startWall.getUTCFullYear(), startWall.getUTCMonth(), startWall.getUTCDate() - 1));
+  const last = new Date(Date.UTC(endWall.getUTCFullYear(), endWall.getUTCMonth(), endWall.getUTCDate()));
+  while (cursor <= last) {
+    const y = cursor.getUTCFullYear(), m = cursor.getUTCMonth(), d = cursor.getUTCDate();
+    for (const [segStart, segEnd] of shiftWindowsForDay(y, m, d)) {
+      const clipStart = segStart > start ? segStart : start;
+      const clipEnd   = segEnd   < end   ? segEnd   : end;
+      if (clipEnd > clipStart) total += (clipEnd - clipStart);
+    }
+    cursor = new Date(cursor.getTime() + 86400000);
+  }
+  return total;
+}
+
 function calcDowntime(from, to){
   if (!from) return {hours: 0, display: '—'};
   const start = toUTC(from);
   const end   = to ? toUTC(to) : new Date();   // new Date() is always correct local=UTC
-  const ms    = end - start;
-  if (ms < 0) return {hours: 0, display: '0h 0m'};
+  const ms    = workingMsBetween(start, end);
+  if (end - start < 0) return {hours: 0, display: '0h 0m'};
   const totalMins = Math.floor(ms / 60000);
   const h = Math.floor(totalMins / 60);
   const m = totalMins % 60;
   return {hours: parseFloat((totalMins/60).toFixed(2)), display: `${h}h ${m}m`};
+}
+
+// ── Shared photo-tag helpers ──
+// Work order descriptions can have photos embedded inline as:
+//   [OPERATOR_PHOTOS] / [COMPLETION_PHOTOS]
+//   [PHOTO:filename|data:image/...;base64,....]
+//   [/OPERATOR_PHOTOS] / [/COMPLETION_PHOTOS]
+// These helpers pull the actual images out (for thumbnails) and strip the
+// raw tags out of any description text shown to the user, so people never
+// see a giant base64 "url" blob instead of a photo.
+const PHOTO_TAG_RE = /\[PHOTO:([^\|]+)\|([^\]]+)\]/g;
+function extractPhotos(wo){
+  const desc = (wo && wo.description) || '';
+  const photos = [];
+  const re = new RegExp(PHOTO_TAG_RE.source, 'g');
+  let m;
+  while((m = re.exec(desc)) !== null){
+    if(m[2] !== 'TOO_LARGE') photos.push(m[2]);
+  }
+  return photos;
+}
+function stripPhotoTags(desc){
+  return (desc||'')
+    .replace(new RegExp(PHOTO_TAG_RE.source, 'g'), '')
+    .replace(/\[\/?(?:OPERATOR|COMPLETION)_PHOTOS\]/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Compresses an image file down to (roughly) targetKB before it's turned
+// into a base64 data URL. The backend caps embedded photos at ~200KB and
+// silently drops anything bigger, so a modern 2-8MB phone photo needs to
+// shrink client-side or it just vanishes with no error shown anywhere.
+// Resizes to maxDim on the longest side, then steps JPEG quality down
+// until it fits (or bottoms out at 0.35 quality).
+function compressImage(file, cb, maxDim, targetKB){
+  maxDim = maxDim || 1280;
+  targetKB = targetKB || 180; // stay safely under the server's ~200KB cap
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim){
+        if (w >= h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else { w = Math.round(w * maxDim / h); h = maxDim; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      let quality = 0.8;
+      function tryEncode(){
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        const sizeKB = (dataUrl.length * 0.75) / 1024;
+        if (sizeKB > targetKB && quality > 0.35){ quality -= 0.15; tryEncode(); }
+        else cb(dataUrl, sizeKB);
+      }
+      tryEncode();
+    };
+    img.onerror = () => cb(e.target.result, null); // fallback: pass through original if it won't decode
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
 }
 
 // Photo upload mini-component
@@ -345,10 +482,11 @@ function PhotoUploader({photos, setPhotos, maxPhotos=3}){
     const remaining = maxPhotos - photos.length;
     Array.from(files).slice(0, remaining).forEach(file=>{
       if (!file.type.startsWith('image/')) return;
-      if (file.size > 5*1024*1024) { toast('Photo too large (max 5MB)','err'); return; }
-      const reader = new FileReader();
-      reader.onload = e => setPhotos(prev=>[...prev, {file, dataUrl:e.target.result}]);
-      reader.readAsDataURL(file);
+      if (file.size > 15*1024*1024) { toast('Photo too large (max 15MB)','err'); return; }
+      compressImage(file, (dataUrl, sizeKB) => {
+        if (sizeKB && sizeKB > 200) { toast('Photo still too large after compression — try retaking at a lower resolution','err'); return; }
+        setPhotos(prev=>[...prev, {file, dataUrl}]);
+      });
     });
   }
   return (
@@ -577,8 +715,12 @@ function Dashboard(){
 
 // ── QR Code Page ───────────────────────────────────────────────────────────
 function MaintenanceAlertBoard(){
+  const {user}=useAuth();
+  const isViewer=user?.role==='viewer';
+  const isAdminOrManager=user?.role==='admin'||user?.role==='manager';
   const [wos,setWos]=useState([]);
   const [technicians,setTechnicians]=useState([]);
+  const [assets,setAssets]=useState([]);
   const [loading,setLoading]=useState(true);
   const [selected,setSelected]=useState(null);
   const [priority,setPriority]=useState('medium');
@@ -592,6 +734,12 @@ function MaintenanceAlertBoard(){
   const knownOpenRef=useRef(new Set());
   const loadedRef=useRef(false);
   const audioRef=useRef(null);
+
+  // ── Admin-assigned maintenance task (not a production request) ──
+  const emptyTask={asset_id:'',title:'',description:'',priority:'medium',due_date:'',tech_ids:[]};
+  const [taskModal,setTaskModal]=useState(false);
+  const [taskForm,setTaskForm]=useState(emptyTask);
+  const [taskSubmitting,setTaskSubmitting]=useState(false);
 
   async function beep(force=false){
     if(!force&&!soundEnabledRef.current) return;
@@ -631,12 +779,16 @@ function MaintenanceAlertBoard(){
 
   async function load({alert=false}={}){
     try{
-      const [open,inp,hold,techs]=await Promise.all([
+      const calls=[
         api('/work-orders/?status=open&limit=200'),
         api('/work-orders/?status=in_progress&limit=200'),
         api('/work-orders/?status=on_hold&limit=200'),
         api('/users/technicians'),
-      ]);
+      ];
+      // Viewer accounts can't reach /assets (read-only Alert Board), and
+      // only admins/managers create tasks, so only fetch it when useful.
+      if(isAdminOrManager) calls.push(api('/assets/'));
+      const [open,inp,hold,techs,assetList]=await Promise.all(calls);
       const merged=[...open,...inp,...hold].sort((a,b)=>{const p={critical:0,high:1,medium:2,low:3};return (p[a.priority]||2)-(p[b.priority]||2)||new Date(a.created_at)-new Date(b.created_at);});
       const incomingIds=new Set(open.map(w=>w.id));
       if(loadedRef.current){
@@ -645,6 +797,7 @@ function MaintenanceAlertBoard(){
       }
       knownOpenRef.current=incomingIds; loadedRef.current=true;
       setWos(merged); setTechnicians(techs);
+      if(assetList) setAssets(assetList);
     }catch(e){toast(e.message,'err');}
     finally{setLoading(false);}
   }
@@ -679,6 +832,41 @@ function MaintenanceAlertBoard(){
     finally{setAssigning(false);}
   }
 
+  // ── Admin-assigned maintenance task ──
+  // Created directly by admin/manager (no production request behind it).
+  // affected_downtime is forced false: this is planned work, not a machine
+  // breakdown, so it must never count toward downtime reporting.
+  function openTaskModal(){ setTaskForm(emptyTask); setTaskModal(true); }
+  function closeTaskModal(){ setTaskModal(false); }
+  function toggleTaskTech(id){
+    setTaskForm(prev=>({...prev, tech_ids: prev.tech_ids.includes(id)?prev.tech_ids.filter(x=>x!==id):[...prev.tech_ids,id]}));
+  }
+  async function submitTask(){
+    if(!taskForm.asset_id){toast('Please select a machine/asset','err');return;}
+    if(!taskForm.title.trim()){toast('Please enter a task title','err');return;}
+    if(taskForm.tech_ids.length===0){toast('Please select at least one technician','err');return;}
+    setTaskSubmitting(true);
+    try{
+      const wo=await api('/work-orders/',{method:'POST',body:JSON.stringify({
+        asset_id: taskForm.asset_id,
+        type: 'preventive',
+        priority: taskForm.priority,
+        title: '[TASK] '+taskForm.title.trim(),
+        description: taskForm.description||null,
+        due_date: taskForm.due_date?new Date(taskForm.due_date).toISOString():null,
+        affected_downtime: false,
+      })});
+      await api('/work-orders/'+wo.id+'/assign',{method:'POST',body:JSON.stringify({
+        user_ids: taskForm.tech_ids,
+        priority: taskForm.priority,
+        due_date: taskForm.due_date?new Date(taskForm.due_date).toISOString():null,
+        notes: 'Maintenance task assigned by '+(user?.name||'admin'),
+      })});
+      toast('Maintenance task created and assigned'); closeTaskModal(); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setTaskSubmitting(false);}
+  }
+
   const incoming=wos.filter(w=>w.status==='open');
   const active=wos.filter(w=>w.status!=='open');
   const critical=wos.filter(w=>w.priority==='critical').length;
@@ -691,6 +879,7 @@ function MaintenanceAlertBoard(){
         {critical>0&&<span className="new-pulse" style={{background:'#7f1d1d',color:'#fff',padding:'8px 14px',borderRadius:'999px',fontSize:'13px',fontWeight:800}}>CRITICAL {critical}</span>}
         <button className={soundEnabled?'btn btn-success':'btn btn-secondary'} onClick={enableSound}>{soundEnabled?'Sound On':'Enable Sound'}</button>
         <button className="btn btn-secondary" onClick={()=>load()}>Refresh</button>
+        {isAdminOrManager&&<button className="btn btn-primary" onClick={openTaskModal}>+ Add Maintenance Task</button>}
       </div>
     </div>
 
@@ -705,20 +894,34 @@ function MaintenanceAlertBoard(){
         const assignedList=getAssignedList(w);
         const assignedLabel=assignedList.length===0?null:assignedList.length===1?assignedList[0].name:assignedList[0].name+' +'+(assignedList.length-1)+' more';
         const dt=calcDowntime(w.created_at,null);const isIncoming=w.status==='open';const isCritical=w.priority==='critical';
+        const isTask=w.affected_downtime===false;
+        const displayTitle=(w.asset?.name||w.title||'').replace(/^\[TASK\]\s*/,'');
+        const cardPhotos=extractPhotos(w);
+        // Maintenance tasks (admin-assigned, not a production request) get a
+        // distinct indigo theme so they're never mistaken for a breakdown
+        // report at a glance. Critical priority still wins visually either
+        // way, since that's a safety signal regardless of WO type.
         return (
-        <div key={w.id} className={isIncoming?'new-pulse':''} style={{background:isCritical?'#450a0a':isIncoming?'#fff7ed':'#fff',color:isCritical?'#fff':'#1e293b',border:'2px solid '+(isCritical?'#ef4444':isIncoming?'#f97316':'#e2e8f0'),borderRadius:'14px',padding:'18px',boxShadow:isIncoming?'0 10px 22px rgba(249,115,22,.18)':'0 1px 3px rgba(0,0,0,.06)'}}>
+        <div key={w.id} className={isIncoming?'new-pulse':''} style={{background:isCritical?'#450a0a':isTask?'#eef2ff':isIncoming?'#fff7ed':'#fff',color:isCritical?'#fff':'#1e293b',border:'2px solid '+(isCritical?'#ef4444':isTask?'#6366f1':isIncoming?'#f97316':'#e2e8f0'),borderRadius:'14px',padding:'18px',boxShadow:isIncoming?'0 10px 22px rgba(249,115,22,.18)':isTask?'0 4px 14px rgba(99,102,241,.15)':'0 1px 3px rgba(0,0,0,.06)'}}>
           <div style={{display:'flex',justifyContent:'space-between',gap:'10px',alignItems:'flex-start',marginBottom:'12px'}}>
-            <div><div style={{fontFamily:'monospace',fontSize:'13px',fontWeight:800,color:isCritical?'#fecaca':'#2563eb'}}>{w.wo_number}</div><div style={{fontSize:'20px',fontWeight:900,marginTop:'3px'}}>{w.asset?.name||w.title}</div><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',marginTop:'3px'}}>{w.asset?.location||'No location'}</div></div>
+            <div><div style={{fontFamily:'monospace',fontSize:'13px',fontWeight:800,color:isCritical?'#fecaca':isTask?'#4338ca':'#2563eb'}}>{w.wo_number}</div><div style={{fontSize:'20px',fontWeight:900,marginTop:'3px'}}>{isTask&&<span style={{fontSize:'12px',fontWeight:800,color:isCritical?'#bfdbfe':'#4338ca',marginRight:'6px'}}>🔧 TASK</span>}{displayTitle}</div><div style={{fontSize:'12px',color:isCritical?'#fecaca':isTask?'#4f46e5':'#64748b',marginTop:'3px'}}>{w.asset?.location||'No location'}</div></div>
             <div style={{display:'flex',gap:'6px',flexWrap:'wrap',justifyContent:'flex-end'}}><Badge value={w.priority}/><Badge value={w.status}/></div>
           </div>
-          <div style={{background:isCritical?'rgba(255,255,255,.08)':'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',fontWeight:700}}>RUNNING DOWNTIME</div><div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':'#b45309',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}</div></div>
-          <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:'70px',overflow:'hidden',marginBottom:'12px'}}>{(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title}</div>
+          {isTask
+            ?<div style={{background:isCritical?'rgba(255,255,255,.08)':'#e0e7ff',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#4338ca',fontWeight:700}}>SCHEDULED TASK · NOT COUNTED AS DOWNTIME</div><div style={{fontSize:'22px',fontWeight:900,color:isCritical?'#fff':'#312e81',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#4f46e5',marginTop:'4px'}}>Assigned {fmtDT(w.created_at)}</div></div>
+            :<div style={{background:isCritical?'rgba(255,255,255,.08)':'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',fontWeight:700}}>RUNNING DOWNTIME</div><div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':'#b45309',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}</div></div>}
+          <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:'70px',overflow:'hidden',marginBottom:cardPhotos.length>0?'10px':'12px'}}>{(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title}</div>
+          {cardPhotos.length>0&&<div style={{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'12px'}}>
+            {cardPhotos.map((src,i)=><img key={i} src={src} alt={'photo '+(i+1)} style={{width:'52px',height:'52px',objectFit:'cover',borderRadius:'8px',border:'1px solid '+(isCritical?'rgba(255,255,255,.3)':'#e2e8f0'),cursor:'pointer'}} onClick={()=>window.open(src,'_blank')}/>)}
+          </div>}
           {assignedList.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:'4px',marginBottom:'10px'}}>
             {assignedList.map((u,i)=><span key={u.id||i} style={{background:isCritical?'rgba(255,255,255,.15)':'#ede9fe',color:isCritical?'#fff':'#5b21b6',padding:'2px 9px',borderRadius:'999px',fontSize:'11px',fontWeight:700}}>👷 {u.name}</span>)}
           </div>}
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px'}}>
             <div style={{fontSize:'12px',fontWeight:700,color:isCritical?'#fecaca':assignedLabel?'#5b21b6':'#dc2626'}}>{assignedLabel?'Assigned: '+assignedLabel:'Unassigned'}</div>
-            <button className="btn btn-primary" onClick={()=>openAssign(w)}>{assignedLabel?'Reassign':'Assign'}</button>
+            {isViewer
+              ?null
+              :<button className="btn btn-primary" onClick={()=>openAssign(w)}>{assignedLabel?'Reassign':'Assign'}</button>}
           </div>
         </div>
       );})}
@@ -732,7 +935,13 @@ function MaintenanceAlertBoard(){
           <div><strong>Downtime:</strong> {calcDowntime(selected.created_at,null).display}</div>
           <div><strong>Priority:</strong> <Badge value={selected.priority}/></div>
           <div><strong>Status:</strong> <Badge value={selected.status}/></div>
-          <div style={{whiteSpace:'pre-line',marginTop:'8px'}}>{selected.description||'No description'}</div>
+          <div style={{whiteSpace:'pre-line',marginTop:'8px'}}>{stripPhotoTags(selected.description)||'No description'}</div>
+          {extractPhotos(selected).length>0&&(
+            <div style={{marginTop:'12px'}}>
+              <div style={{fontSize:'12px',color:'#64748b',marginBottom:'4px'}}>📷 Photos:</div>
+              <PhotoViewer photos={extractPhotos(selected)}/>
+            </div>
+          )}
         </div>
       </div>
       <div style={{display:'grid',gap:'12px'}}>
@@ -766,17 +975,93 @@ function MaintenanceAlertBoard(){
         </div>
       </div>
     </div></Modal>}
+
+    {taskModal&&<Modal title="Add Maintenance Task" onClose={closeTaskModal} large>
+      <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'16px'}}>For scheduled/proactive work assigned directly by you — not a production breakdown request. This will <strong>not</strong> be counted in downtime reports.</p>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
+        <div style={{display:'grid',gap:'12px'}}>
+          <div>
+            <label className="lbl">Machine / Asset</label>
+            <select className="inp" value={taskForm.asset_id} onChange={e=>setTaskForm({...taskForm,asset_id:e.target.value})}>
+              <option value="">Select an asset...</option>
+              {assets.map(a=><option key={a.id} value={a.id}>{a.name}{a.location?' — '+a.location:''}</option>)}
+            </select>
+          </div>
+          <div><label className="lbl">Task Title</label><input className="inp" value={taskForm.title} onChange={e=>setTaskForm({...taskForm,title:e.target.value})} placeholder="e.g. Lubricate conveyor bearings"/></div>
+          <div><label className="lbl">Description / Instructions</label><textarea className="inp" rows={4} value={taskForm.description} onChange={e=>setTaskForm({...taskForm,description:e.target.value})} placeholder="Optional details for the technician"/></div>
+          <div><label className="lbl">Priority</label><select className="inp" value={taskForm.priority} onChange={e=>setTaskForm({...taskForm,priority:e.target.value})}>{['low','medium','high','critical'].map(p=><option key={p} value={p}>{p.charAt(0).toUpperCase()+p.slice(1)}</option>)}</select></div>
+          <div><label className="lbl">Due Date</label><input type="datetime-local" className="inp" value={taskForm.due_date} onChange={e=>setTaskForm({...taskForm,due_date:e.target.value})}/></div>
+        </div>
+        <div>
+          <label className="lbl">Assign Technicians {taskForm.tech_ids.length>0&&<span style={{color:'#2563eb',fontWeight:700}}>({taskForm.tech_ids.length} selected)</span>}</label>
+          {technicians.length===0
+            ?<div style={{color:'#dc2626',fontSize:'13px',padding:'10px',background:'#fef2f2',borderRadius:'8px'}}>No staff marked present today.</div>
+            :<div style={{display:'flex',flexDirection:'column',gap:'6px',maxHeight:'280px',overflowY:'auto',border:'1px solid #e2e8f0',borderRadius:'10px',padding:'6px'}}>
+              {technicians.map(t=>{
+                const isChecked=taskForm.tech_ids.includes(t.id);
+                return (
+                  <label key={t.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'8px 10px',borderRadius:'8px',cursor:'pointer',background:isChecked?'#eff6ff':'transparent'}}>
+                    <input type="checkbox" checked={isChecked} onChange={()=>toggleTaskTech(t.id)} style={{width:'16px',height:'16px',accentColor:'#2563eb',cursor:'pointer'}}/>
+                    <div style={{flex:1}}>
+                      <div style={{fontWeight:700,fontSize:'13px',color:'#1e293b'}}>{t.name}</div>
+                      <div style={{fontSize:'11px',color:'#64748b',textTransform:'capitalize'}}>{t.role}</div>
+                    </div>
+                    {isChecked&&<span style={{fontSize:'11px',color:'#2563eb',fontWeight:700}}>✓</span>}
+                  </label>
+                );
+              })}
+            </div>
+          }
+          <div style={{display:'flex',gap:'10px',marginTop:'16px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={submitTask} disabled={taskSubmitting}>{taskSubmitting?'Creating...':'Create & Assign Task'}</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={closeTaskModal}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </Modal>}
   </div>;
 }
 
 function QRPage(){
   const requestUrl = window.location.origin + '/request';
   const qrUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=' + encodeURIComponent(requestUrl);
+
+  const [assets,setAssets]=useState([]);
+  const [loadingAssets,setLoadingAssets]=useState(true);
+  const [search,setSearch]=useState('');
+  const [selectedIds,setSelectedIds]=useState([]);
+
+  useEffect(()=>{
+    api('/assets/').then(list=>{
+      setAssets(list);
+      setSelectedIds(list.map(a=>a.id)); // default: everything selected
+    }).catch(e=>toast(e.message,'err')).finally(()=>setLoadingAssets(false));
+  },[]);
+
+  const filtered = assets.filter(a=>{
+    const s = normalizeSearch(search);
+    if(!s) return true;
+    return normalizeSearch(a.name).includes(s) || normalizeSearch(a.asset_code||'').includes(s) || normalizeSearch(a.location||'').includes(s);
+  });
+
+  function toggleAsset(id){
+    setSelectedIds(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  }
+  function selectAllFiltered(){ setSelectedIds(prev=>[...new Set([...prev,...filtered.map(a=>a.id)])]); }
+  function deselectAllFiltered(){ const fids=new Set(filtered.map(a=>a.id)); setSelectedIds(prev=>prev.filter(id=>!fids.has(id))); }
+
+  function assetQrUrl(asset){
+    const url = window.location.origin + '/request/' + asset.id;
+    return 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(url);
+  }
+
+  const selectedAssets = assets.filter(a=>selectedIds.includes(a.id));
+
   return (
     <div>
       <div style={{marginBottom:'24px'}}>
         <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>QR Code</h1>
-        <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>One QR code for the entire factory — print and stick on walls or notice boards</p>
+        <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>One QR code for the entire factory, or a dedicated QR per machine that pre-fills the asset on the request form</p>
       </div>
       <div style={{display:'flex',gap:'24px',flexWrap:'wrap'}}>
         {/* QR Card */}
@@ -816,6 +1101,55 @@ function QRPage(){
             <p style={{fontSize:'13px',color:'#1e40af',lineHeight:1.6}}>Click "Open Print View" to get a clean printable version. Print A4 size and laminate for best results. One QR code works for all machines — operator selects the machine from a dropdown on the form.</p>
           </div>
         </div>
+      </div>
+
+      {/* ── Per-machine QR codes ── */}
+      <div style={{marginTop:'32px'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:'12px',marginBottom:'14px'}}>
+          <div>
+            <h2 style={{fontSize:'18px',fontWeight:800,color:'#1e293b',margin:0}}>Per-Machine QR Codes</h2>
+            <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Each code opens the request form with that machine already selected — no need to search the dropdown on the shop floor</p>
+          </div>
+          <button className="btn btn-primary" onClick={()=>window.print()} disabled={selectedAssets.length===0}>🖨️ Print / Save as PDF ({selectedAssets.length})</button>
+        </div>
+
+        <div className="card no-print" style={{marginBottom:'14px'}}>
+          <div style={{display:'flex',gap:'10px',flexWrap:'wrap',alignItems:'center',marginBottom:'12px'}}>
+            <input className="inp" style={{maxWidth:'280px'}} placeholder="Search machine, code, or location..." value={search} onChange={e=>setSearch(e.target.value)}/>
+            <button className="btn btn-secondary" onClick={selectAllFiltered}>Select {search?'Filtered':'All'}</button>
+            <button className="btn btn-secondary" onClick={deselectAllFiltered}>Deselect {search?'Filtered':'All'}</button>
+            <span style={{fontSize:'13px',color:'#64748b'}}>{selectedIds.length} of {assets.length} selected</span>
+          </div>
+          {loadingAssets?<Spinner/>:filtered.length===0?<Empty msg="No assets found"/>:
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(220px,1fr))',gap:'10px'}}>
+              {filtered.map(a=>{
+                const checked=selectedIds.includes(a.id);
+                return (
+                  <label key={a.id} style={{display:'flex',gap:'10px',alignItems:'center',border:'1.5px solid '+(checked?'#2563eb':'#e2e8f0'),background:checked?'#eff6ff':'#fff',borderRadius:'10px',padding:'10px',cursor:'pointer'}}>
+                    <input type="checkbox" checked={checked} onChange={()=>toggleAsset(a.id)} style={{width:'16px',height:'16px',accentColor:'#2563eb',cursor:'pointer',flexShrink:0}}/>
+                    <img src={assetQrUrl(a)} alt="" style={{width:'44px',height:'44px',borderRadius:'6px',border:'1px solid #e2e8f0',flexShrink:0}}/>
+                    <div style={{overflow:'hidden'}}>
+                      <div style={{fontWeight:700,fontSize:'13px',color:'#1e293b',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{a.name}</div>
+                      <div style={{fontSize:'11px',color:'#64748b',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{a.asset_code}{a.location?' · '+a.location:''}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          }
+        </div>
+      </div>
+
+      {/* Print-only sheet: rendered off-screen, only shown by @media print when the button above is clicked */}
+      <div className="qr-print-sheet">
+        {selectedAssets.map(a=>(
+          <div key={a.id} className="qr-label-card">
+            <img src={assetQrUrl(a)} alt=""/>
+            <div className="qr-asset-name">{a.name}</div>
+            <div className="qr-asset-meta">{a.asset_code}{a.location?' · '+a.location:''}</div>
+            <div className="qr-caption">Scan to report a problem with this machine</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1035,7 +1369,7 @@ function TechnicianBoard(){
                   <div style={{fontSize:'12px',color:'#64748b',marginBottom:'6px'}}>
                     🏭 {w.asset?.name||'—'} &nbsp;·&nbsp; 📍 {w.asset?.location||'—'}
                   </div>
-                  {w.description&&<div style={{fontSize:'12px',color:'#374151',background:'rgba(255,255,255,0.7)',borderRadius:'6px',padding:'8px 10px',marginBottom:'8px',whiteSpace:'pre-line',maxHeight:'80px',overflow:'hidden'}}>{w.description}</div>}
+                  {stripPhotoTags(w.description)&&<div style={{fontSize:'12px',color:'#374151',background:'rgba(255,255,255,0.7)',borderRadius:'6px',padding:'8px 10px',marginBottom:'8px',whiteSpace:'pre-line',maxHeight:'80px',overflow:'hidden'}}>{stripPhotoTags(w.description)}</div>}
 
                   {/* Operator photos shown on board */}
                   {photos.length>0&&(
@@ -1191,16 +1525,16 @@ function TechnicianBoard(){
 
               <div style={{maxHeight:'360px',overflowY:'auto',border:'1px solid #f1f5f9',borderRadius:'8px',padding:'8px'}}>
                 {parts.length===0?<Empty msg="No parts in inventory"/>:(()=>{
-                  const q=partsSearch.trim().toLowerCase();
+                  const nq=normalizeSearch(partsSearch);
                   const visible=parts.filter(p=>{
                     const isSelected=usedParts.some(x=>x.spare_part_id===p.id);
-                    if(!q) return true;
+                    if(!nq) return true;
                     // Always keep already-selected parts visible even while searching,
                     // so the technician doesn't lose track of what's been added.
                     if(isSelected) return true;
-                    return p.name.toLowerCase().includes(q)
-                      ||(p.part_code||'').toLowerCase().includes(q)
-                      ||(p.barcode||'').toLowerCase().includes(q);
+                    return normalizeSearch(p.name).includes(nq)
+                      ||normalizeSearch(p.part_code).includes(nq)
+                      ||normalizeSearch(p.barcode).includes(nq);
                   });
                   if(visible.length===0) return <Empty msg={'No parts match "'+partsSearch+'"'}/>;
                   return visible.map(p=>{
@@ -1272,9 +1606,13 @@ function HistoryLog(){
   // ── Real-time uptime ──
   const [uptime,setUptime]=useState(null);
   const [hoursPerDay,setHoursPerDay]=useState(19);
-  const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine'
+  const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine' | 'by_root_cause'
   const RC=window.Recharts;
   const MACHINE_COLORS=['#2563eb','#dc2626','#16a34a','#d97706','#7c3aed','#0891b2','#db2777','#65a30d','#ea580c','#0d9488'];
+  // ── Deleted work orders (admin-only trash view) ──
+  const [showDeleted,setShowDeleted]=useState(false);
+  const [deletedWos,setDeletedWos]=useState([]);
+  const [deletedLoading,setDeletedLoading]=useState(false);
 
   async function loadAssetsList(){
     try{setAllAssets(await api('/analysis/assets'));}catch(e){}
@@ -1329,7 +1667,7 @@ function HistoryLog(){
   useEffect(()=>{loadMachineTimeline();},[dateFrom,dateTo,selectedAssetIds]);
   useEffect(()=>{loadUptime();},[hoursPerDay,locationFilter]);
   useEffect(()=>{const t=setInterval(loadUptime,60000);return()=>clearInterval(t);},[hoursPerDay,locationFilter]); // refresh uptime every 60s
-  useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();});
+  useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();if(isAdmin)loadDeleted();});
 
   // Extract all embedded base64 photos from description
   // Handles both [OPERATOR_PHOTOS] and [COMPLETION_PHOTOS] sections
@@ -1397,10 +1735,37 @@ function HistoryLog(){
     finally{setSaving(false);}
   }
 
+  async function loadDeleted(){
+    setDeletedLoading(true);
+    try{ setDeletedWos(await api('/work-orders/?deleted_only=true&limit=300')); }
+    catch(e){toast(e.message,'err');}
+    finally{setDeletedLoading(false);}
+  }
+  useEffect(()=>{ if(isAdmin) loadDeleted(); },[isAdmin]);
+
+  async function deleteWo(w){
+    if(!window.confirm('Delete work order '+w.wo_number+'? It will be hidden from every view but can be restored later from Deleted Work Orders.')) return;
+    try{
+      await api('/work-orders/'+w.id,{method:'DELETE'});
+      toast('Work order deleted — restore anytime from Deleted Work Orders');
+      load(); loadAnalysis(); loadDeleted();
+    }catch(e){toast(e.message,'err');}
+  }
+  async function restoreWo(w){
+    if(!window.confirm('Restore work order '+w.wo_number+'? It will reappear in History Log and wherever it was before.')) return;
+    try{
+      await api('/work-orders/'+w.id+'/restore',{method:'POST'});
+      toast('Work order restored ✅');
+      load(); loadAnalysis(); loadDeleted();
+    }catch(e){toast(e.message,'err');}
+  }
+
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
         <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>History Log</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Complete record of all work orders</p></div>
+        <div style={{display:'flex',gap:'8px'}}>
+        {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>setShowDeleted(v=>!v)}>🗑️ Deleted Work Orders ({deletedWos.length})</button>}
         <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{
           const qs=[]
           if(statusFilter) qs.push('status='+statusFilter);
@@ -1408,7 +1773,39 @@ function HistoryLog(){
           if(dateTo)   qs.push('date_to='+dateTo);
           downloadFile('/data/export/history.xlsx'+(qs.length?'?'+qs.join('&'):''),'WO_History.xlsx');
         }}>📊 Export Excel</button>
+        </div>
       </div>
+
+      {showDeleted&&(
+        <div className="card" style={{marginBottom:'16px',border:'1px solid #fecaca',background:'#fef2f2'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+            <div>
+              <div style={{fontSize:'16px',fontWeight:800,color:'#991b1b'}}>🗑️ Deleted Work Orders</div>
+              <div style={{fontSize:'12px',color:'#b91c1c',marginTop:'2px'}}>Hidden from every view (Alert Board, Technician Board, reports) until restored</div>
+            </div>
+            <button className="btn btn-secondary" onClick={()=>setShowDeleted(false)}>Close</button>
+          </div>
+          {deletedLoading?<Spinner/>:deletedWos.length===0?(
+            <Empty msg="No deleted work orders"/>
+          ):(
+            <div className="ovf"><table>
+              <thead><tr>{['WO #','Machine','Title','Deleted By','Deleted At','Action'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+              <tbody>
+                {deletedWos.map(w=>(
+                  <tr key={w.id}>
+                    <td style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</td>
+                    <td style={{fontWeight:600}}>{w.asset?.name||'—'}</td>
+                    <td style={{maxWidth:'220px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={w.title}>{w.title}</td>
+                    <td style={{color:'#64748b',fontSize:'12px'}}>{w.deleted_by||'—'}</td>
+                    <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{w.deleted_at?fmtDT(w.deleted_at):'—'}</td>
+                    <td><button className="btn btn-primary" style={{fontSize:'11px',padding:'4px 10px'}} onClick={()=>restoreWo(w)}>♻️ Restore</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          )}
+        </div>
+      )}
 
       {/* Filters */}
       <div style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #f1f5f9',marginBottom:'16px',display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-end'}}>
@@ -1450,6 +1847,7 @@ function HistoryLog(){
           ['uptime','📈 Production Line Uptime'],
           ['downtime','📊 Downtime Analysis'],
           ['by_machine','🏭 Downtime by Machine'],
+          ['by_root_cause','🔍 Root Cause Analysis'],
         ].map(([k,l])=>(
           <button key={k} onClick={()=>setAnalysisTab(k)} style={{
             padding:'9px 20px',borderRadius:'8px',border:'none',cursor:'pointer',
@@ -1610,6 +2008,63 @@ function HistoryLog(){
       </div>
       )}
 
+      {analysisTab==='by_root_cause'&&(()=>{
+        const rcData=analysis?.by_root_cause||[];
+        const groupColor=g=>({Mechanical:'#d97706',Electrical:'#2563eb',Others:'#7c3aed'}[g]||'#94a3b8');
+        return (
+        <div className="card" style={{marginBottom:'16px'}}>
+          <div style={{marginBottom:'14px'}}>
+            <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Downtime by Root Cause</div>
+            <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Machine downtime cases and hours grouped by the technician's diagnosed root cause — sorted by total downtime hours, biggest impact first</div>
+          </div>
+
+          {analysisLoading?<Spinner/>:rcData.length===0?(
+            <Empty msg="No completed work orders with a recorded root cause in this date range"/>
+          ):(
+            <>
+              <RC.ResponsiveContainer width="100%" height={Math.max(240,rcData.length*38)}>
+                <RC.BarChart data={rcData} layout="vertical" margin={{left:20}}>
+                  <RC.CartesianGrid strokeDasharray="3 3" horizontal={false}/>
+                  <RC.XAxis type="number" tick={{fontSize:12}} label={{value:'Downtime (hrs)',position:'insideBottom',offset:-4,fontSize:11,fill:'#94a3b8'}}/>
+                  <RC.YAxis type="category" dataKey="root_cause" tick={{fontSize:12}} width={140}/>
+                  <RC.Tooltip formatter={(v,name)=>[v+'h',name]} labelFormatter={l=>l}/>
+                  <RC.Bar dataKey="total_downtime" name="Total Downtime" radius={[0,4,4,0]}>
+                    {rcData.map((row,i)=><RC.Cell key={i} fill={groupColor(row.group)}/>)}
+                  </RC.Bar>
+                </RC.BarChart>
+              </RC.ResponsiveContainer>
+
+              <div style={{display:'flex',gap:'16px',margin:'14px 0',fontSize:'12px',color:'#64748b'}}>
+                {['Mechanical','Electrical','Others'].map(g=>(
+                  <div key={g} style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                    <span style={{width:'10px',height:'10px',borderRadius:'3px',background:groupColor(g),display:'inline-block'}}/>{g}
+                  </div>
+                ))}
+              </div>
+
+              <div className="ovf">
+                <table>
+                  <thead><tr>{['Root Cause','Group','Cases','Total Hours','Avg Hours/Case','Machines Affected'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                  <tbody>
+                    {rcData.map(row=>(
+                      <tr key={row.root_cause}>
+                        <td style={{fontWeight:700}}>{row.root_cause}</td>
+                        <td><span style={{fontSize:'11px',fontWeight:700,color:groupColor(row.group),background:groupColor(row.group)+'1a',padding:'2px 8px',borderRadius:'999px'}}>{row.group}</span></td>
+                        <td>{row.total_cases}</td>
+                        <td>{row.total_downtime}h</td>
+                        <td>{row.avg_downtime}h</td>
+                        <td>{row.machines_affected}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+        );
+      })()}
+
       <div style={{fontSize:'12px',color:'#94a3b8',marginBottom:'10px'}}>{filtered.length} records found</div>
 
       {loading?<Spinner/>:filtered.length===0?<Empty msg="No records found"/>:(
@@ -1646,6 +2101,7 @@ function HistoryLog(){
                     <div style={{display:'flex',gap:'4px'}}>
                       <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
                       {isAdmin&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>openEdit(w)}>✏️ Edit</button>}
+                      {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px',color:'#dc2626'}} onClick={()=>deleteWo(w)}>🗑️ Delete</button>}
                     </div>
                   </td>
                 </tr>
@@ -1674,7 +2130,7 @@ function HistoryLog(){
               </div>
               <div className="section-title">Full Description</div>
               <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',color:'#374151',whiteSpace:'pre-line',lineHeight:1.7}}>
-                {selected.description||'No description'}
+                {stripPhotoTags(selected.description)||'No description'}
               </div>
             </div>
             <div>
@@ -2056,7 +2512,7 @@ function PartsAndScannerTab({canManage}){
 
   async function load(){
     try{
-      let url='/inventory/?low_stock='+lowOnly;
+      let url='/inventory/?low_stock='+lowOnly+'&limit=2000';
       if(catFilter) url+='&category='+encodeURIComponent(catFilter);
       const [p,cats]=await Promise.all([api(url),api('/inventory/categories')]);
       setParts(p);
@@ -2214,7 +2670,7 @@ function PartsAndScannerTab({canManage}){
     if(!b) return;
     setScanning(true);setScanPart(null);setMoveResult(null);setQty(1);setReason('');setReference('');
     try{
-      const data=await api('/stock/scan/'+encodeURIComponent(b));
+      const data=await api('/stock/scan?barcode='+encodeURIComponent(b));
       setScanPart(data);
       setTimeout(()=>document.getElementById('qty-input')?.focus(),100);
     }catch(e){toast(e.message,'err');setScanPart(null);}
@@ -2315,11 +2771,14 @@ function PartsAndScannerTab({canManage}){
   }
   function closeScanner(){stopCamera();setScanOpen(false);setScanPart(null);setMoveResult(null);setBarcode('');}
 
-  const filtered=parts.filter(p=>
-    p.name.toLowerCase().includes(search.toLowerCase())||
-    (p.part_code||'').toLowerCase().includes(search.toLowerCase())||
-    (p.description||'').toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered=parts.filter(p=>{
+    if(!search.trim()) return true;
+    const q=normalizeSearch(search);
+    return normalizeSearch(p.name).includes(q)
+      ||normalizeSearch(p.part_code).includes(q)
+      ||normalizeSearch(p.description).includes(q)
+      ||normalizeSearch(p.barcode).includes(q);
+  });
   const topupCount=filtered.filter(p=>p.is_low_stock).length;
 
   return (
@@ -2876,7 +3335,7 @@ function StockTakeTab(){
     if(!b) return;
     setScanning(true);setScanPart(null);setEditForm(null);setLastResult(null);
     try{
-      const data=await api('/stock/scan/'+encodeURIComponent(b));
+      const data=await api('/stock/scan?barcode='+encodeURIComponent(b));
       setScanPart(data);
       setEditForm({
         quantity_on_hand:data.quantity_on_hand,
@@ -2955,7 +3414,7 @@ function StockTakeTab(){
 
   function jumpToPart(entry){
     // Coverage list entries don't carry barcode, but part_code always
-    // works as a fallback lookup key in /stock/scan/{code}
+    // works as a fallback lookup key via /stock/scan?barcode=...
     setBarcode(entry.part_code);
     lookupBarcode(entry.part_code);
     window.scrollTo({top:0,behavior:'smooth'});
@@ -3541,8 +4000,11 @@ function App(){
   }
   if(!user) return <Login onLogin={setUser}/>;
   const isAdminOrManager=user.role==='admin'||user.role==='manager';
-  const visibleNav=NAV.filter(n=>n.key!=='users'||isAdminOrManager);
-  const safePage=(page==='users'&&!isAdminOrManager)?'dashboard':page;
+  const isViewer=user.role==='viewer';
+  // Viewer accounts are read-only observers of the Alert Board — no other
+  // page is reachable, even by manually poking at the `page` state.
+  const visibleNav=isViewer?NAV.filter(n=>n.key==='alert'):NAV.filter(n=>n.key!=='users'||isAdminOrManager);
+  const safePage=isViewer?'alert':(page==='users'&&!isAdminOrManager)?'dashboard':page;
   const pages={dashboard:Dashboard,alert:MaintenanceAlertBoard,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:InventoryAndStock,pm:PMSchedules,users:UsersManagement};
   const PageComp=pages[safePage]||Dashboard;
   return (

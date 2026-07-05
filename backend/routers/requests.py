@@ -44,7 +44,7 @@ class RepairRequestOut(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-def _encode_photos(photos: list[PhotoData], max_size_kb: int = 200) -> str:
+def _encode_photos(photos: list[PhotoData], max_size_kb: int = 250) -> str:
     """
     Encode up to 3 photos as compact base64 blocks inside the description.
     Each photo is stored as:

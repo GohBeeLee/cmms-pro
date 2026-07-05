@@ -23,10 +23,10 @@ from sqlalchemy.orm import selectinload
 
 from db import get_db
 from models import Asset, WorkOrder, WorkOrderStatus, AssetStatus, User
-from auth import get_current_user
+from auth import get_current_user, forbid_viewer
 
 # Single router — no prefix conflict
-router = APIRouter(prefix="/data", tags=["export_import"])
+router = APIRouter(prefix="/data", tags=["export_import"], dependencies=[Depends(forbid_viewer)])
 
 
 # ─────────────────────────────────────────────────────────────────────────────

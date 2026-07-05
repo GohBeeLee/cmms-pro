@@ -13,8 +13,8 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db import get_db
-from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, Asset, TaskAssignment, TaskStatus
-from auth import get_current_user
+from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, UserRole, Asset, TaskAssignment, TaskStatus
+from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
 
 router = APIRouter(prefix="/work-orders", tags=["work_orders"])
@@ -67,7 +67,7 @@ class WOUpdate(BaseModel):
 
 # ── Photo helpers ──────────────────────────────────────────────────────────
 
-def _embed_photos(photos: list[PhotoEntry], tag: str, max_kb: int = 200) -> str:
+def _embed_photos(photos: list[PhotoEntry], tag: str, max_kb: int = 250) -> str:
     """Embed photos as base64 blocks with a section tag."""
     parts = []
     for p in photos[:3]:
@@ -103,6 +103,11 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "created_at":   wo.created_at.isoformat()   if wo.created_at   else None,
         "updated_at":   wo.updated_at.isoformat()   if wo.updated_at   else None,
         "completed_at": wo.completed_at.isoformat() if wo.completed_at else None,
+        "is_deleted":   bool(getattr(wo, "is_deleted", False)),
+        "deleted_at":   wo.deleted_at.isoformat()   if getattr(wo, "deleted_at", None)   else None,
+        "deleted_by":   getattr(wo, "deleted_by", None),
+        "restored_at":  wo.restored_at.isoformat()  if getattr(wo, "restored_at", None)  else None,
+        "restored_by":  getattr(wo, "restored_by", None),
         "assigned_users": [
             {
                 "id": str(a.user.id),
@@ -150,6 +155,7 @@ async def list_work_orders(
     priority: str | None = None,
     asset_id: UUID | None = None,
     my_jobs_only: bool = False,
+    deleted_only: bool = False,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -157,6 +163,15 @@ async def list_work_orders(
         selectinload(WorkOrder.asset),
         selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
     )
+    # Soft-deleted work orders are hidden everywhere by default. Only admins
+    # can see the "Deleted Work Orders" trash view (deleted_only=True) —
+    # everyone else always gets the normal, non-deleted list regardless of
+    # what they pass, so a deleted WO never resurfaces on the Alert Board,
+    # technician's board, or anyone else's History Log by mistake.
+    if deleted_only and current_user.role == UserRole.admin:
+        q = q.where(WorkOrder.is_deleted == True)
+    else:
+        q = q.where(WorkOrder.is_deleted == False)
     if status:   q = q.where(WorkOrder.status == status)
     if priority: q = q.where(WorkOrder.priority == priority)
     if asset_id: q = q.where(WorkOrder.asset_id == asset_id)
@@ -183,7 +198,7 @@ async def get_work_order(wo_id: UUID, db: AsyncSession = Depends(get_db), _: Use
 async def create_work_order(
     body: WOCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_viewer),
 ):
     from models import WorkOrderType, Priority
     count = (await db.execute(select(func.count()).select_from(WorkOrder))).scalar() or 0
@@ -214,10 +229,12 @@ async def create_work_order(
 @router.patch("/{wo_id}")
 async def update_work_order(
     wo_id: UUID, body: WOUpdate,
-    db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(forbid_viewer),
 ):
     from models import Priority
     wo = await _get_wo(wo_id, db)
+    if wo.is_deleted:
+        raise HTTPException(400, "This work order has been deleted — restore it first")
     if body.status:
         wo.status = WorkOrderStatus(body.status)
         if body.status == "completed" and not wo.completed_at:
@@ -245,15 +262,55 @@ async def update_work_order(
     return _wo_dict(await _get_wo(wo_id, db))
 
 
-@router.delete("/{wo_id}", status_code=204)
+@router.delete("/{wo_id}")
 async def delete_work_order(
     wo_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_viewer),
 ):
+    """
+    Soft-deletes a work order — admin only. The record isn't removed from
+    the database, just hidden from every normal view (Alert Board,
+    technician's board, History Log, reports) and marked with who deleted
+    it and when, so it can be reviewed and restored later from History
+    Log's "Deleted Work Orders" view.
+    """
+    if current_user.role != UserRole.admin:
+        raise HTTPException(403, "Only admins can delete work orders")
     wo = await _get_wo(wo_id, db)
-    await db.delete(wo)
-    await ws_manager.broadcast_event(ROOM, "work_order.deleted", {"id": str(wo_id)})
+    if wo.is_deleted:
+        raise HTTPException(400, "Work order is already deleted")
+    wo.is_deleted = True
+    wo.deleted_at = datetime.utcnow()
+    wo.deleted_by = current_user.name
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "work_order.deleted", {
+        "id": str(wo_id), "wo_number": wo.wo_number, "deleted_by": current_user.name,
+    })
+    return _wo_dict(await _get_wo(wo_id, db))
+
+
+@router.post("/{wo_id}/restore")
+async def restore_work_order(
+    wo_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(forbid_viewer),
+):
+    """Reverses a soft-delete — admin only. Brings the work order back into
+    every normal view exactly as it was before deletion."""
+    if current_user.role != UserRole.admin:
+        raise HTTPException(403, "Only admins can restore work orders")
+    wo = await _get_wo(wo_id, db)
+    if not wo.is_deleted:
+        raise HTTPException(400, "Work order is not deleted")
+    wo.is_deleted = False
+    wo.restored_at = datetime.utcnow()
+    wo.restored_by = current_user.name
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "work_order.restored", {
+        "id": str(wo_id), "wo_number": wo.wo_number, "restored_by": current_user.name,
+    })
+    return _wo_dict(await _get_wo(wo_id, db))
 
 
 # ── Assign to technician ───────────────────────────────────────────────────
@@ -261,7 +318,7 @@ async def delete_work_order(
 @router.post("/{wo_id}/assign")
 async def assign_to_technician(
     wo_id: UUID, body: AssignRequest,
-    db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(forbid_viewer),
 ):
     from models import Priority
 
@@ -273,6 +330,8 @@ async def assign_to_technician(
         raise HTTPException(400, "At least one technician must be selected")
 
     wo = await _get_wo(wo_id, db)
+    if wo.is_deleted:
+        raise HTTPException(400, "This work order has been deleted — restore it first")
 
     techs: list[User] = []
     for uid in raw_ids:
@@ -322,9 +381,11 @@ async def assign_to_technician(
 async def complete_work_order(
     wo_id: UUID, body: CompletionForm,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(forbid_viewer),
 ):
     wo = await _get_wo(wo_id, db)
+    if wo.is_deleted:
+        raise HTTPException(400, "This work order has been deleted — restore it first")
     if wo.status == WorkOrderStatus.completed:
         raise HTTPException(400, "Work order already completed")
 

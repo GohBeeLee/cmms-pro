@@ -106,7 +106,7 @@ def _generate_template():
     hints = [
         "Unique code e.g. PMP-001",
         "Full machine name",
-        "Pump / Motor / Compressor / Conveyor / HVAC / Generator / Other",
+        "Multi Handling System (MHS) / Machine / Robot / Forklift (Gas) / Forklift (Battery) / Forklift (Diesel) / Utilities / Other",
         "Physical location e.g. Building A - Ground Floor",
         "Brand name (optional)",
         "Model number (optional)",
@@ -247,7 +247,7 @@ async def import_assets(
     existing = {a.asset_code: a for a in (await db.execute(select(Asset))).scalars().all()}
 
     valid_status   = {s.value for s in AssetStatus}
-    valid_category = {"Pump","Motor","Compressor","Conveyor","HVAC","Generator","Other"}
+    valid_category = {"Multi Handling System (MHS)","Machine","Robot","Forklift (Gas)","Forklift (Battery)","Forklift (Diesel)","Utilities","Other"}
 
     inserted, updated, skipped = 0, 0, []
 

@@ -2221,7 +2221,7 @@ function Assets(){
   const importFileRef=useRef(null);
   const emptyForm={asset_code:'',name:'',category:'',location:'',manufacturer:'',model:'',serial_number:'',status:'operational',notes:''};
   const [form,setForm]=useState(emptyForm);
-  const CATS=['Pump','Motor','Compressor','Conveyor','HVAC','Generator','Other'];
+  const CATS=['Multi Handling System (MHS)','Machine','Robot','Forklift (Gas)','Forklift (Battery)','Forklift (Diesel)','Utilities','Other'];
   const STATS=['operational','under_maintenance','out_of_service','decommissioned'];
 
   async function load(){try{setAssets(await api('/assets/'));}catch(e){toast(e.message,'err');}finally{setLoading(false);}}

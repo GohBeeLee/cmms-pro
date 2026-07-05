@@ -9,7 +9,7 @@ import logging, os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import select, text, func
@@ -222,8 +222,13 @@ async def serve_request_form(asset_id: str = None):
     return FileResponse(path) if os.path.exists(path) else HTMLResponse("<h2>Request form not found.</h2>")
 
 @app.get("/qr", include_in_schema=False)
-async def serve_qr():
-    url = str(app.url_path_for("serve_request_form")).rstrip("/")
+async def serve_qr(request: Request):
+    path = str(app.url_path_for("serve_request_form")).rstrip("/")
+    # Build an absolute URL. Trust X-Forwarded-Proto/Host since Render sits behind a proxy
+    # and request.url would otherwise report http:// and/or the internal host.
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    url = f"{scheme}://{host}{path}"
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"/>
 <title>CMMS QR Code</title>
 <style>body{{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#f8fafc;}}

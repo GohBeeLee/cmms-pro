@@ -2462,7 +2462,45 @@ function InventoryAndStock(){
   );
 }
 
-// ── Parts & Scanner (combined list + barcode scan/move) ───────────────────
+// ── Auto-generated part codes, based on category ───────────────────────────
+// For a category with no existing parts yet, derive a short prefix from the
+// category name itself (e.g. "Bearing" -> "BEA", "Belt and Chain" -> "BAC").
+function derivePartCodePrefix(category){
+  const cleaned=category.replace(/\([^)]*\)/g,'').trim();
+  const words=cleaned.split(/\s+/).filter(Boolean);
+  if(words.length===0) return 'GEN';
+  if(words.length===1) return words[0].slice(0,3).toUpperCase();
+  return words.map(w=>w[0]).join('').slice(0,4).toUpperCase();
+}
+// Looks at the existing parts already in this category to find the prefix
+// pattern they use (e.g. spots "BEA-057" among Bearing parts) and continues
+// that sequence — rather than imposing a prefix of our own choosing. Only
+// falls back to a freshly-derived prefix if the category has no parts yet.
+function nextPartCode(category,parts){
+  const key=(category||'').trim().toLowerCase();
+  const sameCategory=parts.filter(p=>p.part_code&&(p.category||'').trim().toLowerCase()===key);
+
+  let prefix=null;
+  if(sameCategory.length){
+    const counts={};
+    for(const p of sameCategory){
+      const m=p.part_code.match(/^([A-Za-z]+)-(\d+)$/);
+      if(m) counts[m[1].toUpperCase()]=(counts[m[1].toUpperCase()]||0)+1;
+    }
+    const ranked=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+    if(ranked.length) prefix=ranked[0][0]; // most common existing prefix in this category
+  }
+  if(!prefix) prefix=derivePartCodePrefix(category);
+
+  let max=0,width=3;
+  for(const p of parts){
+    if(!p.part_code) continue;
+    const m=p.part_code.match(new RegExp('^'+prefix+'-(\\d+)$','i'));
+    if(m){ max=Math.max(max,parseInt(m[1],10)); width=Math.max(width,m[1].length); }
+  }
+  return prefix+'-'+String(max+1).padStart(width,'0');
+}
+
 function PartsAndScannerTab({canManage}){
   const [parts,setParts]=useState([]);
   const [categories,setCategories]=useState([]);
@@ -2508,6 +2546,7 @@ function PartsAndScannerTab({canManage}){
   };
   const [form,setForm]=useState(emptyForm);
   const [formPhoto,setFormPhoto]=useState(''); // base64 data URL for the Add/Edit Part modal
+  const [codeManual,setCodeManual]=useState(false); // true once user hand-edits the auto-generated part code
   const formPhotoFileRef=useRef(null);
 
   async function load(){
@@ -2803,7 +2842,7 @@ function PartsAndScannerTab({canManage}){
                 const qs=(catFilter?'?category='+encodeURIComponent(catFilter):'')+(lowOnly?(catFilter?'&':'?')+'low_stock=true':'');
                 downloadFile('/inventory/export/excel'+qs,'Inventory.xlsx');
               }}>📊 Export Excel</button>
-            <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setFormPhoto('');setModal(true);}}>
+            <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setFormPhoto('');setCodeManual(false);setModal(true);}}>
               + Add Part
             </button>
           </>}
@@ -2937,10 +2976,22 @@ function PartsAndScannerTab({canManage}){
 
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">No (Part Code) *</label>
-                <input className="inp" disabled={!!editPart} value={form.part_code} onChange={e=>setForm({...form,part_code:e.target.value})}/>
+                <input className="inp" disabled={!!editPart} value={form.part_code}
+                  onChange={e=>{setCodeManual(true);setForm({...form,part_code:e.target.value});}}
+                  placeholder={editPart?'':'Pick a category to auto-generate…'}/>
+                {!editPart&&<div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Auto-generated from category — edit if you need a different code</div>}
               </div>
               <div><label className="lbl">Category</label>
-                <input className="inp" list="cat-options" value={form.category} onChange={e=>setForm({...form,category:e.target.value})} placeholder="Type or select…"/>
+                <input className="inp" list="cat-options" value={form.category} onChange={e=>{
+                  const cat=e.target.value;
+                  setForm(f=>{
+                    const nf={...f,category:cat};
+                    if(!editPart&&!codeManual){
+                      nf.part_code=cat?nextPartCode(cat,parts):'';
+                    }
+                    return nf;
+                  });
+                }} placeholder="Type or select…"/>
                 <datalist id="cat-options">{categories.map(c=><option key={c} value={c}/>)}</datalist>
               </div>
             </div>

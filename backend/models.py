@@ -113,6 +113,15 @@ class WorkOrder(Base):
     actual_hours: Mapped[float | None] = mapped_column(Float)
     affected_downtime: Mapped[bool] = mapped_column(Boolean, default=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Downtime-pause tracking for the "on_hold" status — while a work order
+    # is on hold, elapsed time shouldn't count against its downtime. When it
+    # goes on hold, hold_started_at records when; when it leaves on_hold
+    # (back to in_progress/open, or completed), the working hours spent in
+    # that hold window get added to held_hours and hold_started_at is
+    # cleared. Downtime is then computed as
+    # working_hours_between(created_at, end) - held_hours.
+    hold_started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    held_hours: Mapped[float] = mapped_column(Float, default=0.0)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

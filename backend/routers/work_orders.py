@@ -16,6 +16,7 @@ from db import get_db
 from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, UserRole, Asset, TaskAssignment, TaskStatus
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
+from routers.analysis import working_hours_between
 
 router = APIRouter(prefix="/work-orders", tags=["work_orders"])
 ROOM = "work_orders"
@@ -43,6 +44,9 @@ class AssignRequest(BaseModel):
     priority: Optional[str] = None
     due_date: Optional[str] = None
     notes:    Optional[str] = None
+
+class HoldRequest(BaseModel):
+    reason: str
 
 class WOCreate(BaseModel):
     asset_id:         str
@@ -99,6 +103,8 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "actual_hours": wo.actual_hours,
         "estimated_hours": wo.estimated_hours,
         "affected_downtime": bool(getattr(wo, "affected_downtime", True)),
+        "hold_started_at": wo.hold_started_at.isoformat() if getattr(wo, "hold_started_at", None) else None,
+        "held_hours":   getattr(wo, "held_hours", 0.0) or 0.0,
         "due_date":     wo.due_date.isoformat()     if wo.due_date     else None,
         "created_at":   wo.created_at.isoformat()   if wo.created_at   else None,
         "updated_at":   wo.updated_at.isoformat()   if wo.updated_at   else None,
@@ -144,6 +150,28 @@ async def _get_wo(wo_id: UUID, db: AsyncSession) -> WorkOrder:
 
 def _wo_number(seq: int) -> str:
     return f"WO-{datetime.utcnow().strftime('%Y%m')}-{seq:04d}"
+
+
+def _apply_hold_transition(wo: WorkOrder, new_status: WorkOrderStatus) -> None:
+    """
+    Keeps hold_started_at / held_hours in sync whenever a work order's
+    status is about to change. Call this BEFORE assigning wo.status.
+
+    - Entering on_hold (from anything else): stamp hold_started_at = now,
+      so downtime stops accumulating from this point.
+    - Leaving on_hold (to anything else): fold the working hours spent in
+      that hold window into held_hours and clear hold_started_at, so
+      downtime resumes counting from where it left off.
+    """
+    now = datetime.utcnow()
+    was_on_hold = wo.status == WorkOrderStatus.on_hold
+    going_on_hold = new_status == WorkOrderStatus.on_hold
+
+    if going_on_hold and not was_on_hold:
+        wo.hold_started_at = now
+    elif was_on_hold and not going_on_hold and wo.hold_started_at:
+        wo.held_hours = (wo.held_hours or 0.0) + working_hours_between(wo.hold_started_at, now)
+        wo.hold_started_at = None
 
 
 # ── CRUD ───────────────────────────────────────────────────────────────────
@@ -236,7 +264,9 @@ async def update_work_order(
     if wo.is_deleted:
         raise HTTPException(400, "This work order has been deleted — restore it first")
     if body.status:
-        wo.status = WorkOrderStatus(body.status)
+        new_status = WorkOrderStatus(body.status)
+        _apply_hold_transition(wo, new_status)
+        wo.status = new_status
         if body.status == "completed" and not wo.completed_at:
             wo.completed_at = datetime.utcnow()
     if body.priority:
@@ -350,6 +380,7 @@ async def assign_to_technician(
             notes=body.notes,
         ))
 
+    _apply_hold_transition(wo, WorkOrderStatus.in_progress)
     wo.status = WorkOrderStatus.in_progress
     wo.updated_at = datetime.utcnow()
     if body.priority:
@@ -375,6 +406,76 @@ async def assign_to_technician(
     return _wo_dict(await _get_wo(wo_id, db))
 
 
+# ── Hold / resume ───────────────────────────────────────────────────────────
+
+@router.post("/{wo_id}/hold")
+async def hold_work_order(
+    wo_id: UUID, body: HoldRequest,
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(forbid_viewer),
+):
+    """
+    Puts a work order on hold with a required remark explaining why —
+    e.g. waiting on a spare part, waiting on production to stop the line,
+    escalated to a vendor. The remark is recorded in the description's
+    audit trail, and the downtime clock freezes until the WO is resumed
+    or completed (see _apply_hold_transition).
+    """
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(400, "Please provide a reason for the hold")
+
+    wo = await _get_wo(wo_id, db)
+    if wo.is_deleted:
+        raise HTTPException(400, "This work order has been deleted — restore it first")
+    if wo.status == WorkOrderStatus.completed:
+        raise HTTPException(400, "Cannot put a completed work order on hold")
+    if wo.status == WorkOrderStatus.on_hold:
+        raise HTTPException(400, "Work order is already on hold")
+
+    reason = body.reason.strip()
+    _apply_hold_transition(wo, WorkOrderStatus.on_hold)
+    wo.status     = WorkOrderStatus.on_hold
+    wo.updated_at = datetime.utcnow()
+    wo.description = (wo.description or "") + (
+        f"\n[ON HOLD — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"Held by      : {current_user.name}\n"
+        f"Reason       : {reason}\n"
+    )
+
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "work_order.on_hold", {
+        "id": str(wo.id), "wo_number": wo.wo_number,
+        "held_by": current_user.name, "reason": reason,
+    })
+    return _wo_dict(await _get_wo(wo_id, db))
+
+
+@router.post("/{wo_id}/resume")
+async def resume_work_order(
+    wo_id: UUID,
+    db: AsyncSession = Depends(get_db), current_user: User = Depends(forbid_viewer),
+):
+    """Takes a work order off hold, back to in_progress, resuming the downtime clock."""
+    wo = await _get_wo(wo_id, db)
+    if wo.is_deleted:
+        raise HTTPException(400, "This work order has been deleted — restore it first")
+    if wo.status != WorkOrderStatus.on_hold:
+        raise HTTPException(400, "Work order is not on hold")
+
+    _apply_hold_transition(wo, WorkOrderStatus.in_progress)
+    wo.status     = WorkOrderStatus.in_progress
+    wo.updated_at = datetime.utcnow()
+    wo.description = (wo.description or "") + (
+        f"\n[RESUMED — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"Resumed by   : {current_user.name}\n"
+    )
+
+    await db.flush()
+    await ws_manager.broadcast_event(ROOM, "work_order.resumed", {
+        "id": str(wo.id), "wo_number": wo.wo_number, "resumed_by": current_user.name,
+    })
+    return _wo_dict(await _get_wo(wo_id, db))
+
+
 # ── Completion form ────────────────────────────────────────────────────────
 
 @router.post("/{wo_id}/complete")
@@ -389,6 +490,7 @@ async def complete_work_order(
     if wo.status == WorkOrderStatus.completed:
         raise HTTPException(400, "Work order already completed")
 
+    _apply_hold_transition(wo, WorkOrderStatus.completed)
     wo.status       = WorkOrderStatus.completed
     wo.completed_at = datetime.utcnow()
     wo.actual_hours = body.actual_hours

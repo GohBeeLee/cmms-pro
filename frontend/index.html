@@ -401,13 +401,21 @@ function workingMsBetween(start, end) {
   return total;
 }
 
-function calcDowntime(from, to){
+// heldHours: accumulated working-hours already spent on_hold (excluded from
+// downtime). holdStartedAt: if the work order is CURRENTLY on_hold, pass its
+// hold_started_at so the clock freezes there instead of ticking to "now".
+function calcDowntime(from, to, heldHours = 0, holdStartedAt = null){
   if (!from) return {hours: 0, display: '—'};
   const start = toUTC(from);
-  const end   = to ? toUTC(to) : new Date();   // new Date() is always correct local=UTC
-  const ms    = workingMsBetween(start, end);
+  // If currently on hold and no fixed `to` was given (i.e. this is a live,
+  // still-open counter), freeze the end of the window at the moment the
+  // hold began instead of letting it run to "now".
+  const end = to ? toUTC(to) : (holdStartedAt ? toUTC(holdStartedAt) : new Date());
+  const ms       = workingMsBetween(start, end);
+  const heldMs   = Math.max(heldHours, 0) * 3600000;
+  const netMs    = Math.max(ms - heldMs, 0);
   if (end - start < 0) return {hours: 0, display: '0h 0m'};
-  const totalMins = Math.floor(ms / 60000);
+  const totalMins = Math.floor(netMs / 60000);
   const h = Math.floor(totalMins / 60);
   const m = totalMins % 60;
   return {hours: parseFloat((totalMins/60).toFixed(2)), display: `${h}h ${m}m`};
@@ -728,6 +736,10 @@ function MaintenanceAlertBoard(){
   const [assignNotes,setAssignNotes]=useState('');
   const [assignTechIds,setAssignTechIds]=useState([]); // multi-select
   const [assigning,setAssigning]=useState(false);
+  const [holding,setHolding]=useState(null);       // wo currently being put on hold
+  const [holdReason,setHoldReason]=useState('');
+  const [holdSubmitting,setHoldSubmitting]=useState(false);
+  const [resumingId,setResumingId]=useState(null);
   const [soundEnabled,setSoundEnabled]=useState(false);
   const soundEnabledRef=useRef(false);
   const [now,setNow]=useState(Date.now());
@@ -832,6 +844,36 @@ function MaintenanceAlertBoard(){
     finally{setAssigning(false);}
   }
 
+  // ── Hold / resume ──
+  function openHold(wo){ setHolding(wo); setHoldReason(''); }
+  async function submitHold(){
+    if(!holding) return;
+    if(!holdReason.trim()){toast('Please write a remark for why this is on hold','err');return;}
+    setHoldSubmitting(true);
+    try{
+      await api('/work-orders/'+holding.id+'/hold',{method:'POST',body:JSON.stringify({reason:holdReason.trim()})});
+      toast(holding.wo_number+' put on hold'); setHolding(null); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setHoldSubmitting(false);}
+  }
+  async function resumeWo(wo){
+    setResumingId(wo.id);
+    try{
+      await api('/work-orders/'+wo.id+'/resume',{method:'POST'});
+      toast(wo.wo_number+' resumed'); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setResumingId(null);}
+  }
+  // Pulls the remark from the most recent "[ON HOLD ...]" block in the
+  // description, so the reason shows up on the card without a separate column.
+  function lastHoldReason(desc){
+    if(!desc) return null;
+    const blocks=desc.split('[ON HOLD').slice(1);
+    if(blocks.length===0) return null;
+    const m=blocks[blocks.length-1].match(/Reason\s*:\s*([^\n]+)/);
+    return m?m[1].trim():null;
+  }
+
   // ── Admin-assigned maintenance task ──
   // Created directly by admin/manager (no production request behind it).
   // affected_downtime is forced false: this is planned work, not a machine
@@ -893,8 +935,10 @@ function MaintenanceAlertBoard(){
       {wos.map(w=>{
         const assignedList=getAssignedList(w);
         const assignedLabel=assignedList.length===0?null:assignedList.length===1?assignedList[0].name:assignedList[0].name+' +'+(assignedList.length-1)+' more';
-        const dt=calcDowntime(w.created_at,null);const isIncoming=w.status==='open';const isCritical=w.priority==='critical';
+        const dt=calcDowntime(w.created_at,null,w.held_hours,w.status==='on_hold'?w.hold_started_at:null);const isIncoming=w.status==='open';const isCritical=w.priority==='critical';
         const isTask=w.affected_downtime===false;
+        const isOnHold=w.status==='on_hold';
+        const cardHoldReason=isOnHold?lastHoldReason(w.description):null;
         const displayTitle=(w.asset?.name||w.title||'').replace(/^\[TASK\]\s*/,'');
         const cardPhotos=extractPhotos(w);
         // Maintenance tasks (admin-assigned, not a production request) get a
@@ -909,19 +953,29 @@ function MaintenanceAlertBoard(){
           </div>
           {isTask
             ?<div style={{background:isCritical?'rgba(255,255,255,.08)':'#e0e7ff',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#4338ca',fontWeight:700}}>SCHEDULED TASK · NOT COUNTED AS DOWNTIME</div><div style={{fontSize:'22px',fontWeight:900,color:isCritical?'#fff':'#312e81',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#4f46e5',marginTop:'4px'}}>Assigned {fmtDT(w.created_at)}</div></div>
-            :<div style={{background:isCritical?'rgba(255,255,255,.08)':'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#64748b',fontWeight:700}}>RUNNING DOWNTIME</div><div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':'#b45309',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}</div></div>}
+            :<div style={{background:isOnHold?(isCritical?'rgba(255,255,255,.08)':'#fff7ed'):(isCritical?'rgba(255,255,255,.08)':'#f8fafc'),borderRadius:'10px',padding:'12px',marginBottom:'12px'}}>
+                <div style={{fontSize:'12px',color:isCritical?'#fecaca':isOnHold?'#9a3412':'#64748b',fontWeight:700}}>{isOnHold?'⏸ ON HOLD · DOWNTIME PAUSED':'RUNNING DOWNTIME'}</div>
+                <div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':isOnHold?'#c2410c':'#b45309',lineHeight:1.1}}>{dt.display}</div>
+                <div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}{w.held_hours>0&&<span> · Held: {w.held_hours.toFixed(1)}h so far</span>}</div>
+                {isOnHold&&cardHoldReason&&<div style={{fontSize:'12px',color:isCritical?'#fed7aa':'#9a3412',marginTop:'6px',fontStyle:'italic'}}>“{cardHoldReason}”</div>}
+              </div>}
           <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:'70px',overflow:'hidden',marginBottom:cardPhotos.length>0?'10px':'12px'}}>{(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title}</div>
-          {cardPhotos.length>0&&<div style={{display:'flex',gap:'6px',flexWrap:'wrap',marginBottom:'12px'}}>
-            {cardPhotos.map((src,i)=><img key={i} src={src} alt={'photo '+(i+1)} style={{width:'52px',height:'52px',objectFit:'cover',borderRadius:'8px',border:'1px solid '+(isCritical?'rgba(255,255,255,.3)':'#e2e8f0'),cursor:'pointer'}} onClick={()=>window.open(src,'_blank')}/>)}
+          {cardPhotos.length>0&&<div style={{marginBottom:'12px'}}>
+            <PhotoViewer photos={cardPhotos}/>
           </div>}
           {assignedList.length>0&&<div style={{display:'flex',flexWrap:'wrap',gap:'4px',marginBottom:'10px'}}>
             {assignedList.map((u,i)=><span key={u.id||i} style={{background:isCritical?'rgba(255,255,255,.15)':'#ede9fe',color:isCritical?'#fff':'#5b21b6',padding:'2px 9px',borderRadius:'999px',fontSize:'11px',fontWeight:700}}>👷 {u.name}</span>)}
           </div>}
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
             <div style={{fontSize:'12px',fontWeight:700,color:isCritical?'#fecaca':assignedLabel?'#5b21b6':'#dc2626'}}>{assignedLabel?'Assigned: '+assignedLabel:'Unassigned'}</div>
             {isViewer
               ?null
-              :<button className="btn btn-primary" onClick={()=>openAssign(w)}>{assignedLabel?'Reassign':'Assign'}</button>}
+              :<div style={{display:'flex',gap:'6px'}}>
+                {!isTask&&(isOnHold
+                  ?<button className="btn btn-secondary" disabled={resumingId===w.id} onClick={()=>resumeWo(w)}>{resumingId===w.id?'Resuming…':'▶ Resume'}</button>
+                  :w.status!=='open'&&<button className="btn btn-secondary" onClick={()=>openHold(w)}>⏸ Hold</button>)}
+                <button className="btn btn-primary" onClick={()=>openAssign(w)}>{assignedLabel?'Reassign':'Assign'}</button>
+              </div>}
           </div>
         </div>
       );})}
@@ -932,7 +986,7 @@ function MaintenanceAlertBoard(){
         <div className="section-title">Work Order</div>
         <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',lineHeight:1.7}}>
           <div style={{fontWeight:800,fontSize:'16px',color:'#1e293b'}}>{selected.asset?.name||selected.title}</div>
-          <div><strong>Downtime:</strong> {calcDowntime(selected.created_at,null).display}</div>
+          <div><strong>Downtime:</strong> {calcDowntime(selected.created_at,null,selected.held_hours,selected.status==='on_hold'?selected.hold_started_at:null).display}</div>
           <div><strong>Priority:</strong> <Badge value={selected.priority}/></div>
           <div><strong>Status:</strong> <Badge value={selected.status}/></div>
           <div style={{whiteSpace:'pre-line',marginTop:'8px'}}>{stripPhotoTags(selected.description)||'No description'}</div>
@@ -975,6 +1029,18 @@ function MaintenanceAlertBoard(){
         </div>
       </div>
     </div></Modal>}
+
+    {holding&&<Modal title={'Put On Hold: '+holding.wo_number} onClose={()=>!holdSubmitting&&setHolding(null)}>
+      <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'14px'}}>Downtime stops counting while this work order is on hold. Write a short remark so others know why — e.g. waiting on a spare part, waiting for production to stop the line, escalated to a vendor.</p>
+      <div>
+        <label className="lbl">Remark <span style={{color:'#dc2626'}}>*</span></label>
+        <textarea className="inp" rows={4} autoFocus placeholder="Why is this work order on hold?" value={holdReason} onChange={e=>setHoldReason(e.target.value)}/>
+      </div>
+      <div style={{display:'flex',gap:'10px',marginTop:'16px'}}>
+        <button className="btn btn-primary" style={{flex:1}} onClick={submitHold} disabled={holdSubmitting||!holdReason.trim()}>{holdSubmitting?'Saving...':'Confirm Hold'}</button>
+        <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setHolding(null)} disabled={holdSubmitting}>Cancel</button>
+      </div>
+    </Modal>}
 
     {taskModal&&<Modal title="Add Maintenance Task" onClose={closeTaskModal} large>
       <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'16px'}}>For scheduled/proactive work assigned directly by you — not a production breakdown request. This will <strong>not</strong> be counted in downtime reports.</p>
@@ -1166,6 +1232,10 @@ function TechnicianBoard(){
   const [parts,setParts]=useState([]);
   const [partsModal,setPartsModal]=useState(null);
   const [filterStatus,setFilterStatus]=useState('');
+  const [holding,setHolding]=useState(null);       // wo currently being put on hold
+  const [holdReason,setHoldReason]=useState('');
+  const [holdSubmitting,setHoldSubmitting]=useState(false);
+  const [resumingId,setResumingId]=useState(null);
 
   // Completion form state
   const [rootCause,setRootCause]=useState('');
@@ -1202,7 +1272,7 @@ function TechnicianBoard(){
   // Live downtime timer while completion modal is open
   useEffect(()=>{
     if (!completing) return;
-    function tick(){ setAutoDowntime(calcDowntime(completing.created_at, null)); }
+    function tick(){ setAutoDowntime(calcDowntime(completing.created_at, null, completing.held_hours, completing.status==='on_hold'?completing.hold_started_at:null)); }
     tick();
     timerRef.current = setInterval(tick, 60000);
     return ()=>clearInterval(timerRef.current);
@@ -1324,6 +1394,36 @@ function TechnicianBoard(){
 
   async function updateStatus(id,status){try{await api('/work-orders/'+id,{method:'PATCH',body:JSON.stringify({status})});load();}catch(e){toast(e.message,'err');}}
 
+  // ── Hold / resume ──
+  function openHold(wo){ setHolding(wo); setHoldReason(''); }
+  async function submitHold(){
+    if(!holding) return;
+    if(!holdReason.trim()){toast('Please write a remark for why this is on hold','err');return;}
+    setHoldSubmitting(true);
+    try{
+      await api('/work-orders/'+holding.id+'/hold',{method:'POST',body:JSON.stringify({reason:holdReason.trim()})});
+      toast(holding.wo_number+' put on hold'); setHolding(null); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setHoldSubmitting(false);}
+  }
+  async function resumeWo(wo){
+    setResumingId(wo.id);
+    try{
+      await api('/work-orders/'+wo.id+'/resume',{method:'POST'});
+      toast(wo.wo_number+' resumed'); load();
+    }catch(e){toast(e.message,'err');}
+    finally{setResumingId(null);}
+  }
+  // Pulls the remark from the most recent "[ON HOLD ...]" block in the
+  // description, so the reason shows up on the card without a separate column.
+  function lastHoldReason(desc){
+    if(!desc) return null;
+    const blocks=desc.split('[ON HOLD').slice(1);
+    if(blocks.length===0) return null;
+    const m=blocks[blocks.length-1].match(/Reason\s*:\s*([^\n]+)/);
+    return m?m[1].trim():null;
+  }
+
   function extractPhotos(wo){
     const desc=wo.description||'';
     const photos=[];
@@ -1356,7 +1456,9 @@ function TechnicianBoard(){
       {loading?<Spinner/>:wos.length===0?<Empty msg="No open work orders — great job! 🎉"/>:(
         <div>{wos.map(w=>{
           const photos=extractPhotos(w);
-          const dt=calcDowntime(w.created_at,null);
+          const dt=calcDowntime(w.created_at,null,w.held_hours,w.status==='on_hold'?w.hold_started_at:null);
+          const isOnHold=w.status==='on_hold';
+          const cardHoldReason=isOnHold?lastHoldReason(w.description):null;
           return (
             <div key={w.id} className="wo-card" style={{borderLeft:'4px solid '+(priorityBorder[w.priority]||'#e2e8f0'),background:priorityBg[w.priority]||'#fff'}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:'12px'}}>
@@ -1379,23 +1481,47 @@ function TechnicianBoard(){
                     </div>
                   )}
 
+                  {isOnHold&&<div style={{fontSize:'12px',color:'#9a3412',background:'#fff7ed',border:'1px solid #fed7aa',borderRadius:'6px',padding:'6px 10px',marginBottom:'8px'}}>
+                    ⏸ <strong>On hold</strong>{cardHoldReason&&<span> — “{cardHoldReason}”</span>}
+                  </div>}
+
                   <div style={{fontSize:'11px',color:'#94a3b8'}}>
                     Created: {fmtDT(w.created_at)}
                     {w.due_date&&<span style={{marginLeft:'12px',color:toUTC(w.due_date)<new Date()?'#dc2626':'#64748b'}}> · Due: {fmtDate(w.due_date)}</span>}
-                    <span style={{marginLeft:'12px',color:'#b45309',fontWeight:600}}>⏱ Waiting: {dt.display}</span>
+                    <span style={{marginLeft:'12px',color:isOnHold?'#9a3412':'#b45309',fontWeight:600}}>{isOnHold?'⏸ Paused: ':'⏱ Waiting: '}{dt.display}</span>
+                    {w.held_hours>0&&<span style={{marginLeft:'12px',color:'#94a3b8'}}>Held: {w.held_hours.toFixed(1)}h so far</span>}
                   </div>
                 </div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',minWidth:'130px'}}>
                   <button className="btn btn-success" style={{fontSize:'12px',padding:'7px 12px'}} onClick={()=>openComplete(w)}>✅ Complete Job</button>
                   <button className="btn btn-secondary" style={{fontSize:'12px',padding:'7px 12px'}} onClick={async()=>{setPartsModal(w);await loadParts(w.id);}}>🔩 Check Parts</button>
-                  <select className="inp" style={{fontSize:'12px',padding:'6px 8px'}} value={w.status} onChange={e=>updateStatus(w.id,e.target.value)}>
-                    {['open','in_progress','on_hold','cancelled'].map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
+                  {isOnHold
+                    ?<button className="btn btn-secondary" style={{fontSize:'12px',padding:'7px 12px'}} disabled={resumingId===w.id} onClick={()=>resumeWo(w)}>{resumingId===w.id?'Resuming…':'▶ Resume'}</button>
+                    :<button className="btn btn-secondary" style={{fontSize:'12px',padding:'7px 12px'}} onClick={()=>openHold(w)}>⏸ Put On Hold</button>}
+                  <select className="inp" style={{fontSize:'12px',padding:'6px 8px'}} value={isOnHold?'':w.status} onChange={e=>updateStatus(w.id,e.target.value)}>
+                    {isOnHold&&<option value="" disabled>Change status…</option>}
+                    {['open','in_progress','cancelled'].map(s=><option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
                   </select>
                 </div>
               </div>
             </div>
           );
         })}</div>
+      )}
+
+      {/* Hold-with-remark modal */}
+      {holding&&(
+        <Modal title={'Put On Hold: '+holding.wo_number} onClose={()=>!holdSubmitting&&setHolding(null)}>
+          <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'14px'}}>Downtime stops counting while this work order is on hold. Write a short remark so others know why — e.g. waiting on a spare part, waiting for production to stop the line, escalated to a vendor.</p>
+          <div>
+            <label className="lbl">Remark <span style={{color:'#dc2626'}}>*</span></label>
+            <textarea className="inp" rows={4} autoFocus placeholder="Why is this work order on hold?" value={holdReason} onChange={e=>setHoldReason(e.target.value)}/>
+          </div>
+          <div style={{display:'flex',gap:'10px',marginTop:'16px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={submitHold} disabled={holdSubmitting||!holdReason.trim()}>{holdSubmitting?'Saving...':'Confirm Hold'}</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setHolding(null)} disabled={holdSubmitting}>Cancel</button>
+          </div>
+        </Modal>
       )}
 
       {/* Parts availability modal */}
@@ -2078,7 +2204,7 @@ function HistoryLog(){
               const operator=parseField(w.description,'Submitted by');
               const category=parseField(w.description,'Category');
               const rootCause=parseField(w.description,'Root cause');
-              const actualHrs=w.actual_hours?w.actual_hours+'h':calcDowntime(w.created_at,w.completed_at).display;
+              const actualHrs=w.actual_hours?w.actual_hours+'h':calcDowntime(w.created_at,w.completed_at,w.held_hours).display;
               const photos=allPhotos(w);
               return (
                 <tr key={w.id} className={w.status==='completed'?'history-row-completed':w.status==='open'?'history-row-open':''}>
@@ -2126,7 +2252,7 @@ function HistoryLog(){
                 <div><strong>Downtime Type:</strong> <Badge value={selected.affected_downtime===false?'non_affected':'affected'}/></div>
                 <div><strong>Request Date:</strong> {fmtDT(selected.created_at)}</div>
                 <div><strong>Completed:</strong> {selected.completed_at?fmtDT(selected.completed_at):'Not completed'}</div>
-                <div><strong>Actual Hours:</strong> {selected.actual_hours?selected.actual_hours+'h':calcDowntime(selected.created_at,selected.completed_at).display}</div>
+                <div><strong>Actual Hours:</strong> {selected.actual_hours?selected.actual_hours+'h':calcDowntime(selected.created_at,selected.completed_at,selected.held_hours).display}</div>
               </div>
               <div className="section-title">Full Description</div>
               <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',color:'#374151',whiteSpace:'pre-line',lineHeight:1.7}}>

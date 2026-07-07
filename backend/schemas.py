@@ -124,6 +124,8 @@ class WorkOrderOut(BaseModel):
     estimated_hours: Optional[float]
     actual_hours: Optional[float]
     affected_downtime: bool
+    hold_started_at: Optional[datetime] = None
+    held_hours: float = 0.0
     completed_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime

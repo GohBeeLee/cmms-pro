@@ -73,6 +73,10 @@ async def ensure_schema_updates():
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN restored_at DATETIME"))
         if "restored_by" not in names:
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN restored_by VARCHAR(150)"))
+        if "hold_started_at" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN hold_started_at DATETIME"))
+        if "held_hours" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN held_hours FLOAT NOT NULL DEFAULT 0"))
         spare_columns = (await conn.execute(text("PRAGMA table_info(spare_parts)"))).mappings().all()
         spare_names = {col["name"] for col in spare_columns}
         if "barcode" not in spare_names:

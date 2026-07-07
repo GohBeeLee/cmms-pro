@@ -123,6 +123,7 @@ async def analyse_work_orders(
             WorkOrder.estimated_hours,
             WorkOrder.created_at,
             WorkOrder.completed_at,
+            WorkOrder.held_hours,
             WorkOrder.due_date,
             Asset.name.label("asset_name"),
             Asset.category.label("asset_category"),
@@ -166,7 +167,9 @@ async def analyse_work_orders(
         if r.actual_hours:
             downtime = r.actual_hours
         elif r.completed_at and r.created_at:
-            downtime = working_hours_between(r.created_at, r.completed_at)
+            # held_hours excludes time the work order spent on_hold, so a
+            # pause doesn't count against its downtime.
+            downtime = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
 
         # The technician selects a Root Cause (e.g. "Bearing", "Motor") from
         # a fixed list when completing the work order — it's embedded in the
@@ -353,6 +356,7 @@ async def analyse_by_machine_timeline(
             WorkOrder.affected_downtime,
             WorkOrder.created_at,
             WorkOrder.completed_at,
+            WorkOrder.held_hours,
             Asset.id.label("asset_id"),
             Asset.name.label("asset_name"),
         )
@@ -394,7 +398,7 @@ async def analyse_by_machine_timeline(
     for r in rows:
         downtime = r.actual_hours
         if downtime is None and r.completed_at and r.created_at:
-            downtime = working_hours_between(r.created_at, r.completed_at)
+            downtime = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
         if not downtime:
             continue
 
@@ -454,7 +458,7 @@ async def get_uptime(
         month_end = datetime(yr, mo + 1, 1)
 
     q = (
-        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at)
+        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at, WorkOrder.held_hours)
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
             WorkOrder.created_at >= month_start,
@@ -471,7 +475,7 @@ async def get_uptime(
     for r in rows:
         h = r.actual_hours
         if h is None and r.completed_at and r.created_at:
-            h = working_hours_between(r.created_at, r.completed_at)
+            h = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
         affected_downtime_hours += h or 0
 
     affected_downtime_hours = round(affected_downtime_hours, 2)

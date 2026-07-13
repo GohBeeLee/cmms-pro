@@ -97,8 +97,8 @@ async def ensure_schema_updates():
 
 
 DEFAULT_ADMIN_EMAIL    = "admin@cmms.com"
-DEFAULT_ADMIN_PASSWORD = "admin1234"
-DEFAULT_ADMIN_NAME     = "Administrator"
+DEFAULT_ADMIN_PASSWORD = "1234"
+DEFAULT_ADMIN_NAME     = "Admin"
 
 async def ensure_default_admin():
     """

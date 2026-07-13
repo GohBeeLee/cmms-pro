@@ -6,9 +6,16 @@ services:
     name: cmms-pro
     env: python
     region: malaysia
-    plan: free
+    # Persistent disks require a PAID instance type — Free does not
+    # support disks at all, which is why your data kept disappearing.
+    plan: starter
     buildCommand: pip install -r backend/requirements.txt
     startCommand: cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT
+    # Declares and mounts your persistent disk. One disk per service.
+    disk:
+      name: cmms-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: SECRET_KEY
         generateValue: true
@@ -16,3 +23,8 @@ services:
         value: production
       - key: FRONTEND_DIR
         value: ../frontend
+      # Must match `disk.mountPath` above exactly — this is what tells
+      # db.py to put cmms.db on the persistent disk instead of falling
+      # back to the ephemeral container filesystem.
+      - key: RENDER_DISK_PATH
+        value: /var/data

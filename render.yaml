@@ -14,7 +14,7 @@ services:
     # Declares and mounts your persistent disk. One disk per service.
     disk:
       name: cmms-data
-      mountPath: /var/data
+      mountPath: /var/data/cmms.db
       sizeGB: 1
     envVars:
       - key: SECRET_KEY

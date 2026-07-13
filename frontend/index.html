@@ -107,16 +107,16 @@ const { useState, useEffect, useRef, useMemo } = React;
 
 const ROOT_CAUSE_GROUPS = {
   "Mechanical": [
-    "Bearing","Chain","Belt","Fastener","Wear Parts",
-    "Universal Joint","Pneumatic","Alignment","Cutter Adjustment",
+    "Bearing - *jam/worn/noisy","Chain - *broken/loose/jam","Belt - *snapped/cracked/worn/slipped","Fastener - *bot/nut/screw loose/missing/broken","Wear Parts - *wear&tear items",
+    "Universal Joint - *coupling/pulley worn/damaged/loose","Pneumatic - *cylinder/solenoid valve/tubing leaking","Alignment - *out of position","Cutter Adjustment - *cutter position/change cutter",
   ],
   "Electrical": [
     "Motor","Sensor","PLC","Power Trip","Controller",
     "Control Panel","Wiring","Interference Signal",
   ],
   "Others": [
-    "CV Files","Setting","Hardware","Glue Pot","Software Bug",
-    "Operator Mistake","Material",
+    "CV Files","Setting","Hardware - *Computer/Servo Drive/Inverter","Glue Pot","Software Bug",
+    "Operator Mistake/No cleaning","Material",
   ],
 };
 // Flat list kept for any code that still expects a plain array (e.g. validation)

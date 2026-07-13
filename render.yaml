@@ -27,4 +27,4 @@ services:
       # db.py to put cmms.db on the persistent disk instead of falling
       # back to the ephemeral container filesystem.
       - key: RENDER_DISK_PATH
-        value: /var/data
+        value: /var/data/cmms.db

@@ -10,6 +10,7 @@ from models import PMSchedule, WorkOrder, WorkOrderType, Priority, User
 from schemas import PMScheduleCreate, PMScheduleUpdate, PMScheduleOut, WorkOrderOut
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
+from wo_numbering import insert_with_unique_wo_number
 
 router = APIRouter(prefix="/pm-schedules", tags=["pm_schedules"], dependencies=[Depends(forbid_viewer)])
 ROOM = "work_orders"
@@ -74,7 +75,17 @@ async def create_pm_schedule(
     pm = PMSchedule(**body.model_dump())
     db.add(pm)
     await db.flush()
-    await db.refresh(pm)
+
+    # PMScheduleOut includes the nested `asset` object, so it must be
+    # eager-loaded before returning — a bare db.refresh(pm) only reloads
+    # pm's own columns, not the relationship. Without this, serializing the
+    # response tries to lazy-load `asset` outside of an async-safe context
+    # and raises MissingGreenlet, which the frontend just sees as a failed
+    # request.
+    result = await db.execute(
+        select(PMSchedule).where(PMSchedule.id == pm.id).options(selectinload(PMSchedule.asset))
+    )
+    pm = result.scalar_one()
 
     await ws_manager.broadcast_event("pm_schedules", "pm.created", {
         "id": str(pm.id),
@@ -99,6 +110,13 @@ async def update_pm_schedule(
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(pm, field, value)
     await db.flush()
+
+    # Same eager-load requirement as create_pm_schedule — PMScheduleOut
+    # nests `asset`, so it must be loaded before the response is serialized.
+    result = await db.execute(
+        select(PMSchedule).where(PMSchedule.id == pm.id).options(selectinload(PMSchedule.asset))
+    )
+    pm = result.scalar_one()
     return pm
 
 
@@ -140,31 +158,47 @@ async def _generate_wo_from_pm(
     triggered_by: UUID | None = None,
 ) -> WorkOrder:
     """Core logic: create a WO from a PM schedule and advance next_due."""
-    from sqlalchemy import func as sqlfunc
-    count_result = await db.execute(
-        select(sqlfunc.count()).select_from(WorkOrder)
-    )
-    count = count_result.scalar() or 0
+    # Snapshot these now — if a wo_number collision forces a retry inside
+    # insert_with_unique_wo_number, the rollback would expire pm's
+    # attributes, and reading them again inside a re-invoked build()
+    # closure would trigger an async-unsafe lazy reload.
+    pm_asset_id = pm.asset_id
+    pm_title = pm.title
+    pm_description = pm.description
+    pm_estimated_hours = pm.estimated_hours
+    pm_next_due = pm.next_due
+    pm_interval_days = pm.interval_days
 
-    wo = WorkOrder(
-        wo_number=f"WO-{datetime.utcnow().strftime('%Y%m')}-{count + 1:04d}",
-        asset_id=pm.asset_id,
-        type=WorkOrderType.preventive,
-        priority=Priority.medium,
-        title=f"[PM] {pm.title}",
-        description=pm.description,
-        estimated_hours=pm.estimated_hours,
-        due_date=pm.next_due,
-        created_by=triggered_by,
-    )
-    db.add(wo)
+    async def build(wo_number: str) -> WorkOrder:
+        wo = WorkOrder(
+            wo_number=wo_number,
+            asset_id=pm_asset_id,
+            type=WorkOrderType.preventive,
+            priority=Priority.medium,
+            title=f"[PM] {pm_title}",
+            description=pm_description,
+            estimated_hours=pm_estimated_hours,
+            due_date=pm_next_due,
+            created_by=triggered_by,
+        )
+        db.add(wo)
+        return wo
+
+    wo = await insert_with_unique_wo_number(db, build, prefix="MT")
 
     # Advance schedule
     pm.last_triggered = datetime.utcnow()
-    pm.next_due = pm.next_due + timedelta(days=pm.interval_days)
+    pm.next_due = pm_next_due + timedelta(days=pm_interval_days)
 
     await db.flush()
-    await db.refresh(wo)
+
+    # WorkOrderOut nests `asset` — same issue as create_pm_schedule above:
+    # db.refresh(wo) only reloads wo's own columns, not the relationship,
+    # so it must be eager-loaded before the response model serializes it.
+    result = await db.execute(
+        select(WorkOrder).where(WorkOrder.id == wo.id).options(selectinload(WorkOrder.asset))
+    )
+    wo = result.scalar_one()
 
     await ws_manager.broadcast_event("work_orders", "work_order.created", {
         "id": str(wo.id),

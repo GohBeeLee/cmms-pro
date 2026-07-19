@@ -10,6 +10,7 @@ POST /data/import/assets           — upload Excel to bulk create/update assets
 
 import io
 import os
+import re
 import base64
 from datetime import datetime
 from typing import Optional
@@ -17,12 +18,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db import get_db
-from models import Asset, WorkOrder, WorkOrderStatus, AssetStatus, User
+from models import Asset, WorkOrder, WorkOrderStatus, WorkOrderType, Priority, AssetStatus, User, TaskAssignment
 from auth import get_current_user, forbid_viewer
 from routers.analysis import MY_TZ_OFFSET
 
@@ -345,6 +346,275 @@ async def import_assets(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WORK ORDER HISTORY IMPORT  POST /data/import/history
+# Accepts the SAME 16-column layout produced by GET /data/export/history.xlsx
+# ─────────────────────────────────────────────────────────────────────────────
+
+HISTORY_HEADERS = [
+    "WO Number", "Machine", "Asset Code", "Location", "Problem Category", "Problem Description",
+    "Type", "Priority", "Status", "Operator",
+    "Root Cause Analysis", "Action Taken", "Completed By",
+    "Request Time (MYT)", "Completed Time (MYT)",
+    "Downtime / Actual Hours", "Downtime Type",
+]
+
+
+def _parse_myt_datetime(raw):
+    """
+    Parses a "Request Time (MYT)" / "Completed Time (MYT)" cell back into a
+    naive UTC datetime for storage — the reverse of how export_history
+    writes those columns ((wo.created_at + MY_TZ_OFFSET).strftime(...)).
+    Accepts the export's own "07 Jul 2026 20:42" text, or a real datetime
+    value if Excel auto-converted the cell when the file was edited/saved.
+    Returns None for blank/unparseable cells.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        my_dt = raw
+    else:
+        text = str(raw).strip()
+        if not text or text == "—":
+            return None
+        my_dt = None
+        for fmt in ("%d %b %Y %H:%M", "%d %B %Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M"):
+            try:
+                my_dt = datetime.strptime(text, fmt)
+                break
+            except ValueError:
+                continue
+        if my_dt is None:
+            return None
+    return my_dt - MY_TZ_OFFSET
+
+
+@router.post("/import/history")
+async def import_history(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Bulk-imports historical work orders from an .xlsx file laid out exactly
+    like GET /data/export/history.xlsx — easiest way to build one is to
+    export your current history first (even with zero/few rows, to get the
+    header row), then fill in past records underneath it.
+
+    Rules:
+      - "WO Number" is used as the unique key. If it already exists in the
+        system, that row is SKIPPED (never overwritten) so re-uploading the
+        same file twice is always safe. Leave it blank to auto-generate one.
+      - "Asset Code" (preferred) or "Machine" (name, case-insensitive
+        fallback) must match an existing asset — rows that don't match are
+        skipped and reported, since silently creating placeholder assets
+        would pollute the Asset Registry. If multiple assets share the same
+        Machine name, "Location" is used to tell them apart; if it still
+        can't be narrowed to exactly one, the row is skipped with a note
+        asking for Asset Code or Location.
+      - "Type" / "Priority" / "Status" fall back to sensible defaults
+        (corrective / medium / open) if blank or not a recognised value,
+        rather than failing the whole row.
+      - The free-text fields (Problem Category/Description, Root Cause,
+        Action Taken, Operator, Completed By) are written into the
+        description using the same "[OPERATOR REQUEST]" / "[COMPLETION —
+        ...]" block format the rest of the app already uses, prefixed with
+        an "[IMPORTED HISTORICAL RECORD]" marker — so these rows show up
+        correctly everywhere (History Log, downtime reports, re-export)
+        exactly like normally-created work orders.
+    """
+    if not file.filename.lower().endswith(".xlsx"):
+        raise HTTPException(400, "Only .xlsx files are accepted. Please save your file as Excel Workbook (.xlsx).")
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed on server. Run: pip install openpyxl")
+
+    content = await file.read()
+    try:
+        wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception:
+        raise HTTPException(400, "Cannot open file — make sure it is a valid .xlsx Excel file.")
+
+    sheet_name = wb.sheetnames[0]
+    for name in wb.sheetnames:
+        if "history" in name.lower() or "work order" in name.lower() or "import" in name.lower():
+            sheet_name = name
+            break
+    ws = wb[sheet_name]
+
+    # Find the header row — look for "WO Number" in the first 10 rows
+    # (the export puts a title + subtitle above it, same as the asset template).
+    header_row_idx = None
+    for row in ws.iter_rows(min_row=1, max_row=10):
+        for cell in row:
+            if str(cell.value or "").strip().lower() == "wo number":
+                header_row_idx = cell.row
+                break
+        if header_row_idx:
+            break
+
+    if not header_row_idx:
+        raise HTTPException(
+            400,
+            "Cannot find a 'WO Number' header. Use the same layout as "
+            "'Export History' — download that first if you need a starting template."
+        )
+
+    col_map = {}
+    for cell in ws[header_row_idx]:
+        if cell.value:
+            col_map[str(cell.value).strip().lower()] = cell.column - 1
+
+    required = ["wo number", "machine", "type", "priority", "status"]
+    missing = [h for h in required if h not in col_map]
+    if missing:
+        raise HTTPException(400, f"Missing required columns: {', '.join(missing)}")
+
+    # Lookups for resolving assets and de-duping WO numbers
+    from collections import defaultdict
+    assets = (await db.execute(select(Asset))).scalars().all()
+    assets_by_code = {a.asset_code.strip().lower(): a for a in assets if a.asset_code}
+    assets_by_name = defaultdict(list)
+    for a in assets:
+        if a.name:
+            assets_by_name[a.name.strip().lower()].append(a)
+    existing_wo_numbers = {
+        wo_number for (wo_number,) in (await db.execute(select(WorkOrder.wo_number))).all()
+    }
+    next_seq = (await db.execute(select(func.count()).select_from(WorkOrder))).scalar() or 0
+
+    valid_types    = {t.value for t in WorkOrderType}
+    valid_priority = {p.value for p in Priority}
+    valid_status   = {s.value for s in WorkOrderStatus}
+
+    def gcol(row, key):
+        idx = col_map.get(key)
+        if idx is None or idx >= len(row):
+            return ""
+        v = row[idx]
+        return "" if v is None else str(v).strip()
+
+    inserted, skipped = 0, []
+
+    for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+        if all(v is None or str(v).strip() == "" for v in row):
+            continue
+
+        wo_number      = gcol(row, "wo number")
+        machine        = gcol(row, "machine")
+        asset_code     = gcol(row, "asset code")
+        location       = gcol(row, "location")
+        category       = gcol(row, "problem category")
+        problem        = gcol(row, "problem description")
+        type_raw       = gcol(row, "type").lower()
+        priority_raw   = gcol(row, "priority").lower()
+        status_raw     = gcol(row, "status").lower()
+        operator       = gcol(row, "operator")
+        root_cause     = gcol(row, "root cause analysis")
+        action_taken   = gcol(row, "action taken")
+        completed_by   = gcol(row, "completed by")
+        request_time   = gcol(row, "request time (myt)")
+        completed_time = gcol(row, "completed time (myt)")
+        actual_hours   = gcol(row, "downtime / actual hours")
+        downtime_type  = gcol(row, "downtime type").lower()
+
+        if wo_number and wo_number in existing_wo_numbers:
+            skipped.append({"wo_number": wo_number, "reason": "WO Number already exists — skipped"})
+            continue
+
+        # Resolve asset: asset code first (unambiguous), then machine name —
+        # using Location to disambiguate when multiple assets share a name.
+        asset = assets_by_code.get(asset_code.strip().lower()) if asset_code else None
+        if not asset and machine:
+            candidates = assets_by_name.get(machine.strip().lower(), [])
+            if len(candidates) == 1:
+                asset = candidates[0]
+            elif len(candidates) > 1 and location:
+                matches = [a for a in candidates if (a.location or "").strip().lower() == location.strip().lower()]
+                if len(matches) == 1:
+                    asset = matches[0]
+        if not asset:
+            candidates = assets_by_name.get(machine.strip().lower(), []) if machine else []
+            reason = (
+                f"Multiple assets named '{machine}' — add Asset Code or a matching Location to disambiguate"
+                if len(candidates) > 1
+                else f"No matching asset for Asset Code '{asset_code}' / Machine '{machine}'"
+            )
+            skipped.append({
+                "wo_number": wo_number or "(blank)",
+                "reason": reason,
+            })
+            continue
+
+        wo_type  = type_raw     if type_raw     in valid_types    else "corrective"
+        wo_pri   = priority_raw if priority_raw in valid_priority else "medium"
+        wo_stat  = status_raw   if status_raw   in valid_status   else "open"
+
+        created_dt   = _parse_myt_datetime(request_time)   or datetime.utcnow()
+        completed_dt = _parse_myt_datetime(completed_time)
+        if wo_stat == "completed" and not completed_dt:
+            completed_dt = created_dt
+
+        try:
+            actual_hours_val = float(actual_hours) if actual_hours not in ("", "—") else None
+        except ValueError:
+            actual_hours_val = None
+
+        if not wo_number:
+            next_seq += 1
+            wo_number = f"WO-{created_dt.strftime('%Y%m')}-{next_seq:04d}"
+
+        desc = "[IMPORTED HISTORICAL RECORD]\n"
+        if operator or category or problem:
+            desc += (
+                f"[OPERATOR REQUEST]\n"
+                f"Submitted by  : {operator or '—'}\n"
+                f"Category      : {category or '—'}\n"
+                f"Problem       : {problem or '—'}\n"
+            )
+        if root_cause or action_taken or completed_by or wo_stat == "completed":
+            stamp = (completed_dt + MY_TZ_OFFSET).strftime("%d %b %Y %H:%M") if completed_dt else "—"
+            desc += (
+                f"\n[COMPLETION — {stamp}]\n"
+                f"Completed by  : {completed_by or '—'}\n"
+                f"Root cause    : {root_cause or '—'}\n"
+                f"Actions taken : {action_taken or '—'}\n"
+            )
+            if actual_hours_val is not None:
+                desc += f"Actual hours  : {actual_hours_val}h\n"
+            desc += f"Downtime type : {'Non affected' if downtime_type.startswith('non') else 'Affected'}\n"
+
+        wo = WorkOrder(
+            wo_number         = wo_number,
+            asset_id          = asset.id,
+            type              = WorkOrderType(wo_type),
+            priority          = Priority(wo_pri),
+            status            = WorkOrderStatus(wo_stat),
+            title             = f"[Imported] {category or asset.name}",
+            description       = desc,
+            actual_hours      = actual_hours_val,
+            affected_downtime = not downtime_type.startswith("non"),
+            created_by        = current_user.id,
+            created_at        = created_dt,
+            completed_at      = completed_dt,
+        )
+        db.add(wo)
+        existing_wo_numbers.add(wo_number)
+        inserted += 1
+
+    await db.flush()
+
+    return {
+        "success":         True,
+        "inserted":        inserted,
+        "skipped":         len(skipped),
+        "skipped_details": skipped,
+        "message":         f"Import complete: {inserted} work order(s) inserted, {len(skipped)} skipped.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HISTORY EXPORT  GET /data/export/history.xlsx
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -365,7 +635,15 @@ async def export_history(
         raise HTTPException(500, "openpyxl not installed")
 
     # Query
-    q = select(WorkOrder).options(selectinload(WorkOrder.asset)).order_by(WorkOrder.created_at.desc())
+    q = (
+        select(WorkOrder)
+        .options(
+            selectinload(WorkOrder.asset),
+            selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
+        )
+        .where(WorkOrder.is_deleted == False)
+        .order_by(WorkOrder.created_at.desc())
+    )
     if status:
         q = q.where(WorkOrder.status == status)
     if date_from:
@@ -390,14 +668,14 @@ async def export_history(
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     # Title
-    ws.merge_cells("A1:P1")
+    ws.merge_cells("A1:Q1")
     ws["A1"] = "CMMS Pro — Work Order History Report"
     ws["A1"].font      = Font(name="Arial", bold=True, size=13, color="1E3A5F")
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws["A1"].fill      = PatternFill("solid", start_color="EBF3FB")
     ws.row_dimensions[1].height = 30
 
-    ws.merge_cells("A2:P2")
+    ws.merge_cells("A2:Q2")
     ws["A2"] = f"Generated: {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC   |   Total: {len(wos)} records"
     ws["A2"].font      = Font(name="Arial", italic=True, size=10, color="5A6A7A")
     ws["A2"].alignment = Alignment(horizontal="center")
@@ -406,7 +684,7 @@ async def export_history(
     ws.row_dimensions[3].height = 6  # spacer
 
     headers = [
-        "WO Number","Machine","Asset Code","Problem Category","Problem Description",
+        "WO Number","Machine","Asset Code","Location","Problem Category","Problem Description",
         "Type","Priority","Status","Operator",
         "Root Cause Analysis","Action Taken","Completed By",
         "Request Time (MYT)","Completed Time (MYT)",
@@ -444,6 +722,29 @@ async def export_history(
             return round((datetime.utcnow() - wo.created_at).total_seconds() / 3600, 2)
         return ""
 
+    def assigned_technicians(wo):
+        """All technicians who worked this job — not just whichever one
+        happened to click "Complete". Prefers the TaskAssignment rows (the
+        normal assign flow always writes these); falls back to parsing the
+        "Assigned to" line in the description for older/imported records
+        that predate — or bypassed — that flow, mirroring what the app's
+        own UI already does when displaying assignees on a work order card."""
+        names = []
+        for a in sorted(wo.assignments or [], key=lambda a: a.assigned_at or datetime.min):
+            name = a.user.name if a.user else None
+            if name and name not in names:
+                names.append(name)
+        if names:
+            return ", ".join(names)
+        m = re.search(r"Assigned to\s*:\s*([^\n]+)", wo.description or "")
+        if not m:
+            return ""
+        for part in m.group(1).split(","):
+            name = re.sub(r"\s*\([^)]*\)", "", part).strip()
+            if name and name not in names:
+                names.append(name)
+        return ", ".join(names)
+
     data_font = Font(name="Arial", size=10)
 
     for r, wo in enumerate(wos, 5):
@@ -452,6 +753,7 @@ async def export_history(
             wo.wo_number,
             wo.asset.name        if wo.asset else "—",
             wo.asset.asset_code  if wo.asset else "—",
+            wo.asset.location    if wo.asset else "—",
             parse_field(wo.description, "Category") or "—",
             parse_field(wo.description, "Problem")  or "—",
             wo.type.value        if wo.type     else "—",
@@ -460,7 +762,7 @@ async def export_history(
             parse_field(wo.description, "Submitted by")  or "—",
             parse_field(wo.description, "Root cause")    or "—",
             parse_field(wo.description, "Actions taken") or "—",
-            parse_field(wo.description, "Completed by")  or "—",
+            assigned_technicians(wo) or parse_field(wo.description, "Completed by") or "—",
             (wo.created_at + MY_TZ_OFFSET).strftime("%d %b %Y %H:%M")   if wo.created_at   else "—",
             (wo.completed_at + MY_TZ_OFFSET).strftime("%d %b %Y %H:%M") if wo.completed_at else "—",
             downtime(wo),
@@ -469,11 +771,11 @@ async def export_history(
         for c, v in enumerate(row_data, 1):
             cell = ws.cell(row=r, column=c, value=v)
             cell.font = data_font; cell.fill = fill; cell.border = border
-            cell.alignment = Alignment(vertical="center", wrap_text=(c in (5, 10, 11)))
+            cell.alignment = Alignment(vertical="center", wrap_text=(c in (6, 11, 12)))
         ws.row_dimensions[r].height = 18
 
     # Column widths
-    for i, w in enumerate([16,22,14,18,34,12,12,14,18,22,30,18,18,18,18,14], 1):
+    for i, w in enumerate([16,22,14,20,18,34,12,12,14,18,22,30,18,18,18,18,14], 1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
     ws.freeze_panes = "A5"

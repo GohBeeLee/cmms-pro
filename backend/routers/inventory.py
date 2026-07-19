@@ -39,6 +39,24 @@ DEFAULT_CATEGORIES = [
     "Lubricants and Grease","Pneumatic Components","Pneumatic Fitting",
     "Sensor and Instrumentation",
 ]
+_CATEGORY_ORDER = {c: i for i, c in enumerate(DEFAULT_CATEGORIES)}
+
+
+def _category_sort_key(category: str):
+    # Known categories show in the same fixed sequence used everywhere else
+    # (dropdowns, filters); any custom category not in that list sorts
+    # alphabetically after all of them.
+    cat = category or "Other"
+    return (_CATEGORY_ORDER.get(cat, len(DEFAULT_CATEGORIES)), cat.lower())
+
+
+def _natural_sort_key(code: str):
+    # Numeric-aware ordering for part numbers like "E-2" vs "E-10" — a plain
+    # string sort would put "E-10" before "E-2"; this compares the numeric
+    # chunks as numbers so it reads smallest-to-largest the way people
+    # actually expect (E-1, E-2, ... E-10), regardless of zero-padding.
+    return [int(chunk) if chunk.isdigit() else chunk.lower()
+            for chunk in re.split(r"(\d+)", code or "")]
 
 
 # ── Schema ─────────────────────────────────────────────────────────────────
@@ -239,7 +257,17 @@ async def import_excel(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Import inventory from Excel. Accepts your existing format."""
+    """
+    Import inventory from Excel. Accepts BOTH:
+      - a single flat sheet with an explicit "category" column (the
+        original import template format), and
+      - the exact multi-sheet layout produced by /export/excel — one
+        sheet per category (category taken from the sheet name, since
+        those sheets have no category column), plus a "Summary" sheet
+        that's skipped automatically.
+    This means a file exported from CMMS Pro can be edited and
+    re-imported directly without reshaping it first.
+    """
     _require_admin_or_manager(current_user)
     if not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(400, "Only .xlsx files accepted")
@@ -253,20 +281,6 @@ async def import_excel(
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception:
         raise HTTPException(400, "Cannot open file — must be a valid .xlsx file")
-
-    ws = wb.worksheets[0]
-
-    # Find header row (contains "No" or "Part Item")
-    header_row = None
-    for row in ws.iter_rows(min_row=1, max_row=10):
-        vals = [str(c.value or "").strip().lower() for c in row]
-        if any(v in ("no","no *","part item","part item *","part_code") for v in vals):
-            header_row = row[0].row
-            break
-    if not header_row:
-        raise HTTPException(400,
-            "Cannot find header row. Make sure row 4 has columns: "
-            "No, Part Item, Quantity, Threshold.")
 
     # Column alias map
     aliases = {
@@ -285,25 +299,45 @@ async def import_excel(
         "status(enough/topup)":"_skip","status":"_skip",
         "supplier":"supplier","unit":"unit",
     }
-    col_map = {}
-    for cell in ws[header_row]:
-        if cell.value:
-            key = str(cell.value).strip().lower()
-            mapped = aliases.get(key)
-            if mapped and mapped != "_skip":
-                col_map[mapped] = cell.column - 1
 
-    missing = [r for r in ["part_code","name","quantity"] if r not in col_map]
-    if missing:
+    def find_header_row(ws):
+        for row in ws.iter_rows(min_row=1, max_row=10):
+            vals = [str(c.value or "").strip().lower() for c in row]
+            if any(v in ("no","no *","part item","part item *","part_code") for v in vals):
+                return row[0].row
+        return None
+
+    def build_col_map(ws, header_row):
+        col_map = {}
+        for cell in ws[header_row]:
+            if cell.value:
+                key = str(cell.value).strip().lower()
+                mapped = aliases.get(key)
+                if mapped and mapped != "_skip":
+                    col_map[mapped] = cell.column - 1
+        return col_map
+
+    # Which sheets actually contain part data — every sheet with a
+    # recognizable header row, except the export's own "Summary" sheet
+    # (which is category totals, not part rows).
+    data_sheets = []
+    for ws in wb.worksheets:
+        if ws.title.strip().lower() == "summary":
+            continue
+        header_row = find_header_row(ws)
+        if header_row is None:
+            continue
+        col_map = build_col_map(ws, header_row)
+        if "part_code" not in col_map or "name" not in col_map:
+            continue
+        data_sheets.append((ws, header_row, col_map))
+
+    if not data_sheets:
         raise HTTPException(400,
-            f"Missing columns: {', '.join(missing)}. "
-            f"Found: {list(col_map.keys())}")
+            "Cannot find a valid header row in any sheet. Make sure a header row has "
+            "columns: No, Part Item, Quantity, Threshold — like the exported file or the import template.")
 
     existing = {p.part_code: p for p in (await db.execute(select(SparePart))).scalars().all()}
-    # Default categories — admin/manager-managed, shown first in dropdowns.
-    # Any category found in the Excel file that ISN'T in this list is not
-    # discarded or forced into "Other" — it's kept exactly as written and
-    # simply becomes a new category going forward (see matching logic below).
     # Default categories — admin/manager-managed, shown first in dropdowns.
     # Any category found in the Excel file that ISN'T in this list is not
     # discarded or forced into "Other" — it's kept exactly as written and
@@ -312,96 +346,110 @@ async def import_excel(
 
     inserted, updated, skipped = 0, 0, []
 
-    def gcol(rv, key, default=""):
+    def gcol(rv, col_map, key, default=""):
         idx = col_map.get(key)
         if idx is None or idx >= len(rv): return default
         v = rv[idx]; return str(v).strip() if v is not None else default
 
-    def gnum(rv, key, default=None):
-        raw = gcol(rv, key, "")
+    def gnum(rv, col_map, key, default=None):
+        raw = gcol(rv, col_map, key, "")
         try: return float(raw) if raw else default
         except: return default
 
-    for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
-        if all(v is None or str(v).strip()=='' for v in rv): continue
+    for ws, header_row, col_map in data_sheets:
+        # Sheets from the exported layout have no "category" column at all —
+        # the sheet itself IS the category (matches export's one-sheet-per-
+        # category convention). Sheets from the flat import template DO have
+        # a "category" column, which takes priority per row when present.
+        sheet_category_fallback = ws.title.strip() if "category" not in col_map else None
 
-        raw_no = gcol(rv,"part_code")
-        name   = gcol(rv,"name")
-        if not raw_no:
-            skipped.append({"reason":"Missing part No"}); continue
-        if not name:
-            skipped.append({"part_code":raw_no,"reason":"Missing Part Item name"}); continue
+        for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
+            if all(v is None or str(v).strip()=='' for v in rv): continue
 
-        cat_raw  = gcol(rv,"category") or "Other"
-        category = cat_raw.strip()  # keep the imported category as-is by default
-        for vc in valid_cats:
-            # If it's a close/fuzzy match to one of the default categories,
-            # normalize it to that exact default spelling (so "bearings"
-            # and "Bearing" don't become two different categories).
-            if vc.lower()==category.lower() or vc.lower() in category.lower():
-                category=vc; break
-        # Anything that doesn't match a default category is kept exactly as
-        # typed in the spreadsheet — it simply becomes a new category that
-        # will show up everywhere (filters, dropdowns) going forward.
+            raw_no = gcol(rv,col_map,"part_code")
+            name   = gcol(rv,col_map,"name")
 
-        # Use the "No" column exactly as written in the spreadsheet as the
-        # part_code — no auto-generated category prefix, no rewriting.
-        # The person managing the spreadsheet is responsible for keeping
-        # "No" values unique; if the same "No" appears twice in this file,
-        # the second occurrence updates the part created by the first
-        # occurrence (standard upsert behavior), matching how re-importing
-        # the same file to update quantities is expected to work.
-        part_code = raw_no
+            # Skip the export's own TOTAL footer row silently — it's not a
+            # data-quality problem, it's just not a part row.
+            if raw_no.strip().upper() == "TOTAL":
+                continue
 
-        qty           = int(gnum(rv,"quantity",0) or 0)
-        uc_raw        = gnum(rv,"unit_cost")
-        unit_cost     = round(float(uc_raw),4) if uc_raw is not None else None
-        reorder_level = int(gnum(rv,"reorder_level",5) or 5)
-        description   = gcol(rv,"description")  or None
-        location      = gcol(rv,"location")     or None
-        used_on       = gcol(rv,"used_on")      or None
-        barcode       = gcol(rv,"barcode")      or None
-        supplier      = gcol(rv,"supplier")     or None
-        unit          = gcol(rv,"unit")         or "pcs"
+            if not raw_no:
+                skipped.append({"sheet":ws.title,"reason":"Missing part No"}); continue
+            if not name:
+                skipped.append({"sheet":ws.title,"part_code":raw_no,"reason":"Missing Part Item name"}); continue
 
-        if part_code in existing:
-            p = existing[part_code]
-            p.name             = name
-            p.category         = category
-            p.description      = description
-            p.quantity_on_hand = qty
-            p.reorder_level    = reorder_level
-            if unit_cost  is not None: p.unit_cost = unit_cost
-            if location:  p.location  = location
-            if supplier:  p.supplier  = supplier
-            p.unit = unit
-            _safe_set(p,"barcode",       barcode)
-            _safe_set(p,"used_on_asset", used_on)
-            p.updated_at = datetime.utcnow()
-            updated += 1
-        else:
-            p = SparePart(
-                part_code        = part_code,
-                name             = name,
-                category         = category,
-                description      = description,
-                quantity_on_hand = qty,
-                reorder_level    = reorder_level,
-                unit_cost        = unit_cost,
-                location         = location,
-                supplier         = supplier,
-                unit             = unit,
-            )
-            _safe_set(p,"barcode",       barcode)
-            _safe_set(p,"used_on_asset", used_on)
-            db.add(p)
-            existing[part_code] = p
-            inserted += 1
+            cat_raw  = gcol(rv,col_map,"category") or sheet_category_fallback or "Other"
+            category = cat_raw.strip()
+            for vc in valid_cats:
+                # If it's a close/fuzzy match to one of the default categories,
+                # normalize it to that exact default spelling (so "bearings"
+                # and "Bearing" don't become two different categories).
+                if vc.lower()==category.lower() or vc.lower() in category.lower():
+                    category=vc; break
+            # Anything that doesn't match a default category is kept exactly as
+            # typed (or as named on the sheet) — it simply becomes a new
+            # category that will show up everywhere (filters, dropdowns).
+
+            # Use the "No" column exactly as written in the spreadsheet as the
+            # part_code — no auto-generated category prefix, no rewriting.
+            # The person managing the spreadsheet is responsible for keeping
+            # "No" values unique; if the same "No" appears twice (even across
+            # different sheets), the later occurrence updates the part
+            # created by the first (standard upsert behavior), matching how
+            # re-importing an exported/edited file to update quantities works.
+            part_code = raw_no
+
+            qty           = int(gnum(rv,col_map,"quantity",0) or 0)
+            uc_raw        = gnum(rv,col_map,"unit_cost")
+            unit_cost     = round(float(uc_raw),4) if uc_raw is not None else None
+            reorder_level = int(gnum(rv,col_map,"reorder_level",5) or 5)
+            description   = gcol(rv,col_map,"description")  or None
+            location      = gcol(rv,col_map,"location")     or None
+            used_on       = gcol(rv,col_map,"used_on")      or None
+            barcode       = gcol(rv,col_map,"barcode")      or None
+            supplier      = gcol(rv,col_map,"supplier")     or None
+            unit          = gcol(rv,col_map,"unit")         or "pcs"
+
+            if part_code in existing:
+                p = existing[part_code]
+                p.name             = name
+                p.category         = category
+                p.description      = description
+                p.quantity_on_hand = qty
+                p.reorder_level    = reorder_level
+                if unit_cost  is not None: p.unit_cost = unit_cost
+                if location:  p.location  = location
+                if supplier:  p.supplier  = supplier
+                p.unit = unit
+                _safe_set(p,"barcode",       barcode)
+                _safe_set(p,"used_on_asset", used_on)
+                p.updated_at = datetime.utcnow()
+                updated += 1
+            else:
+                p = SparePart(
+                    part_code        = part_code,
+                    name             = name,
+                    category         = category,
+                    description      = description,
+                    quantity_on_hand = qty,
+                    reorder_level    = reorder_level,
+                    unit_cost        = unit_cost,
+                    location         = location,
+                    supplier         = supplier,
+                    unit             = unit,
+                )
+                _safe_set(p,"barcode",       barcode)
+                _safe_set(p,"used_on_asset", used_on)
+                db.add(p)
+                existing[part_code] = p
+                inserted += 1
 
     await db.flush()
     return {
         "success":True,"inserted":inserted,"updated":updated,
         "skipped":len(skipped),"skipped_details":skipped,
+        "sheets_processed":[ws.title for ws,_,_ in data_sheets],
         "message":f"Import complete: {inserted} added, {updated} updated, {len(skipped)} skipped.",
     }
 
@@ -675,9 +723,14 @@ async def list_parts(
     q = select(SparePart)
     if low_stock: q=q.where(SparePart.quantity_on_hand<=SparePart.reorder_level)
     if category:  q=q.where(SparePart.category==category)
-    q=q.offset(skip).limit(limit).order_by(SparePart.category,SparePart.name)
+    q=q.order_by(SparePart.category,SparePart.part_code).offset(skip).limit(limit)
     show_cost=_can_view_cost(current_user)
-    return [_dict(p,show_cost) for p in (await db.execute(q)).scalars().all()]
+    all_parts = (await db.execute(q)).scalars().all()
+    # Grouped by category (in the same fixed sequence used in dropdowns/
+    # filters), and within each category ordered by part number smallest to
+    # largest — see _category_sort_key / _natural_sort_key above.
+    all_parts = sorted(all_parts, key=lambda p: (_category_sort_key(p.category), _natural_sort_key(p.part_code)))
+    return [_dict(p,show_cost) for p in all_parts]
 
 
 @router.post("/", status_code=201)

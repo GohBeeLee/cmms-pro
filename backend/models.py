@@ -137,6 +137,28 @@ class WorkOrder(Base):
     asset: Mapped["Asset"] = relationship(back_populates="work_orders")
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="work_order")
     parts_used: Mapped[list["PartsUsed"]] = relationship(back_populates="work_order")
+    photos: Mapped[list["WorkOrderPhoto"]] = relationship(back_populates="work_order", cascade="all, delete-orphan")
+
+
+class WorkOrderPhoto(Base):
+    """
+    Photos attached to a work order — stored as compressed JPEG files on
+    disk (see photo_storage.py), not as base64 text in `description`.
+    Only thumb_path/full_path (short strings) are ever loaded into memory
+    by a normal query; the actual image bytes are streamed from disk
+    straight to the browser by the /photos static file route.
+    """
+    __tablename__ = "work_order_photos"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    work_order_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("work_orders.id"))
+    kind: Mapped[str] = mapped_column(String(20))  # 'operator' | 'completion'
+    filename: Mapped[str | None] = mapped_column(String(255))
+    thumb_path: Mapped[str] = mapped_column(String(255))
+    full_path: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    work_order: Mapped["WorkOrder"] = relationship(back_populates="photos")
 
 
 class PMSchedule(Base):

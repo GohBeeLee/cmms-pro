@@ -13,8 +13,10 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db import get_db
-from models import WorkOrder, WorkOrderType, WorkOrderStatus, Priority, Asset
+from models import WorkOrder, WorkOrderType, WorkOrderStatus, Priority, Asset, WorkOrderPhoto
 from websocket_manager import ws_manager
+from photo_storage import save_photo
+from wo_numbering import insert_with_unique_wo_number
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -124,9 +126,10 @@ async def submit_repair_request(
         "high": Priority.high, "critical": Priority.critical,
     }
     priority = priority_map.get(body.urgency.lower(), Priority.medium)
-
-    count = (await db.execute(select(func.count()).select_from(WorkOrder))).scalar() or 0
-    wo_number = f"WO-{datetime.utcnow().strftime('%Y%m')}-{count + 1:04d}"
+    asset_name = asset.name  # snapshot now — if a wo_number collision forces
+    # a retry below, the rollback would expire `asset`'s attributes, and
+    # reading asset.name again inside the (possibly re-invoked) build()
+    # closure would trigger an async-unsafe lazy reload.
 
     # Build description
     description = (
@@ -138,28 +141,38 @@ async def submit_repair_request(
     if body.remarks:
         description += f"Remarks       : {body.remarks}\n"
 
-    # Embed photos as base64 in description
-    if body.photos:
-        photo_block = _encode_photos(body.photos)
-        if photo_block:
-            description += f"\n[OPERATOR_PHOTOS]\n{photo_block}\n[/OPERATOR_PHOTOS]\n"
+    async def build(wo_number: str) -> WorkOrder:
+        wo = WorkOrder(
+            wo_number   = wo_number,
+            asset_id    = UUID(body.asset_id),
+            type        = WorkOrderType.corrective,
+            priority    = priority,
+            status      = WorkOrderStatus.open,
+            title       = f"[Request] {asset_name} — {body.problem_category}",
+            description = description,
+        )
+        db.add(wo)
+        return wo
 
-    wo = WorkOrder(
-        wo_number   = wo_number,
-        asset_id    = UUID(body.asset_id),
-        type        = WorkOrderType.corrective,
-        priority    = priority,
-        status      = WorkOrderStatus.open,
-        title       = f"[Request] {asset.name} — {body.problem_category}",
-        description = description,
-    )
-    db.add(wo)
-    await db.flush()
+    wo = await insert_with_unique_wo_number(db, build, prefix="WO")
     await db.refresh(wo)
+    wo_number = wo.wo_number
+
+    # Save operator photos to disk (compressed full + thumbnail) instead of
+    # embedding base64 in description — keeps every future list/analysis
+    # request that touches this work order tiny regardless of photo count.
+    for p in body.photos[:3]:
+        saved = save_photo(p.data, f"operator/{wo.id}")
+        if saved:
+            db.add(WorkOrderPhoto(
+                work_order_id=wo.id, kind="operator", filename=p.filename,
+                thumb_path=saved["thumb_path"], full_path=saved["full_path"],
+            ))
+    await db.flush()
 
     await ws_manager.broadcast_event("requests", "request.new", {
         "id": str(wo.id), "wo_number": wo_number,
-        "asset_name": asset.name, "operator": body.operator_name,
+        "asset_name": asset_name, "operator": body.operator_name,
         "category": body.problem_category, "urgency": body.urgency,
         "created_at": datetime.utcnow().isoformat(),
     })
@@ -172,5 +185,5 @@ async def submit_repair_request(
         success=True,
         message="Your repair request has been submitted. Our maintenance team will attend shortly.",
         wo_number=wo_number,
-        asset_name=asset.name,
+        asset_name=asset_name,
     )

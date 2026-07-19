@@ -7,6 +7,9 @@ venv/
 *.db
 *.sqlite3
 
+# Photos (persistent-disk storage — see backend/photo_storage.py)
+backend/photos/
+
 # Node
 node_modules/
 dist/

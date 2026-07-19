@@ -1,10 +1,11 @@
 """
-Work Orders Router — photos stored as base64 in description (no filesystem).
+Work Orders Router — photos stored as compressed JPEGs on the persistent
+disk (see photo_storage.py), referenced from work_order_photos rows.
 """
 import re
 import base64
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,10 +14,13 @@ from pydantic import BaseModel
 from typing import Optional
 
 from db import get_db
-from models import WorkOrder, PartsUsed, SparePart, User, WorkOrderStatus, UserRole, Asset, TaskAssignment, TaskStatus
+from models import WorkOrder, WorkOrderPhoto, PartsUsed, SparePart, User, WorkOrderStatus, UserRole, Asset, TaskAssignment, TaskStatus
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
 from routers.analysis import working_hours_between
+from routers.stock import _log_movement, _ensure_table as _ensure_stock_table
+from photo_storage import save_photo
+from wo_numbering import insert_with_unique_wo_number
 
 router = APIRouter(prefix="/work-orders", tags=["work_orders"])
 ROOM = "work_orders"
@@ -30,10 +34,13 @@ class PhotoEntry(BaseModel):
     size: int = 0
 
 class CompletionForm(BaseModel):
-    root_cause:        str
+    # root_cause and affected_downtime are omitted by the frontend when
+    # completing a maintenance TASK (planned work, affected_downtime already
+    # False) — those fields only apply to breakdown work orders.
+    root_cause:        Optional[str] = None
     actions_taken:     str
     actual_hours:      float
-    affected_downtime: bool = True
+    affected_downtime: Optional[bool] = None
     remarks:           Optional[str] = None
     parts_used:        list[dict] = []   # [{spare_part_id, quantity_used}]
     completion_photos: list[PhotoEntry] = []
@@ -114,6 +121,21 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "deleted_by":   getattr(wo, "deleted_by", None),
         "restored_at":  wo.restored_at.isoformat()  if getattr(wo, "restored_at", None)  else None,
         "restored_by":  getattr(wo, "restored_by", None),
+        # Only short URL strings here, never the image bytes themselves —
+        # this is what keeps list/analysis responses small regardless of
+        # how many photos a work order has. The browser fetches the actual
+        # thumbnail/full image bytes separately (and only when needed) via
+        # these /photos/... URLs, streamed straight from disk.
+        "photos": [
+            {
+                "id":        str(ph.id),
+                "kind":      ph.kind,
+                "filename":  ph.filename,
+                "thumb_url": f"/photos/{ph.thumb_path}",
+                "full_url":  f"/photos/{ph.full_path}",
+            }
+            for ph in (wo.photos or [])
+        ],
         "assigned_users": [
             {
                 "id": str(a.user.id),
@@ -140,6 +162,7 @@ async def _get_wo(wo_id: UUID, db: AsyncSession) -> WorkOrder:
         .options(
             selectinload(WorkOrder.asset),
             selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
+            selectinload(WorkOrder.photos),
         )
     )
     wo = result.scalar_one_or_none()
@@ -150,6 +173,17 @@ async def _get_wo(wo_id: UUID, db: AsyncSession) -> WorkOrder:
 
 def _wo_number(seq: int) -> str:
     return f"WO-{datetime.utcnow().strftime('%Y%m')}-{seq:04d}"
+
+
+# All datetime columns (created_at, completed_at, deleted_at, etc.) stay in
+# UTC in the database — the frontend converts those to the browser's local
+# time when displaying them. But the timestamps stamped directly into the
+# free-text description (e.g. "[COMPLETION — 15 Jul 2026 14:30]") are plain
+# strings, not real datetimes, so nothing converts them client-side. This
+# formats "now" in Malaysia time (UTC+8, no DST) for those description
+# stamps specifically, so they read correctly wherever they're displayed.
+def _my_now_str(fmt: str = "%d %b %Y %H:%M") -> str:
+    return (datetime.utcnow() + timedelta(hours=8)).strftime(fmt)
 
 
 def _apply_hold_transition(wo: WorkOrder, new_status: WorkOrderStatus) -> None:
@@ -190,6 +224,7 @@ async def list_work_orders(
     q = select(WorkOrder).options(
         selectinload(WorkOrder.asset),
         selectinload(WorkOrder.assignments).selectinload(TaskAssignment.user),
+        selectinload(WorkOrder.photos),
     )
     # Soft-deleted work orders are hidden everywhere by default. Only admins
     # can see the "Deleted Work Orders" trash view (deleted_only=True) —
@@ -229,23 +264,30 @@ async def create_work_order(
     current_user: User = Depends(forbid_viewer),
 ):
     from models import WorkOrderType, Priority
-    count = (await db.execute(select(func.count()).select_from(WorkOrder))).scalar() or 0
-    wo = WorkOrder(
-        wo_number       = _wo_number(count + 1),
-        asset_id        = UUID(body.asset_id),
-        type            = WorkOrderType(body.type),
-        priority        = Priority(body.priority),
-        status          = WorkOrderStatus.open,
-        title           = body.title,
-        description     = body.description,
-        estimated_hours = body.estimated_hours,
-        affected_downtime = body.affected_downtime,
-        created_by      = current_user.id,
-    )
-    if body.due_date:
-        wo.due_date = datetime.fromisoformat(body.due_date.replace("Z",""))
-    db.add(wo)
-    await db.flush()
+    created_by_id = current_user.id  # snapshot now — a wo_number collision
+    # retry (see wo_numbering.py) rolls back and would expire current_user,
+    # so reading current_user.id again inside a re-invoked build() closure
+    # would trigger an async-unsafe lazy reload.
+
+    async def build(wo_number: str) -> WorkOrder:
+        wo = WorkOrder(
+            wo_number       = wo_number,
+            asset_id        = UUID(body.asset_id),
+            type            = WorkOrderType(body.type),
+            priority        = Priority(body.priority),
+            status          = WorkOrderStatus.open,
+            title           = body.title,
+            description     = body.description,
+            estimated_hours = body.estimated_hours,
+            affected_downtime = body.affected_downtime,
+            created_by      = created_by_id,
+        )
+        if body.due_date:
+            wo.due_date = datetime.fromisoformat(body.due_date.replace("Z",""))
+        db.add(wo)
+        return wo
+
+    wo = await insert_with_unique_wo_number(db, build, prefix="MT" if body.type=="preventive" else "WO")
     await db.refresh(wo)
     await ws_manager.broadcast_event(ROOM, "work_order.created", {
         "id": str(wo.id), "wo_number": wo.wo_number, "title": wo.title,
@@ -390,7 +432,7 @@ async def assign_to_technician(
 
     tech_names = ", ".join(f"{t.name} ({t.email})" for t in techs)
     note = (
-        f"\n[ASSIGNED — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"\n[ASSIGNED — {_my_now_str()}]\n"
         f"Assigned to   : {tech_names}\n"
     )
     if body.notes:
@@ -436,7 +478,7 @@ async def hold_work_order(
     wo.status     = WorkOrderStatus.on_hold
     wo.updated_at = datetime.utcnow()
     wo.description = (wo.description or "") + (
-        f"\n[ON HOLD — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"\n[ON HOLD — {_my_now_str()}]\n"
         f"Held by      : {current_user.name}\n"
         f"Reason       : {reason}\n"
     )
@@ -465,7 +507,7 @@ async def resume_work_order(
     wo.status     = WorkOrderStatus.in_progress
     wo.updated_at = datetime.utcnow()
     wo.description = (wo.description or "") + (
-        f"\n[RESUMED — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"\n[RESUMED — {_my_now_str()}]\n"
         f"Resumed by   : {current_user.name}\n"
     )
 
@@ -490,31 +532,51 @@ async def complete_work_order(
     if wo.status == WorkOrderStatus.completed:
         raise HTTPException(400, "Work order already completed")
 
+    # A maintenance task is planned work (no production breakdown behind
+    # it) — it never asks for a root cause or downtime type, so don't
+    # require them here either. Real work orders still must supply both.
+    is_task = wo.affected_downtime is False
+    if not is_task and not body.root_cause:
+        raise HTTPException(400, "Root cause is required to complete a work order")
+
     _apply_hold_transition(wo, WorkOrderStatus.completed)
     wo.status       = WorkOrderStatus.completed
     wo.completed_at = datetime.utcnow()
     wo.actual_hours = body.actual_hours
-    wo.affected_downtime = body.affected_downtime
+    if body.affected_downtime is not None:
+        wo.affected_downtime = body.affected_downtime
     wo.updated_at   = datetime.utcnow()
 
     comp = (
-        f"\n[COMPLETION — {datetime.utcnow().strftime('%d %b %Y %H:%M')}]\n"
+        f"\n[COMPLETION — {_my_now_str()}]\n"
         f"Completed by  : {current_user.name}\n"
-        f"Root cause    : {body.root_cause}\n"
+    )
+    if body.root_cause:
+        comp += f"Root cause    : {body.root_cause}\n"
+    comp += (
         f"Actions taken : {body.actions_taken}\n"
         f"Actual hours  : {body.actual_hours}h\n"
-        f"Downtime type : {'Affected' if body.affected_downtime else 'Non affected'}\n"
     )
+    if body.affected_downtime is not None:
+        comp += f"Downtime type : {'Affected' if body.affected_downtime else 'Non affected'}\n"
     if body.remarks:
         comp += f"Remarks       : {body.remarks}\n"
 
-    # Embed completion photos as base64 in description
-    if body.completion_photos:
-        comp += _embed_photos(body.completion_photos, "COMPLETION_PHOTOS")
-
     wo.description = (wo.description or "") + comp
 
+    # Save completion photos to disk (compressed full + thumbnail) instead
+    # of embedding base64 in description — see photo_storage.py.
+    for p in body.completion_photos[:3]:
+        saved = save_photo(p.data, f"completion/{wo_id}")
+        if saved:
+            db.add(WorkOrderPhoto(
+                work_order_id=wo_id, kind="completion", filename=p.filename,
+                thumb_path=saved["thumb_path"], full_path=saved["full_path"],
+            ))
+
     # Deduct parts from inventory
+    if body.parts_used:
+        await _ensure_stock_table(db)
     for entry in body.parts_used:
         part = (await db.execute(
             select(SparePart).where(SparePart.id == UUID(entry["spare_part_id"]))
@@ -524,12 +586,18 @@ async def complete_work_order(
         qty = int(entry.get("quantity_used", 1))
         if part.quantity_on_hand < qty:
             raise HTTPException(400, f"Insufficient stock for {part.name}. Available: {part.quantity_on_hand}")
+        qty_before = part.quantity_on_hand
         part.quantity_on_hand -= qty
         db.add(PartsUsed(
             work_order_id = wo_id,
             spare_part_id = UUID(entry["spare_part_id"]),
             quantity_used = qty,
         ))
+        await _log_movement(
+            db, part, "stock_out", qty,
+            qty_before, part.quantity_on_hand, current_user,
+            reason="Used on work order completion", reference=wo.wo_number,
+        )
         if part.quantity_on_hand <= part.reorder_level:
             await ws_manager.broadcast_event("inventory", "inventory.low_stock", {
                 "part_id": str(part.id), "part_name": part.name,

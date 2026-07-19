@@ -5,12 +5,14 @@ Fixes:
   2. Registers export/import routers
   3. Registers users router for technician assignment
 """
+import asyncio
 import logging, os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +31,7 @@ from routers.export_import import router as data_router
 from routers.users import router as users_router
 from routers.stock import router as stock_router
 from routers.analysis import router as analysis_router
+import backup
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -148,6 +151,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database tables ready")
     await ws_manager.startup()
     scheduler.add_job(run_pm_check, "interval", hours=1, id="pm_check")
+    scheduler.add_job(backup.scheduled_backup_job, "interval", hours=24, id="db_backup")
     scheduler.start()
     logger.info("CMMS started")
     yield
@@ -162,6 +166,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+# Work order photos live on the persistent disk (see photo_storage.py) and
+# are served straight from disk here — the FastAPI process never has to
+# hold full image bytes in memory to serve them, unlike the old approach
+# of embedding base64 photos inside JSON API responses.
+from photo_storage import PHOTOS_DIR
+app.mount("/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
 
 # ── Routers ───────────────────────────────────────────────────────────────
 app.include_router(auth_router)
@@ -250,6 +261,39 @@ button{{background:#2563eb;color:#fff;border:none;padding:12px 28px;border-radiu
 <button onclick="window.print()">&#128438; Print QR Code</button>
 </div></body></html>"""
     return HTMLResponse(html)
+
+
+# ── Backups ───────────────────────────────────────────────────────────────
+@app.get("/admin/backup-status", tags=["system"])
+async def backup_status(current_user=Depends(forbid_viewer)):
+    if current_user.role != UserRole.admin:
+        raise HTTPException(403, "Only admins can view backup status")
+    return {
+        "configured": backup.is_configured(),
+        "retention_count": backup.RETENTION_COUNT,
+    }
+
+
+@app.post("/admin/backup-now", tags=["system"])
+async def backup_now_endpoint(current_user=Depends(forbid_viewer)):
+    if current_user.role != UserRole.admin:
+        raise HTTPException(403, "Only admins can trigger a backup")
+    if not backup.is_configured():
+        raise HTTPException(
+            400,
+            "Backups aren't configured yet — set GDRIVE_BACKUP_FOLDER_ID and "
+            "GDRIVE_SERVICE_ACCOUNT_JSON (see backup.py for setup steps).",
+        )
+    try:
+        result = await asyncio.to_thread(backup.backup_now)
+    except Exception as e:
+        raise HTTPException(500, f"Backup failed: {e}")
+    return {
+        "status": "ok",
+        "uploaded": result["uploaded"]["name"],
+        "size_bytes": result["uploaded"].get("size"),
+        "deleted_old_backups": result["deleted"],
+    }
 
 
 # ── Health ────────────────────────────────────────────────────────────────

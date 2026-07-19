@@ -106,110 +106,18 @@ window.API_BASE = '';
 const { useState, useEffect, useRef, useMemo } = React;
 
 const ROOT_CAUSE_GROUPS = {
-  Mechanical: [
-    {
-      value: "Bearing",
-      description: "Noisy / Worn out / Jammed"
-    },
-    {
-      value: "Chain",
-      description: "Loose / Broken / Elongated"
-    },
-    {
-      value: "Belt",
-      description: "Broken / Slipping / Worn"
-    },
-    {
-      value: "Fastener",
-      description: "Loose screw / Nut missing"
-    },
-    {
-      value: "Wear Parts",
-      description: "Normal wear and tear"
-    },
-    {
-      value: "Universal Joint",
-      description: "Broken / Excessive play"
-    },
-    {
-      value: "Pneumatic",
-      description: "Air leakage / Solenoid Valve / Cylinder failure"
-    },
-    {
-      value: "Alignment",
-      description: "Misalignment"
-    },
-    {
-      value: "Cutter Adjustment",
-      description: "Incorrect cutter setting"
-    }
+  "Mechanical": [
+    "Bearing","Chain","Belt","Fastener","Wear Parts",
+    "Universal Joint","Pneumatic","Alignment","Cutter Adjustment",
   ],
-
-  Electrical: [
-    {
-      value: "Motor",
-      description: "Burnt / Overload / Overheating"
-    },
-    {
-      value: "Sensor",
-      description: "No signal / Misalignment"
-    },
-    {
-      value: "PLC",
-      description: "Program / Communication error"
-    },
-    {
-      value: "Power Trip",
-      description: "Breaker tripped"
-    },
-    {
-      value: "Controller",
-      description: "Controller failure"
-    },
-    {
-      value: "Control Panel",
-      description: "Component failure"
-    },
-    {
-      value: "Wiring",
-      description: "Loose / Broken wire"
-    },
-    {
-      value: "Interference Signal",
-      description: "Electrical noise"
-    }
+  "Electrical": [
+    "Motor","Sensor","PLC","Power Trip","Controller",
+    "Control Panel","Wiring","Interference Signal",
   ],
-
-  Others: [
-    {
-      value: "CV Files",
-      description: "Wrong production file"
-    },
-    {
-      value: "Setting",
-      description: "Machine parameter incorrect"
-    },
-    {
-      value: "Hardware",
-      description: "PC / Network hardware issue"
-    },
-    {
-      value: "Glue Pot",
-      description: "Glue contamination / Temperature"
-    },
-    {
-      value: "Software Bug",
-      description: "Program issue"
-    },
-    {
-      value: "Operator Mistake",
-      description: "Human error / Not responsible"
-    },
-    {
-      value: "Material",
-      description: "Board / Edgeband quality issue"
-    }
-  ]
+  "Others": [
+    "CV Files","Setting","Hardware","Glue Pot","Software Bug",
+    "Operator Mistake","Material","Miscellaneous",
+  ],
 };
 // Flat list kept for any code that still expects a plain array (e.g. validation)
 const ROOT_CAUSES = Object.values(ROOT_CAUSE_GROUPS).flat();
@@ -233,7 +141,13 @@ async function api(path, opts) {
   const headers = Object.assign({'Content-Type':'application/json'}, token?{Authorization:'Bearer '+token}:{}, opts.headers||{});
   const res = await fetch(window.API_BASE+path, Object.assign({},opts,{headers}));
   if (res.status===401){localStorage.removeItem('cmms_token');location.reload();}
-  if (!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.detail||'Request failed');}
+  if (!res.ok){
+    const e=await res.json().catch(()=>({}));
+    let msg='Request failed';
+    if(typeof e.detail==='string') msg=e.detail;
+    else if(Array.isArray(e.detail)) msg=e.detail.map(d=>`${(d.loc||[]).slice(1).join('.')}: ${d.msg}`).join('; ');
+    throw new Error(msg);
+  }
   if (res.status===204) return null;
   return res.json();
 }
@@ -514,13 +428,16 @@ function calcDowntime(from, to, heldHours = 0, holdStartedAt = null){
 }
 
 // ── Shared photo-tag helpers ──
-// Work order descriptions can have photos embedded inline as:
-//   [OPERATOR_PHOTOS] / [COMPLETION_PHOTOS]
-//   [PHOTO:filename|data:image/...;base64,....]
-//   [/OPERATOR_PHOTOS] / [/COMPLETION_PHOTOS]
-// These helpers pull the actual images out (for thumbnails) and strip the
-// raw tags out of any description text shown to the user, so people never
-// see a giant base64 "url" blob instead of a photo.
+// Two photo sources exist side by side:
+//  1. LEGACY — older work orders have photos embedded inline in the
+//     description as base64: [PHOTO:filename|data:image/...;base64,....]
+//     inside [OPERATOR_PHOTOS]/[COMPLETION_PHOTOS] blocks.
+//  2. CURRENT — newer work orders store photos on disk (compressed, with
+//     a separate small thumbnail) and the API returns them as a `photos`
+//     array of {thumb_url, full_url} on the work order object.
+// extractPhotos() merges both into a single list of {thumb, full} so
+// every caller/PhotoViewer can treat them the same way, regardless of
+// which work order they came from.
 const PHOTO_TAG_RE = /\[PHOTO:([^\|]+)\|([^\]]+)\]/g;
 function extractPhotos(wo){
   const desc = (wo && wo.description) || '';
@@ -528,7 +445,10 @@ function extractPhotos(wo){
   const re = new RegExp(PHOTO_TAG_RE.source, 'g');
   let m;
   while((m = re.exec(desc)) !== null){
-    if(m[2] !== 'TOO_LARGE') photos.push(m[2]);
+    if(m[2] !== 'TOO_LARGE') photos.push({thumb:m[2], full:m[2]});
+  }
+  for(const p of (wo && wo.photos) || []){
+    photos.push({thumb:p.thumb_url, full:p.full_url});
   }
   return photos;
 }
@@ -620,8 +540,8 @@ function PhotoViewer({photos, label}){
     <div>
       {label && <div style={{fontSize:'12px',color:'#64748b',marginBottom:'6px'}}>{label}</div>}
       <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
-        {photos.map((src,i)=>(
-          <img key={i} src={src} alt={'photo '+(i+1)} className="photo-thumb" onClick={()=>setViewing(src)}/>
+        {photos.map((p,i)=>(
+          <img key={i} src={p.thumb} alt={'photo '+(i+1)} className="photo-thumb" onClick={()=>setViewing(p.full)}/>
         ))}
       </div>
       {viewing && (
@@ -1040,11 +960,11 @@ function MaintenanceAlertBoard(){
         return (
         <div key={w.id} className={isIncoming?'new-pulse':''} style={{background:isCritical?'#450a0a':isTask?'#eef2ff':isIncoming?'#fff7ed':'#fff',color:isCritical?'#fff':'#1e293b',border:'2px solid '+(isCritical?'#ef4444':isTask?'#6366f1':isIncoming?'#f97316':'#e2e8f0'),borderRadius:'14px',padding:'18px',boxShadow:isIncoming?'0 10px 22px rgba(249,115,22,.18)':isTask?'0 4px 14px rgba(99,102,241,.15)':'0 1px 3px rgba(0,0,0,.06)'}}>
           <div style={{display:'flex',justifyContent:'space-between',gap:'10px',alignItems:'flex-start',marginBottom:'12px'}}>
-            <div><div style={{fontFamily:'monospace',fontSize:'13px',fontWeight:800,color:isCritical?'#fecaca':isTask?'#4338ca':'#2563eb'}}>{w.wo_number}</div><div style={{fontSize:'20px',fontWeight:900,marginTop:'3px'}}>{isTask&&<span style={{fontSize:'12px',fontWeight:800,color:isCritical?'#bfdbfe':'#4338ca',marginRight:'6px'}}>🔧 TASK</span>}{displayTitle}</div><div style={{fontSize:'12px',color:isCritical?'#fecaca':isTask?'#4f46e5':'#64748b',marginTop:'3px'}}>{w.asset?.location||'No location'}</div></div>
+            <div><div style={{fontFamily:'monospace',fontSize:'13px',fontWeight:800,color:isCritical?'#fecaca':isTask?'#4338ca':'#2563eb'}}>{w.wo_number}</div><div style={{fontSize:'20px',fontWeight:900,marginTop:'3px'}}>{isTask&&<span style={{fontSize:'12px',fontWeight:800,color:isCritical?'#bfdbfe':'#4338ca',marginRight:'6px'}}>🔧 TASK</span>}{displayTitle}{w.asset?.asset_code&&<span style={{fontSize:'13px',fontWeight:700,color:isCritical?'#fecaca':isTask?'#6366f1':'#64748b',marginLeft:'6px'}}>({w.asset.asset_code})</span>}</div><div style={{fontSize:'12px',color:isCritical?'#fecaca':isTask?'#4f46e5':'#64748b',marginTop:'3px'}}>{w.asset?.location||'No location'}</div></div>
             <div style={{display:'flex',gap:'6px',flexWrap:'wrap',justifyContent:'flex-end'}}><Badge value={w.priority}/><Badge value={w.status}/></div>
           </div>
           {isTask
-            ?<div style={{background:isCritical?'rgba(255,255,255,.08)':'#e0e7ff',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#4338ca',fontWeight:700}}>SCHEDULED TASK · NOT COUNTED AS DOWNTIME</div><div style={{fontSize:'22px',fontWeight:900,color:isCritical?'#fff':'#312e81',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#4f46e5',marginTop:'4px'}}>Assigned {fmtDT(w.created_at)}</div></div>
+            ?<div style={{background:isCritical?'rgba(255,255,255,.08)':'#e0e7ff',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}><div style={{fontSize:'12px',color:isCritical?'#fecaca':'#4338ca',fontWeight:700}}>TASK RUNNING TIME</div><div style={{fontSize:'22px',fontWeight:900,color:isCritical?'#fff':'#312e81',lineHeight:1.1}}>{dt.display}</div><div style={{fontSize:'11px',color:isCritical?'#fecaca':'#4f46e5',marginTop:'4px'}}>Assigned {fmtDT(w.created_at)}</div></div>
             :<div style={{background:isOnHold?(isCritical?'rgba(255,255,255,.08)':'#fff7ed'):(isCritical?'rgba(255,255,255,.08)':'#f8fafc'),borderRadius:'10px',padding:'12px',marginBottom:'12px'}}>
                 <div style={{fontSize:'12px',color:isCritical?'#fecaca':isOnHold?'#9a3412':'#64748b',fontWeight:700}}>{isOnHold?'⏸ ON HOLD · DOWNTIME PAUSED':'RUNNING DOWNTIME'}</div>
                 <div style={{fontSize:'34px',fontWeight:900,color:isCritical?'#fff':isOnHold?'#c2410c':'#b45309',lineHeight:1.1}}>{dt.display}</div>
@@ -1077,7 +997,7 @@ function MaintenanceAlertBoard(){
       <div>
         <div className="section-title">Work Order</div>
         <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',lineHeight:1.7}}>
-          <div style={{fontWeight:800,fontSize:'16px',color:'#1e293b'}}>{selected.asset?.name||selected.title}</div>
+          <div style={{fontWeight:800,fontSize:'16px',color:'#1e293b'}}>{selected.asset?.name?(selected.asset.name+(selected.asset.asset_code?' ('+selected.asset.asset_code+')':'')):selected.title}</div>
           <div><strong>Downtime:</strong> {calcDowntime(selected.created_at,null,selected.held_hours,selected.status==='on_hold'?selected.hold_started_at:null).display}</div>
           <div><strong>Priority:</strong> <Badge value={selected.priority}/></div>
           <div><strong>Status:</strong> <Badge value={selected.status}/></div>
@@ -1375,6 +1295,10 @@ function TechnicianBoard(){
     setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);setPartsSearch('');
     loadParts(wo.id);
   }
+  // Maintenance tasks (admin-assigned planned work, affected_downtime forced
+  // false at creation) get a simpler completion window — no root cause or
+  // downtime type, since neither applies to planned work.
+  const isTaskCompletion = !!completing && completing.affected_downtime===false;
 
   function togglePart(part){
     const exists=usedParts.find(p=>p.spare_part_id===part.id);
@@ -1457,7 +1381,7 @@ function TechnicianBoard(){
   },[]);
 
   async function submitCompletion(){
-    if(!rootCause){toast('Please select a root cause','err');return;}
+    if(!isTaskCompletion && !rootCause){toast('Please select a root cause','err');return;}
     if(!actions.trim()){toast('Please describe actions taken','err');return;}
     const hrs = parseFloat(actualHours) || autoDowntime.hours;
     if(!hrs){toast('Please enter actual hours','err');return;}
@@ -1468,19 +1392,21 @@ function TechnicianBoard(){
     try{
       // Convert photos
       const photoData=compPhotos.map(p=>({filename:p.file.name,data:p.dataUrl,size:p.file.size}));
-      await api('/work-orders/'+completing.id+'/complete',{
-        method:'POST',
-        body:JSON.stringify({
-          root_cause:rootCause,
-          actions_taken:actions,
-          actual_hours:hrs,
-          affected_downtime:affectedDowntime,
-          remarks:remarks||null,
-          parts_used:usedParts.map(p=>({spare_part_id:p.spare_part_id,quantity_used:p.quantity_used})),
-          completion_photos:photoData,
-        })
-      });
-      toast('Work order completed!');setCompleting(null);load();
+      const payload={
+        actions_taken:actions,
+        actual_hours:hrs,
+        remarks:remarks||null,
+        parts_used:usedParts.map(p=>({spare_part_id:p.spare_part_id,quantity_used:p.quantity_used})),
+        completion_photos:photoData,
+      };
+      // Root cause / downtime type only apply to real (breakdown) work
+      // orders — a maintenance task's completion window doesn't collect them.
+      if(!isTaskCompletion){
+        payload.root_cause=rootCause;
+        payload.affected_downtime=affectedDowntime;
+      }
+      await api('/work-orders/'+completing.id+'/complete',{method:'POST',body:JSON.stringify(payload)});
+      toast(isTaskCompletion?'Maintenance task completed!':'Work order completed!');setCompleting(null);load();
     }catch(e){toast(e.message,'err');}finally{setSubmitting(false);}
   }
 
@@ -1516,16 +1442,6 @@ function TechnicianBoard(){
     return m?m[1].trim():null;
   }
 
-  function extractPhotos(wo){
-    const desc=wo.description||'';
-    const photos=[];
-    const re=/\[PHOTO:([^\|]+)\|([^\]]+)\]/g;
-    let m;
-    while((m=re.exec(desc))!==null){
-      if(m[2]!=='TOO_LARGE') photos.push(m[2]);
-    }
-    return photos;
-  }
   const priorityBorder={critical:'#ef4444',high:'#f97316',medium:'#f59e0b',low:'#3b82f6'};
   const priorityBg={critical:'#fef2f2',high:'#fff7ed',medium:'#fefce8',low:'#f0f9ff'};
 
@@ -1642,7 +1558,7 @@ function TechnicianBoard(){
 
       {/* Completion form modal */}
       {completing&&(
-        <Modal title={'Complete Work Order: '+completing.wo_number} onClose={()=>setCompleting(null)} large>
+        <Modal title={(isTaskCompletion?'Complete Maintenance Task: ':'Complete Work Order: ')+completing.wo_number} onClose={()=>setCompleting(null)} large>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
 
             {/* Left column */}
@@ -1664,6 +1580,7 @@ function TechnicianBoard(){
                 <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>Leave blank to use auto-calculated value ({autoDowntime.hours}h)</div>
               </div>
 
+              {!isTaskCompletion&&(
               <div>
                 <label className="lbl">Downtime Type</label>
                 <select className="inp" value={affectedDowntime?'affected':'non_affected'} onChange={e=>setAffectedDowntime(e.target.value==='affected')}>
@@ -1671,25 +1588,21 @@ function TechnicianBoard(){
                   <option value="non_affected">Non-affected downtime</option>
                 </select>
               </div>
+              )}
 
+              {!isTaskCompletion&&(
               <div>
                 <label className="lbl">Root Cause <span style={{color:'#ef4444'}}>*</span></label>
                 <select className="inp" value={rootCause} onChange={e=>setRootCause(e.target.value)}>
                   <option value="">Select root cause…</option>
                   {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
                     <optgroup key={group} label={group}>
-                      {items.map(item => (
-                        <option
-                          key={item.value}
-                          value={item.value}
-                        >
-                          {item.value} — {item.description}
-                        </option>
-                      ))}
+                      {items.map(rc=><option key={rc} value={rc}>{rc}</option>)}
                     </optgroup>
                   ))}
                 </select>
               </div>
+              )}
 
               <div>
                 <label className="lbl">Actions Taken <span style={{color:'#ef4444'}}>*</span></label>
@@ -1813,6 +1726,7 @@ function HistoryLog(){
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
   const [statusFilter,setStatusFilter]=useState('completed');
+  const [recordType,setRecordType]=useState('all'); // 'all' | 'corrective' | 'preventive'
   const [selected,setSelected]=useState(null);
   const [editing,setEditing]=useState(null);   // wo being edited
   const [editForm,setEditForm]=useState({});    // edit field values
@@ -1821,6 +1735,12 @@ function HistoryLog(){
   const [dateTo,setDateTo]=useState('');
   const [locationFilter,setLocationFilter]=useState('');
   const [locations,setLocations]=useState([]);
+  // ── Root Cause Analysis tab: independent multi-location filter ──
+  // (kept separate from the shared single-location `locationFilter` above
+  // since every other Analysis tab only supports one location at a time)
+  const [rcLocations,setRcLocations]=useState([]);
+  const [rcAnalysis,setRcAnalysis]=useState(null);
+  const [rcAnalysisLoading,setRcAnalysisLoading]=useState(true);
   const [analysis,setAnalysis]=useState(null);
   const [analysisLoading,setAnalysisLoading]=useState(true);
   // ── Per-machine comparison ──
@@ -1831,13 +1751,40 @@ function HistoryLog(){
   // ── Real-time uptime ──
   const [uptime,setUptime]=useState(null);
   const [hoursPerDay,setHoursPerDay]=useState(19);
-  const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine' | 'by_root_cause'
+  const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine' | 'by_root_cause' | 'mrr_summary' | 'mrr_autoline'
+  // ── MRR monthly reports (Table 1: by location, Table 2: Autoline detail by station) ──
+  const [mrrYear,setMrrYear]=useState(new Date().getFullYear());
+  const [mrrSummary,setMrrSummary]=useState(null);
+  const [mrrSummaryLoading,setMrrSummaryLoading]=useState(true);
+  const [mrrAutoline,setMrrAutoline]=useState(null);
+  const [mrrAutolineLoading,setMrrAutolineLoading]=useState(true);
+  // Table 1 view control: show all 12 months, or narrow to a from–to month range
+  const [mrrSummaryMode,setMrrSummaryMode]=useState('all'); // 'all' | 'range'
+  const [mrrSummaryFromMonth,setMrrSummaryFromMonth]=useState(1);
+  const [mrrSummaryToMonth,setMrrSummaryToMonth]=useState(12);
+  // Table 2 view control: show all 12 months, or narrow to a from–to month range
+  const [mrrDetailMode,setMrrDetailMode]=useState('all'); // 'all' | 'range'
+  const [mrrDetailFromMonth,setMrrDetailFromMonth]=useState(1);
+  const [mrrDetailToMonth,setMrrDetailToMonth]=useState(12);
+  const [mrrDetailView,setMrrDetailView]=useState('overall'); // 'overall' | 'affected'
+  const MRR_MONTH_ABBR=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const STATION_LINES=['Autoline 1','Autoline 2']; // lines broken down by process station rather than by individual machine
+  // ── MRR month snapshot (reference-report layout: one month, Autoline 1 vs 2, ASS/General Facilities mini-table) ──
+  const [mrrSnapMonth,setMrrSnapMonth]=useState(new Date().getMonth()+1);
+  const [mrrSnapYear,setMrrSnapYear]=useState(new Date().getFullYear());
+  const [mrrSnap,setMrrSnap]=useState(null);
+  const [mrrSnapLoading,setMrrSnapLoading]=useState(true);
   const RC=window.Recharts;
   const MACHINE_COLORS=['#2563eb','#dc2626','#16a34a','#d97706','#7c3aed','#0891b2','#db2777','#65a30d','#ea580c','#0d9488'];
   // ── Deleted work orders (admin-only trash view) ──
   const [showDeleted,setShowDeleted]=useState(false);
   const [deletedWos,setDeletedWos]=useState([]);
   const [deletedLoading,setDeletedLoading]=useState(false);
+  // ── Excel import (bulk historical work orders) ──
+  const [importModal,setImportModal]=useState(false);
+  const [importResult,setImportResult]=useState(null);
+  const [importing,setImporting]=useState(false);
+  const importFileRef=useRef(null);
 
   async function loadAssetsList(){
     try{setAllAssets(await api('/analysis/assets'));}catch(e){}
@@ -1885,36 +1832,57 @@ function HistoryLog(){
   async function loadLocations(){
     try{setLocations(await api('/analysis/locations'));}catch(e){}
   }
+  async function loadRootCauseAnalysis(){
+    setRcAnalysisLoading(true);
+    try{
+      const qs=[];
+      if(dateFrom) qs.push('date_from='+encodeURIComponent(dateFrom));
+      if(dateTo) qs.push('date_to='+encodeURIComponent(dateTo));
+      if(rcLocations.length) qs.push('location='+encodeURIComponent(rcLocations.join(',')));
+      setRcAnalysis(await api('/analysis/work-orders'+(qs.length?'?'+qs.join('&'):'')));
+    }catch(e){toast(e.message,'err');}finally{setRcAnalysisLoading(false);}
+  }
+  async function loadMrrSummary(){
+    setMrrSummaryLoading(true);
+    try{setMrrSummary(await api('/analysis/mrr-monthly-summary?year='+mrrYear));}catch(e){toast(e.message,'err');}finally{setMrrSummaryLoading(false);}
+  }
+  async function loadMrrAutoline(){
+    setMrrAutolineLoading(true);
+    try{setMrrAutoline(await api('/analysis/mrr-autoline-detail?year='+mrrYear));}catch(e){toast(e.message,'err');}finally{setMrrAutolineLoading(false);}
+  }
+  async function loadMrrSnap(){
+    setMrrSnapLoading(true);
+    try{setMrrSnap(await api('/analysis/mrr-month-snapshot?year='+mrrSnapYear+'&month='+mrrSnapMonth));}catch(e){toast(e.message,'err');}finally{setMrrSnapLoading(false);}
+  }
+  function shiftMrrSnapMonth(delta){
+    let m=mrrSnapMonth+delta, y=mrrSnapYear;
+    if(m<1){m=12;y--;} else if(m>12){m=1;y++;}
+    setMrrSnapMonth(m);setMrrSnapYear(y);
+  }
   useEffect(()=>{load();},[statusFilter]);
   useEffect(()=>{loadAnalysis();},[dateFrom,dateTo,locationFilter]);
   useEffect(()=>{const t=setInterval(loadAnalysis,30000);return()=>clearInterval(t);},[dateFrom,dateTo,locationFilter]);
+  useEffect(()=>{loadRootCauseAnalysis();},[dateFrom,dateTo,rcLocations]);
+  useEffect(()=>{const t=setInterval(loadRootCauseAnalysis,30000);return()=>clearInterval(t);},[dateFrom,dateTo,rcLocations]);
   useEffect(()=>{loadLocations();loadAssetsList();},[]);
   useEffect(()=>{loadMachineTimeline();},[dateFrom,dateTo,selectedAssetIds]);
   useEffect(()=>{loadUptime();},[hoursPerDay,locationFilter]);
   useEffect(()=>{const t=setInterval(loadUptime,60000);return()=>clearInterval(t);},[hoursPerDay,locationFilter]); // refresh uptime every 60s
-  useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();if(isAdmin)loadDeleted();});
+  useEffect(()=>{loadMrrSummary();loadMrrAutoline();},[mrrYear]);
+  useEffect(()=>{loadMrrSnap();},[mrrSnapMonth,mrrSnapYear]);
+  useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();loadMrrSummary();loadMrrAutoline();loadMrrSnap();if(isAdmin)loadDeleted();});
 
-  // Extract all embedded base64 photos from description
-  // Handles both [OPERATOR_PHOTOS] and [COMPLETION_PHOTOS] sections
-  function extractPhotos(wo, key){
-    const desc=wo.description||'';
-    const photos=[];
-    const re=/\[PHOTO:([^\|]+)\|([^\]]+)\]/g;
-    let m;
-    while((m=re.exec(desc))!==null){
-      if(m[2]!=='TOO_LARGE') photos.push(m[2]);
-    }
-    return photos;
-  }
-
-  const allPhotos = wo => extractPhotos(wo, 'all');
+  // photos come from the shared, global extractPhotos() (merges legacy
+  // embedded base64 photos with the new disk-based /photos URLs)
+  const allPhotos = wo => extractPhotos(wo);
 
   const filtered = wos.filter(w=>{
     const s=search.toLowerCase();
     const matchText = !s || w.wo_number.toLowerCase().includes(s) || w.title.toLowerCase().includes(s) || (w.asset?.name||'').toLowerCase().includes(s) || (w.description||'').toLowerCase().includes(s);
     const matchFrom = !dateFrom || toUTC(w.created_at) >= new Date(dateFrom);
     const matchTo   = !dateTo   || toUTC(w.created_at) <= new Date(dateTo+'T23:59:59');
-    return matchText && matchFrom && matchTo;
+    const matchType = recordType==='all' || w.type===recordType;
+    return matchText && matchFrom && matchTo && matchType;
   });
 
   function parseField(desc, field){
@@ -1927,8 +1895,30 @@ function HistoryLog(){
     return '—';
   }
 
+  // Writes a "Field   : value" line into the free-text description, replacing
+  // the existing line if present (preserving position) or appending a new
+  // one. Mirrors the 14-char label padding used when the backend first
+  // writes these lines during work order completion, so _parse_field on
+  // the backend (and parseField above) keep finding the right line.
+  function setDescField(desc, field, value){
+    const label = field.padEnd(14,' ');
+    const lines = (desc||'').split('\n');
+    let found=false;
+    const next = lines.map(line=>{
+      if(line.trim().startsWith(field)){
+        found=true;
+        return label+': '+value;
+      }
+      return line;
+    });
+    if(found) return next.join('\n');
+    return (desc?desc.replace(/\n+$/,'')+'\n':'')+label+': '+value+'\n';
+  }
+
   function openEdit(wo){
     setEditing(wo);
+    const rc = parseField(wo.description,'Root cause');
+    const at = parseField(wo.description,'Actions taken');
     setEditForm({
       title:            wo.title||'',
       priority:         wo.priority||'medium',
@@ -1937,7 +1927,16 @@ function HistoryLog(){
       affected_downtime:wo.affected_downtime!==false,
       completed_at:     wo.completed_at?wo.completed_at.slice(0,16):'',
       description:      wo.description||'',
+      root_cause:       rc==='—'?'':rc,
+      actions_taken:    at==='—'?'':at,
     });
+  }
+
+  function updateEditRootCause(value){
+    setEditForm(f=>({...f, root_cause:value, description:setDescField(f.description,'Root cause',value)}));
+  }
+  function updateEditActionsTaken(value){
+    setEditForm(f=>({...f, actions_taken:value, description:setDescField(f.description,'Actions taken',value)}));
   }
 
   async function saveEdit(){
@@ -1985,12 +1984,48 @@ function HistoryLog(){
     }catch(e){toast(e.message,'err');}
   }
 
+  // ── Excel import (bulk historical work orders) ──
+  async function handleImport(e){
+    const file=e.target.files[0];
+    if(!file) return;
+    if(!file.name.endsWith('.xlsx')){toast('Please select an .xlsx file','err');return;}
+    setImporting(true); setImportResult(null); setImportModal(true);
+    try{
+      const token=localStorage.getItem('cmms_token');
+      const formData=new FormData();
+      formData.append('file',file);
+      const res=await fetch(window.API_BASE+'/data/import/history',{
+        method:'POST',
+        headers:{Authorization:'Bearer '+token},
+        body:formData,
+      });
+      if(!res.ok){
+        const err=await res.json().catch(()=>({}));
+        throw new Error(err.detail||'Import failed');
+      }
+      const result=await res.json();
+      setImportResult(result);
+      load(); loadAnalysis();
+    }catch(ex){
+      setImportResult({error:ex.message});
+    }finally{
+      setImporting(false);
+      e.target.value='';
+    }
+  }
+
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
         <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>History Log</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Complete record of all work orders</p></div>
         <div style={{display:'flex',gap:'8px'}}>
         {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>setShowDeleted(v=>!v)}>🗑️ Deleted Work Orders ({deletedWos.length})</button>}
+        <label style={{cursor:'pointer'}}>
+          <span className="btn btn-secondary" style={{fontSize:'13px',display:'inline-block'}}>
+            {importing ? '⏳ Importing…' : '📤 Import Excel'}
+          </span>
+          <input ref={importFileRef} type="file" accept=".xlsx" style={{display:'none'}} onChange={handleImport} disabled={importing}/>
+        </label>
         <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{
           const qs=[]
           if(statusFilter) qs.push('status='+statusFilter);
@@ -2073,6 +2108,9 @@ function HistoryLog(){
           ['downtime','📊 Downtime Analysis'],
           ['by_machine','🏭 Downtime by Machine'],
           ['by_root_cause','🔍 Root Cause Analysis'],
+          ['mrr_summary','📋 MRR Monthly Summary'],
+          ['mrr_autoline','🏗️ Autoline MRR Detail (Yearly)'],
+          ['mrr_snapshot','📸 Autoline MRR Snapshot'],
         ].map(([k,l])=>(
           <button key={k} onClick={()=>setAnalysisTab(k)} style={{
             padding:'9px 20px',borderRadius:'8px',border:'none',cursor:'pointer',
@@ -2234,8 +2272,9 @@ function HistoryLog(){
       )}
 
       {analysisTab==='by_root_cause'&&(()=>{
-        const rcData=analysis?.by_root_cause||[];
+        const rcData=rcAnalysis?.by_root_cause||[];
         const groupColor=g=>({Mechanical:'#d97706',Electrical:'#2563eb',Others:'#7c3aed'}[g]||'#94a3b8');
+        const toggleLoc=loc=>setRcLocations(prev=>prev.includes(loc)?prev.filter(l=>l!==loc):[...prev,loc]);
         return (
         <div className="card" style={{marginBottom:'16px'}}>
           <div style={{marginBottom:'14px'}}>
@@ -2243,7 +2282,36 @@ function HistoryLog(){
             <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Machine downtime cases and hours grouped by the technician's diagnosed root cause — sorted by total downtime hours, biggest impact first</div>
           </div>
 
-          {analysisLoading?<Spinner/>:rcData.length===0?(
+          {/* Multi-location filter — pick any number of locations */}
+          <div style={{marginBottom:'16px'}}>
+            <label className="lbl">Locations (select multiple)</label>
+            <div style={{display:'flex',gap:'8px',flexWrap:'wrap',marginTop:'4px'}}>
+              {locations.map(x=>{
+                const loc=x.location;
+                const active=rcLocations.includes(loc);
+                return (
+                  <button key={loc} onClick={()=>toggleLoc(loc)} style={{
+                    padding:'6px 14px',borderRadius:'999px',cursor:'pointer',fontSize:'12px',fontWeight:700,
+                    border:active?'1px solid #2563eb':'1px solid #e2e8f0',
+                    background:active?'#eff6ff':'#fff',color:active?'#2563eb':'#475569',
+                  }}>{active?'✓ ':''}{loc}</button>
+                );
+              })}
+              {rcLocations.length>0&&(
+                <button onClick={()=>setRcLocations([])} style={{
+                  padding:'6px 14px',borderRadius:'999px',cursor:'pointer',fontSize:'12px',fontWeight:700,
+                  border:'1px solid #fecaca',background:'#fef2f2',color:'#dc2626',
+                }}>✕ Clear</button>
+              )}
+            </div>
+            {rcLocations.length===0?(
+              <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'6px'}}>💡 No location selected — showing all locations combined</div>
+            ):(
+              <div style={{fontSize:'11px',color:'#2563eb',marginTop:'6px'}}>📍 Scoped to {rcLocations.length} location{rcLocations.length>1?'s':''}: {rcLocations.join(', ')}</div>
+            )}
+          </div>
+
+          {rcAnalysisLoading?<Spinner/>:rcData.length===0?(
             <Empty msg="No completed work orders with a recorded root cause in this date range"/>
           ):(
             <>
@@ -2269,18 +2337,38 @@ function HistoryLog(){
 
               <div className="ovf">
                 <table>
-                  <thead><tr>{['Root Cause','Group','Cases','Total Hours','Avg Hours/Case','Machines Affected'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                  <thead>
+                    <tr>
+                      <th>Root Causes</th>
+                      {rcLocations.map(loc=><th key={loc} style={{textAlign:'center'}}>{loc}</th>)}
+                      <th style={{textAlign:'center'}}>Total</th>
+                    </tr>
+                  </thead>
                   <tbody>
-                    {rcData.map(row=>(
-                      <tr key={row.root_cause}>
-                        <td style={{fontWeight:700}}>{row.root_cause}</td>
-                        <td><span style={{fontSize:'11px',fontWeight:700,color:groupColor(row.group),background:groupColor(row.group)+'1a',padding:'2px 8px',borderRadius:'999px'}}>{row.group}</span></td>
-                        <td>{row.total_cases}</td>
-                        <td>{row.total_downtime}h</td>
-                        <td>{row.avg_downtime}h</td>
-                        <td>{row.machines_affected}</td>
-                      </tr>
+                    {(rcAnalysis?.by_root_cause_grouped||[]).map(g=>(
+                      <React.Fragment key={g.group}>
+                        <tr style={{background:'#f3d9f0'}}>
+                          <td style={{fontWeight:800,color:'#1e293b'}}>{g.group}</td>
+                          {rcLocations.map(loc=><td key={loc} style={{fontWeight:800,color:'#1e293b',textAlign:'center'}}>{(g.by_location&&g.by_location[loc])||0}</td>)}
+                          <td style={{fontWeight:800,color:'#1e293b',textAlign:'center'}}>{g.total_cases}</td>
+                        </tr>
+                        {g.items.map(item=>(
+                          <tr key={item.root_cause}>
+                            <td>{item.root_cause}</td>
+                            {rcLocations.map(loc=><td key={loc} style={{textAlign:'center'}}>{(item.by_location&&item.by_location[loc])||0}</td>)}
+                            <td style={{textAlign:'center'}}>{item.cases}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
                     ))}
+                    <tr style={{background:'#1e293b'}}>
+                      <td style={{fontWeight:800,color:'#fff'}}>Total</td>
+                      {rcLocations.map(loc=>{
+                        const locTotal=(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+((g.by_location&&g.by_location[loc])||0),0);
+                        return <td key={loc} style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{locTotal}</td>;
+                      })}
+                      <td style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{rcAnalysis?.summary?.total_cases||0}</td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -2290,13 +2378,355 @@ function HistoryLog(){
         );
       })()}
 
+      {/* ── Table 1: MRR Monthly Summary by location ── */}
+      {analysisTab==='mrr_summary'&&(
+        <div className="card" style={{marginBottom:'16px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'10px',flexWrap:'wrap',gap:'10px'}}>
+            <div>
+              <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Summary of Total MRR by Month</div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Machine Repair Request cases &amp; hours per production line, by month</div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>setMrrYear(y=>y-1)}>◀</button>
+              <span style={{fontSize:'15px',fontWeight:800,color:'#1e293b',minWidth:'52px',textAlign:'center'}}>{mrrYear}</span>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>setMrrYear(y=>y+1)}>▶</button>
+            </div>
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'16px',flexWrap:'wrap'}}>
+            <div style={{display:'flex',border:'1px solid #e2e8f0',borderRadius:'8px',overflow:'hidden'}}>
+              {[['all','Whole Year'],['range','Specific Months']].map(([v,l])=>(
+                <button key={v} onClick={()=>setMrrSummaryMode(v)} style={{
+                  padding:'7px 14px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:700,
+                  background:mrrSummaryMode===v?'#1e293b':'#fff',
+                  color:mrrSummaryMode===v?'#fff':'#64748b',
+                }}>{l}</button>
+              ))}
+            </div>
+            {mrrSummaryMode==='range'&&(
+              <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                <span style={{fontSize:'12px',color:'#64748b'}}>From</span>
+                <select className="inp" style={{padding:'6px 10px',fontSize:'12px'}} value={mrrSummaryFromMonth} onChange={e=>{
+                  const v=parseInt(e.target.value);setMrrSummaryFromMonth(v);if(v>mrrSummaryToMonth)setMrrSummaryToMonth(v);
+                }}>
+                  {MRR_MONTH_ABBR.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                </select>
+                <span style={{fontSize:'12px',color:'#64748b'}}>To</span>
+                <select className="inp" style={{padding:'6px 10px',fontSize:'12px'}} value={mrrSummaryToMonth} onChange={e=>{
+                  const v=parseInt(e.target.value);setMrrSummaryToMonth(v);if(v<mrrSummaryFromMonth)setMrrSummaryFromMonth(v);
+                }}>
+                  {MRR_MONTH_ABBR.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+
+          {mrrSummaryLoading?<Spinner/>:!mrrSummary?<Empty msg="No data"/>:(()=>{
+            const groups=mrrSummary.location_groups;
+            const shownMonths=mrrSummaryMode==='all'?mrrSummary.months:mrrSummary.months.filter(r=>r.month>=mrrSummaryFromMonth&&r.month<=mrrSummaryToMonth);
+            const rangeLabel=mrrSummaryMode==='all'?(mrrYear+' Total'):(shownMonths.length===1?shownMonths[0].month_label+' Total':shownMonths[0].month_label+'–'+shownMonths[shownMonths.length-1].month_label+' Total');
+            const rowTotals={};
+            groups.forEach(g=>rowTotals[g]={cases:0,hours:0});
+            const monthTotals={};
+            shownMonths.forEach(row=>{monthTotals[row.month]={cases:0,hours:0};});
+            const grandTotal={cases:0,hours:0};
+            shownMonths.forEach(row=>{
+              groups.forEach(g=>{
+                rowTotals[g].cases+=row.groups[g].cases;rowTotals[g].hours+=row.groups[g].hours;
+                monthTotals[row.month].cases+=row.groups[g].cases;monthTotals[row.month].hours+=row.groups[g].hours;
+              });
+              grandTotal.cases+=row.total.cases;grandTotal.hours+=row.total.hours;
+            });
+            return (
+            <div className="ovf">
+              <table>
+                <thead>
+                  <tr>
+                    <th rowSpan={2} style={{verticalAlign:'bottom'}}>Location</th>
+                    {shownMonths.map(row=><th key={row.month} colSpan={2} style={{textAlign:'center',borderLeft:'1px solid #e2e8f0'}}>{row.month_label}</th>)}
+                    <th colSpan={2} style={{textAlign:'center',borderLeft:'2px solid #cbd5e1',background:'#eef2ff',color:'#3730a3'}}>{shownMonths.length>1?'TOTAL':'—'}</th>
+                  </tr>
+                  <tr>
+                    {shownMonths.map(row=>(<React.Fragment key={row.month}>
+                      <th style={{textAlign:'right',borderLeft:'1px solid #e2e8f0'}}>Cases</th>
+                      <th style={{textAlign:'right'}}>Hours</th>
+                    </React.Fragment>))}
+                    <th style={{textAlign:'right',borderLeft:'2px solid #cbd5e1',background:'#eef2ff',color:'#3730a3'}}>Cases</th>
+                    <th style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>Hours</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {groups.map(g=>(
+                    <tr key={g}>
+                      <td style={{fontWeight:700}}>{g}</td>
+                      {shownMonths.map(row=>(<React.Fragment key={row.month}>
+                        <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{row.groups[g].cases}</td>
+                        <td style={{textAlign:'right'}}>{row.groups[g].hours}h</td>
+                      </React.Fragment>))}
+                      <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc'}}>{rowTotals[g].cases}</td>
+                      <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc'}}>{Math.round(rowTotals[g].hours*100)/100}h</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{fontWeight:800}}>
+                    <td>{rangeLabel}</td>
+                    {shownMonths.map(row=>(<React.Fragment key={row.month}>
+                      <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{monthTotals[row.month].cases}</td>
+                      <td style={{textAlign:'right'}}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
+                    </React.Fragment>))}
+                    <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3'}}>{grandTotal.cases}</td>
+                    <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>{Math.round(grandTotal.hours*100)/100}h</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── Table 2: MRR Detail by Month — Autoline 1/2, Supporting Line, Spray Paint Line ── */}
+      {analysisTab==='mrr_autoline'&&(
+        <div className="card" style={{marginBottom:'16px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'10px',flexWrap:'wrap',gap:'10px'}}>
+            <div>
+              <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>MRR Detail by Month</div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Autoline 1 &amp; 2 by process station · Supporting Line &amp; Spray Paint Line by machine</div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>setMrrYear(y=>y-1)}>◀</button>
+              <span style={{fontSize:'15px',fontWeight:800,color:'#1e293b',minWidth:'52px',textAlign:'center'}}>{mrrYear}</span>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>setMrrYear(y=>y+1)}>▶</button>
+            </div>
+          </div>
+
+          <div style={{display:'flex',alignItems:'center',gap:'10px',marginBottom:'16px',flexWrap:'wrap'}}>
+            <div style={{display:'flex',border:'1px solid #e2e8f0',borderRadius:'8px',overflow:'hidden'}}>
+              {[['all','Whole Year'],['range','Specific Months']].map(([v,l])=>(
+                <button key={v} onClick={()=>setMrrDetailMode(v)} style={{
+                  padding:'7px 14px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:700,
+                  background:mrrDetailMode===v?'#1e293b':'#fff',
+                  color:mrrDetailMode===v?'#fff':'#64748b',
+                }}>{l}</button>
+              ))}
+            </div>
+            {mrrDetailMode==='range'&&(
+              <div style={{display:'flex',alignItems:'center',gap:'6px'}}>
+                <span style={{fontSize:'12px',color:'#64748b'}}>From</span>
+                <select className="inp" style={{padding:'6px 10px',fontSize:'12px'}} value={mrrDetailFromMonth} onChange={e=>{
+                  const v=parseInt(e.target.value);setMrrDetailFromMonth(v);if(v>mrrDetailToMonth)setMrrDetailToMonth(v);
+                }}>
+                  {MRR_MONTH_ABBR.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                </select>
+                <span style={{fontSize:'12px',color:'#64748b'}}>To</span>
+                <select className="inp" style={{padding:'6px 10px',fontSize:'12px'}} value={mrrDetailToMonth} onChange={e=>{
+                  const v=parseInt(e.target.value);setMrrDetailToMonth(v);if(v<mrrDetailFromMonth)setMrrDetailFromMonth(v);
+                }}>
+                  {MRR_MONTH_ABBR.map((m,i)=><option key={i} value={i+1}>{m}</option>)}
+                </select>
+              </div>
+            )}
+            <div style={{display:'flex',border:'1px solid #e2e8f0',borderRadius:'8px',overflow:'hidden',marginLeft:'auto'}}>
+              {[['overall','Overall'],['affected','Affected Only']].map(([v,l])=>(
+                <button key={v} onClick={()=>setMrrDetailView(v)} style={{
+                  padding:'7px 14px',border:'none',cursor:'pointer',fontSize:'12px',fontWeight:700,
+                  background:mrrDetailView===v?'#dc2626':'#fff',
+                  color:mrrDetailView===v?'#fff':'#64748b',
+                }}>{l}</button>
+              ))}
+            </div>
+          </div>
+
+          {mrrAutolineLoading?<Spinner/>:!mrrAutoline?<Empty msg="No data"/>:(()=>{
+            const casesKey=mrrDetailView==='affected'?'cases_affected':'cases_all';
+            const hoursKey=mrrDetailView==='affected'?'hours_affected':'hours_all';
+            const shownMonths=mrrDetailMode==='all'?mrrAutoline.months:mrrAutoline.months.filter(r=>r.month>=mrrDetailFromMonth&&r.month<=mrrDetailToMonth);
+            const rangeLabel=mrrDetailMode==='all'?(mrrYear+' Total'):(shownMonths.length===1?shownMonths[0].month_label+' Total':shownMonths[0].month_label+'–'+shownMonths[shownMonths.length-1].month_label+' Total');
+            return mrrAutoline.locations.map(loc=>{
+              const cats=mrrAutoline.line_categories[loc];
+              const rowTotals={};
+              cats.forEach(c=>rowTotals[c]={cases:0,hours:0});
+              const monthTotals={};
+              shownMonths.forEach(row=>{monthTotals[row.month]={cases:0,hours:0};});
+              const grandTotal={cases:0,hours:0};
+              shownMonths.forEach(row=>{
+                cats.forEach(c=>{
+                  const cell=row[loc].categories[c];
+                  rowTotals[c].cases+=cell[casesKey];rowTotals[c].hours+=cell[hoursKey];
+                  monthTotals[row.month].cases+=cell[casesKey];monthTotals[row.month].hours+=cell[hoursKey];
+                });
+                grandTotal.cases+=row[loc].total[casesKey];grandTotal.hours+=row[loc].total[hoursKey];
+              });
+              return (
+              <div key={loc} style={{marginBottom:'26px'}}>
+                <div style={{fontSize:'14px',fontWeight:800,color:'#1e293b',marginBottom:'8px'}}>{loc}</div>
+                <div className="ovf">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th rowSpan={2} style={{verticalAlign:'bottom'}}>{STATION_LINES.includes(loc)?'Station':'Machine'}</th>
+                        {shownMonths.map(row=><th key={row.month} colSpan={2} style={{textAlign:'center',borderLeft:'1px solid #e2e8f0'}}>{row.month_label}</th>)}
+                        <th colSpan={2} style={{textAlign:'center',borderLeft:'2px solid #cbd5e1',background:'#eef2ff',color:'#3730a3'}}>{shownMonths.length>1?'TOTAL':'—'}</th>
+                      </tr>
+                      <tr>
+                        {shownMonths.map(row=>(<React.Fragment key={row.month}>
+                          <th style={{textAlign:'right',borderLeft:'1px solid #e2e8f0'}}>Cases</th>
+                          <th style={{textAlign:'right'}}>Hours</th>
+                        </React.Fragment>))}
+                        <th style={{textAlign:'right',borderLeft:'2px solid #cbd5e1',background:'#eef2ff',color:'#3730a3'}}>Cases</th>
+                        <th style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>Hours</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {cats.map(c=>(
+                        <tr key={c}>
+                          <td style={{fontWeight:700}}>{c}</td>
+                          {shownMonths.map(row=>{const cell=row[loc].categories[c];return(<React.Fragment key={row.month}>
+                            <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{cell[casesKey]}</td>
+                            <td style={{textAlign:'right'}}>{cell[hoursKey]}h</td>
+                          </React.Fragment>);})}
+                          <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc'}}>{rowTotals[c].cases}</td>
+                          <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc'}}>{Math.round(rowTotals[c].hours*100)/100}h</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr style={{fontWeight:800}}>
+                        <td>{rangeLabel}</td>
+                        {shownMonths.map(row=>(<React.Fragment key={row.month}>
+                          <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{monthTotals[row.month].cases}</td>
+                          <td style={{textAlign:'right'}}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
+                        </React.Fragment>))}
+                        <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3'}}>{grandTotal.cases}</td>
+                        <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>{Math.round(grandTotal.hours*100)/100}h</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              </div>
+              );
+            });
+          })()}
+          {mrrAutoline&&mrrAutoline.unclassified_cases>0&&(
+            <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>
+              {mrrAutoline.unclassified_cases} case(s) didn't match a tracked station/machine and aren't included above.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Table 3: Autoline MRR Snapshot — one month, reference-report layout ── */}
+      {analysisTab==='mrr_snapshot'&&(
+        <div className="card" style={{marginBottom:'16px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px',flexWrap:'wrap',gap:'10px'}}>
+            <div>
+              <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>
+                Autoline MRR Detail ({mrrSnap?mrrSnap.month_label:''} {mrrSnapYear})
+              </div>
+              <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Autoline 1 vs Autoline 2 by process station, cases &amp; hours for the selected month</div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:'8px'}}>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>shiftMrrSnapMonth(-1)}>◀</button>
+              <span style={{fontSize:'15px',fontWeight:800,color:'#1e293b',minWidth:'110px',textAlign:'center'}}>{mrrSnap?mrrSnap.month_label:''} {mrrSnapYear}</span>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>shiftMrrSnapMonth(1)}>▶</button>
+            </div>
+          </div>
+
+          {mrrSnapLoading?<Spinner/>:!mrrSnap?<Empty msg="No data"/>:(()=>{
+            const stations=mrrSnap.asset_groups;
+            const locs=mrrSnap.locations;
+            return (
+            <>
+              <div className="ovf">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{background:'#1e293b',color:'#fff'}}>Station</th>
+                      {locs.map(loc=><th key={loc} colSpan={2} style={{textAlign:'center',background:'#1e293b',color:'#fff',borderLeft:'1px solid #334155'}}>{loc}</th>)}
+                    </tr>
+                    <tr>
+                      <th></th>
+                      {locs.map(loc=>(<React.Fragment key={loc}>
+                        <th style={{textAlign:'right',borderLeft:'1px solid #e2e8f0'}}>Cases</th>
+                        <th style={{textAlign:'right'}}>Hours</th>
+                      </React.Fragment>))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stations.map((s,i)=>(
+                      <tr key={s} style={{background:i%2===1?'#f8fafc':'transparent'}}>
+                        <td style={{fontWeight:700}}>{s}</td>
+                        {locs.map(loc=>(<React.Fragment key={loc}>
+                          <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{mrrSnap.autoline[loc].groups[s].cases}</td>
+                          <td style={{textAlign:'right'}}>{mrrSnap.autoline[loc].groups[s].hours}h</td>
+                        </React.Fragment>))}
+                      </tr>
+                    ))}
+                    <tr style={{background:'#f1f5f9'}}>
+                      <td style={{fontWeight:800}}>TOTAL</td>
+                      {locs.map(loc=>(<React.Fragment key={loc}>
+                        <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',borderLeft:'1px solid #e2e8f0'}}>{mrrSnap.autoline[loc].total.cases}</td>
+                        <td style={{textAlign:'right',fontWeight:800,color:'#dc2626'}}>{mrrSnap.autoline[loc].total.hours}h</td>
+                      </React.Fragment>))}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{marginTop:'20px'}}>
+                <div className="ovf">
+                  <table>
+                    <tbody>
+                      {Object.entries(mrrSnap.other).map(([label,val],i)=>(
+                        <tr key={label} style={{background:i%2===1?'#f8fafc':'transparent'}}>
+                          <td style={{fontWeight:700}}>{label}</td>
+                          <td style={{textAlign:'right',width:'90px'}}>{val.cases} case{val.cases===1?'':'s'}</td>
+                          <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',width:'90px'}}>{val.hours}h</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {mrrSnap.unclassified_cases>0&&(
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'10px'}}>
+                  {mrrSnap.unclassified_cases} Autoline case(s) didn't match a tracked station and aren't included above.
+                </div>
+              )}
+            </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Record type tabs */}
+      <div style={{display:'flex',gap:'8px',marginBottom:'16px',borderBottom:'1px solid #e2e8f0'}}>
+        {[
+          ['all','All Records'],
+          ['corrective','🔧 Machine Repair Request'],
+          ['preventive','🗓️ Maintenance Task'],
+        ].map(([val,label])=>(
+          <button key={val}
+            onClick={()=>setRecordType(val)}
+            style={{
+              padding:'10px 16px',border:'none',background:'none',cursor:'pointer',
+              fontSize:'13px',fontWeight:700,
+              color:recordType===val?'#2563eb':'#64748b',
+              borderBottom:recordType===val?'2px solid #2563eb':'2px solid transparent',
+              marginBottom:'-1px',
+            }}>{label}</button>
+        ))}
+      </div>
+
       <div style={{fontSize:'12px',color:'#94a3b8',marginBottom:'10px'}}>{filtered.length} records found</div>
 
       {loading?<Spinner/>:filtered.length===0?<Empty msg="No records found"/>:(
         <div className="card" style={{padding:0}}>
-          <div className="ovf"><table>
+          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table>
             <thead><tr>
-              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime Type','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h}>{h}</th>)}
+              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime Type','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h} style={h==='Details'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(w=>{
               const isReq=w.title.startsWith('[Request]');
@@ -2305,6 +2735,7 @@ function HistoryLog(){
               const rootCause=parseField(w.description,'Root cause');
               const actualHrs=w.actual_hours?w.actual_hours+'h':calcDowntime(w.created_at,w.completed_at,w.held_hours).display;
               const photos=allPhotos(w);
+              const rowBg=w.status==='completed'?'#f0fdf4':w.status==='open'?'#fefce8':'#fff';
               return (
                 <tr key={w.id} className={w.status==='completed'?'history-row-completed':w.status==='open'?'history-row-open':''}>
                   <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</span></td>
@@ -2322,7 +2753,7 @@ function HistoryLog(){
                       ?<button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>📷 {photos.length}</button>
                       :<span style={{color:'#cbd5e1',fontSize:'12px'}}>—</span>}
                   </td>
-                  <td>
+                  <td style={{position:'sticky',right:0,background:rowBg,boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
                     <div style={{display:'flex',gap:'4px'}}>
                       <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
                       {isAdmin&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>openEdit(w)}>✏️ Edit</button>}
@@ -2369,7 +2800,12 @@ function HistoryLog(){
       )}
 
       {/* ── Edit Modal (admin only) ── */}
-      {editing&&(
+      {editing&&(()=>{
+        // Tasks (planned work, affected_downtime forced false) never had a
+        // root cause or downtime type to begin with — hide those fields
+        // here too instead of showing blank/irrelevant controls.
+        const isTaskEdit = editing.affected_downtime===false;
+        return (
         <Modal title={'Edit: '+editing.wo_number+' — '+(editing.asset?.name||'—')} onClose={()=>setEditing(null)} large>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
@@ -2397,6 +2833,7 @@ function HistoryLog(){
                 <label className="lbl">Completed At</label>
                 <input type="datetime-local" className="inp" value={editForm.completed_at} onChange={e=>setEditForm({...editForm,completed_at:e.target.value})}/>
               </div>
+              {!isTaskEdit&&(
               <div>
                 <label className="lbl">Downtime Type</label>
                 <div style={{display:'flex',gap:'12px',marginTop:'4px'}}>
@@ -2409,6 +2846,24 @@ function HistoryLog(){
                     </label>
                   ))}
                 </div>
+              </div>
+              )}
+              {!isTaskEdit&&(
+              <div>
+                <label className="lbl">Root Cause</label>
+                <select className="inp" value={editForm.root_cause||''} onChange={e=>updateEditRootCause(e.target.value)}>
+                  <option value="">Select root cause…</option>
+                  {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
+                    <optgroup key={group} label={group}>
+                      {items.map(rc=><option key={rc} value={rc}>{rc}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+              )}
+              <div>
+                <label className="lbl">Actions Taken</label>
+                <textarea className="inp" rows={3} style={{resize:'vertical'}} placeholder="Describe what was done to fix the issue…" value={editForm.actions_taken||''} onChange={e=>updateEditActionsTaken(e.target.value)}/>
               </div>
             </div>
             <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
@@ -2427,6 +2882,49 @@ function HistoryLog(){
               </div>
             </div>
           </div>
+        </Modal>
+        );
+      })()}
+
+      {importModal&&(
+        <Modal title="Work Order History Import" onClose={()=>setImportModal(false)}>
+          {importing?(
+            <div style={{textAlign:'center',padding:'30px'}}>
+              <Spinner/>
+              <div style={{color:'#64748b',fontSize:'14px',marginTop:'8px'}}>Importing work orders…</div>
+            </div>
+          ):importResult&&(
+            <div>
+              {importResult.error?(
+                <div style={{background:'#fee2e2',color:'#991b1b',padding:'14px',borderRadius:'10px',marginBottom:'12px'}}>
+                  ❌ {importResult.error}
+                </div>
+              ):(
+                <div>
+                  <div style={{background:'#f0fdf4',border:'1px solid #bbf7d0',borderRadius:'10px',padding:'16px',marginBottom:'16px'}}>
+                    <div style={{fontWeight:700,color:'#16a34a',marginBottom:'8px'}}>✅ Import Complete</div>
+                    <div style={{fontSize:'14px',color:'#374151',lineHeight:2}}>
+                      <div>📥 <strong>{importResult.inserted}</strong> work order(s) inserted</div>
+                      <div>⏭️ <strong>{importResult.skipped}</strong> row(s) skipped</div>
+                    </div>
+                  </div>
+                  {importResult.skipped_details&&importResult.skipped_details.length>0&&(
+                    <div>
+                      <div style={{fontWeight:600,color:'#374151',marginBottom:'8px',fontSize:'13px'}}>Skipped rows:</div>
+                      <div style={{maxHeight:'220px',overflowY:'auto'}}>
+                        {importResult.skipped_details.map((s,i)=>(
+                          <div key={i} style={{fontSize:'12px',color:'#dc2626',padding:'4px 8px',background:'#fef2f2',borderRadius:'6px',marginBottom:'4px'}}>
+                            WO {s.wo_number}: {s.reason}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              <button className="btn btn-primary" style={{width:'100%',marginTop:'12px'}} onClick={()=>setImportModal(false)}>Close</button>
+            </div>
+          )}
         </Modal>
       )}
     </div>
@@ -2657,13 +3155,14 @@ function Assets(){
 function InventoryAndStock(){
   const {user}=useAuth();
   const canManage=user&&(user.role==='admin'||user.role==='manager');
+  const isProduction=user&&user.role==='production';
   const [tab,setTab]=useState('parts'); // 'parts' | 'stocktake' | 'history'
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'16px',flexWrap:'wrap',gap:'10px'}}>
         <div>
           <h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>Inventory & Stock</h1>
-          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Scan, manage parts, and track stock movements</p>
+          <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>{isProduction?'Production Cutter stock in/out':'Scan, manage parts, and track stock movements'}</p>
         </div>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
           {[
@@ -2680,7 +3179,7 @@ function InventoryAndStock(){
           ))}
         </div>
       </div>
-      {tab==='parts'&&<PartsAndScannerTab canManage={canManage}/>}
+      {tab==='parts'&&<PartsAndScannerTab canManage={canManage} isProduction={isProduction}/>}
       {tab==='stocktake'&&canManage&&<StockTakeTab/>}
       {tab==='history'&&<StockHistoryTab/>}
     </div>
@@ -2726,12 +3225,12 @@ function nextPartCode(category,parts){
   return prefix+'-'+String(max+1).padStart(width,'0');
 }
 
-function PartsAndScannerTab({canManage}){
+function PartsAndScannerTab({canManage,isProduction}){
   const [parts,setParts]=useState([]);
   const [categories,setCategories]=useState([]);
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
-  const [catFilter,setCatFilter]=useState('');
+  const [catFilter,setCatFilter]=useState(isProduction?'Production Cutter':'');
   const [lowOnly,setLowOnly]=useState(false);
   const [modal,setModal]=useState(false);
   const [editPart,setEditPart]=useState(null);
@@ -3077,10 +3576,12 @@ function PartsAndScannerTab({canManage}){
       {/* Filter bar */}
       <div style={{display:'flex',gap:'10px',marginBottom:'16px',alignItems:'center',flexWrap:'wrap'}}>
         <input className="inp" style={{maxWidth:'220px'}} placeholder="Search parts…" value={search} onChange={e=>setSearch(e.target.value)}/>
-        <select className="inp" style={{maxWidth:'180px'}} value={catFilter} onChange={e=>setCatFilter(e.target.value)}>
-          <option value="">All categories</option>
-          {categories.map(c=><option key={c} value={c}>{c}</option>)}
-        </select>
+        {isProduction
+          ?<span className="inp" style={{maxWidth:'220px',display:'inline-flex',alignItems:'center',background:'#f1f5f9',color:'#334155',fontWeight:700,cursor:'default'}}>🏭 Production Cutter</span>
+          :<select className="inp" style={{maxWidth:'180px'}} value={catFilter} onChange={e=>setCatFilter(e.target.value)}>
+            <option value="">All categories</option>
+            {categories.map(c=><option key={c} value={c}>{c}</option>)}
+          </select>}
         <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer',whiteSpace:'nowrap'}}>
           <input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/> ⚠️ Topup only
         </label>
@@ -3095,13 +3596,13 @@ function PartsAndScannerTab({canManage}){
       {/* Table */}
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No parts found"/>:(
-          <div className="ovf"><table>
+          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table>
             <thead><tr>
               {[
                 'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
                 ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
                 'Barcode','Threshold','Last Checked','Status','Actions',
-              ].map(h=><th key={h}>{h}</th>)}
+              ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
               const isTopup=p.is_low_stock;
@@ -3147,7 +3648,7 @@ function PartsAndScannerTab({canManage}){
                       color:isTopup?'#854d0e':'#166534',
                     }}>{p.status||'—'}</span>
                   </td>
-                  <td style={{whiteSpace:'nowrap'}}>
+                  <td style={{whiteSpace:'nowrap',position:'sticky',right:0,background:isTopup?'#fefce8':'#fff',boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
                     <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
                       <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.photo_url?'Photo':'+ Photo'}</button>
@@ -3301,7 +3802,7 @@ function PartsAndScannerTab({canManage}){
                       <div style={{maxHeight:'120px',overflowY:'auto'}}>
                         {importResult.skipped_details.map((s,i)=>(
                           <div key={i} style={{fontSize:'12px',color:'#dc2626',padding:'4px 8px',background:'#fef2f2',borderRadius:'6px',marginBottom:'3px'}}>
-                            {s.part_code&&<strong>{s.part_code}: </strong>}{s.reason}
+                            {s.sheet&&<span style={{color:'#94a3b8'}}>[{s.sheet}] </span>}{s.part_code&&<strong>{s.part_code}: </strong>}{s.reason}
                           </div>
                         ))}
                       </div>
@@ -4078,7 +4579,7 @@ function PMSchedules(){
     try{
       const p={...form,interval_days:parseInt(form.interval_days)};
       if(p.next_due) p.next_due=new Date(p.next_due).toISOString();
-      if(p.estimated_hours) p.estimated_hours=parseFloat(p.estimated_hours);
+      p.estimated_hours = p.estimated_hours!==''&&p.estimated_hours!=null ? parseFloat(p.estimated_hours) : null;
       await api('/pm-schedules/',{method:'POST',body:JSON.stringify(p)});
       toast('Created');setModal(false);setForm(emptyForm);load();
     }catch(e){toast(e.message,'err');}
@@ -4277,10 +4778,17 @@ function App(){
   if(!user) return <Login onLogin={setUser}/>;
   const isAdminOrManager=user.role==='admin'||user.role==='manager';
   const isViewer=user.role==='viewer';
+  const isProduction=user.role==='production';
   // Viewer accounts are read-only observers of the Alert Board — no other
   // page is reachable, even by manually poking at the `page` state.
-  const visibleNav=isViewer?NAV.filter(n=>n.key==='alert'):NAV.filter(n=>n.key!=='users'||isAdminOrManager);
-  const safePage=isViewer?'alert':(page==='users'&&!isAdminOrManager)?'dashboard':page;
+  // Production accounts are likewise locked to Inventory & Stock only —
+  // they're scoped server-side to the "Production Cutter" category with no
+  // price visibility (see routers/inventory.py, routers/stock.py), and
+  // have no reason to be in Work Orders, Assets, Users, etc.
+  const visibleNav=isViewer?NAV.filter(n=>n.key==='alert')
+    :isProduction?NAV.filter(n=>n.key==='inventory')
+    :NAV.filter(n=>n.key!=='users'||isAdminOrManager);
+  const safePage=isViewer?'alert':isProduction?'inventory':(page==='users'&&!isAdminOrManager)?'dashboard':page;
   const pages={dashboard:Dashboard,alert:MaintenanceAlertBoard,board:TechnicianBoard,history:HistoryLog,qr:QRPage,assets:Assets,inventory:InventoryAndStock,pm:PMSchedules,users:UsersManagement};
   const PageComp=pages[safePage]||Dashboard;
   return (

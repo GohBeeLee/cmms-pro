@@ -25,6 +25,7 @@ from models import SparePart
 from auth import get_current_user, forbid_viewer
 from models import User
 from websocket_manager import ws_manager
+from photo_storage import save_photo, delete_photo_files
 
 router = APIRouter(prefix="/inventory", tags=["inventory"], dependencies=[Depends(forbid_viewer)])
 ROOM  = "inventory"
@@ -91,8 +92,9 @@ def _dict(p: SparePart, show_cost: bool = True) -> dict:
         "location":         p.location,
         "barcode":          getattr(p, "barcode",        None),
         "used_on_asset":    getattr(p, "used_on_asset",  None),
-        "photo_url":        getattr(p, "photo_url",      None),
-        "has_photo":        bool(getattr(p, "photo_url", None)),
+        "photo_thumb_url":  f"/photos/{p.photo_thumb_path}" if getattr(p, "photo_thumb_path", None) else None,
+        "photo_full_url":   f"/photos/{p.photo_full_path}"  if getattr(p, "photo_full_path",  None) else None,
+        "has_photo":        bool(getattr(p, "photo_thumb_path", None)),
         "last_stock_take_at": p.last_stock_take_at.isoformat() if getattr(p, "last_stock_take_at", None) else None,
         "last_stock_take_by": getattr(p, "last_stock_take_by", None),
         "unit":             p.unit or "pcs",
@@ -814,23 +816,25 @@ async def upload_part_photo(
     db: AsyncSession = Depends(get_db), current_user: User = Depends(get_current_user),
 ):
     """
-    Upload or replace the reference photo for a part. Stored as a base64
-    data URL directly on the row (same lightweight approach used for repair
-    request photos) — no filesystem dependency.
-    Max ~800KB raw image to keep page loads reasonable for the parts table.
+    Upload or replace the reference photo for a part. Saved to disk as a
+    compressed full-size JPEG + a small thumbnail (see photo_storage.py) —
+    only the short URL paths are stored on the row, so the Inventory list
+    endpoint (which returns every part in one response) stays small no
+    matter how many parts have a photo.
     """
     _require_admin_or_manager(current_user)
     p = await _get(part_id, db)
 
-    data_url = body.data if body.data.startswith("data:") else f"data:image/jpeg;base64,{body.data}"
-    raw_b64 = data_url.split(",", 1)[1] if "," in data_url else data_url
-    size_kb = len(raw_b64) * 0.75 / 1024
-    if size_kb > 800:
-        raise HTTPException(400, f"Photo too large ({size_kb:.0f}KB) — please use an image under ~800KB")
+    saved = save_photo(body.data, f"parts/{part_id}")
+    if not saved:
+        raise HTTPException(400, "Couldn't read that image — please try a different photo")
 
-    p.photo_url = data_url
+    old_thumb, old_full = p.photo_thumb_path, p.photo_full_path
+    p.photo_thumb_path = saved["thumb_path"]
+    p.photo_full_path  = saved["full_path"]
     p.updated_at = datetime.utcnow()
     await db.flush()
+    delete_photo_files(old_thumb, old_full)  # best-effort cleanup of the replaced photo
     await ws_manager.broadcast_event(ROOM, "inventory.updated", {"id": str(p.id), "name": p.name})
     return _dict(p, _can_view_cost(current_user))
 
@@ -842,8 +846,11 @@ async def delete_part_photo(
 ):
     _require_admin_or_manager(current_user)
     p = await _get(part_id, db)
-    p.photo_url = None
+    old_thumb, old_full = p.photo_thumb_path, p.photo_full_path
+    p.photo_thumb_path = None
+    p.photo_full_path  = None
     p.updated_at = datetime.utcnow()
     await db.flush()
+    delete_photo_files(old_thumb, old_full)
     await ws_manager.broadcast_event(ROOM, "inventory.updated", {"id": str(p.id), "name": p.name})
     return _dict(p, _can_view_cost(current_user))

@@ -948,7 +948,7 @@ function MaintenanceAlertBoard(){
         const assignedList=getAssignedList(w);
         const assignedLabel=assignedList.length===0?null:assignedList.length===1?assignedList[0].name:assignedList[0].name+' +'+(assignedList.length-1)+' more';
         const dt=calcDowntime(w.created_at,null,w.held_hours,w.status==='on_hold'?w.hold_started_at:null);const isIncoming=w.status==='open';const isCritical=w.priority==='critical';
-        const isTask=w.affected_downtime===false;
+        const isTask=(w.title||'').startsWith('[TASK]');
         const isOnHold=w.status==='on_hold';
         const cardHoldReason=isOnHold?lastHoldReason(w.description):null;
         const displayTitle=(w.asset?.name||w.title||'').replace(/^\[TASK\]\s*/,'');
@@ -1295,10 +1295,13 @@ function TechnicianBoard(){
     setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);setPartsSearch('');
     loadParts(wo.id);
   }
-  // Maintenance tasks (admin-assigned planned work, affected_downtime forced
-  // false at creation) get a simpler completion window — no root cause or
-  // downtime type, since neither applies to planned work.
-  const isTaskCompletion = !!completing && completing.affected_downtime===false;
+  // Maintenance tasks (admin-assigned planned work, title prefixed [TASK] at
+  // creation) get a simpler completion window — no root cause or downtime
+  // type, since neither applies to planned work. Checked by title, not
+  // affected_downtime — a real corrective job can legitimately also end up
+  // with affected_downtime=false (Non-affected downtime) while still having
+  // a genuine root cause, so that flag alone can't distinguish the two.
+  const isTaskCompletion = !!completing && (completing.title||'').startsWith('[TASK]');
 
   function togglePart(part){
     const exists=usedParts.find(p=>p.spare_part_id===part.id);
@@ -2367,7 +2370,7 @@ function HistoryLog(){
                         const locTotal=(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+((g.by_location&&g.by_location[loc])||0),0);
                         return <td key={loc} style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{locTotal}</td>;
                       })}
-                      <td style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{rcAnalysis?.summary?.total_cases||0}</td>
+                      <td style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+g.total_cases,0)}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -2801,10 +2804,14 @@ function HistoryLog(){
 
       {/* ── Edit Modal (admin only) ── */}
       {editing&&(()=>{
-        // Tasks (planned work, affected_downtime forced false) never had a
-        // root cause or downtime type to begin with — hide those fields
-        // here too instead of showing blank/irrelevant controls.
-        const isTaskEdit = editing.affected_downtime===false;
+        // Tasks (admin-assigned planned work, title prefixed [TASK] at
+        // creation) never had a root cause or downtime type to begin with —
+        // hide those fields here too instead of showing blank/irrelevant
+        // controls. Checked by title, not affected_downtime — a real
+        // corrective job can legitimately also have affected_downtime=false
+        // (Non-affected downtime) while still having a genuine root cause
+        // that should stay editable here.
+        const isTaskEdit = (editing.title||'').startsWith('[TASK]');
         return (
         <Modal title={'Edit: '+editing.wo_number+' — '+(editing.asset?.name||'—')} onClose={()=>setEditing(null)} large>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
@@ -3241,6 +3248,7 @@ function PartsAndScannerTab({canManage,isProduction}){
   // ── Photo upload ──
   const [photoModal,setPhotoModal]=useState(null); // part being photographed
   const [photoPreview,setPhotoPreview]=useState('');
+  const [photoPreviewIsNew,setPhotoPreviewIsNew]=useState(false); // true only when the user picked a new file this session
   const [photoUploading,setPhotoUploading]=useState(false);
   const photoFileRef=useRef(null);
   const [lightboxPhoto,setLightboxPhoto]=useState(null); // {url,name} for full-size view
@@ -3269,7 +3277,8 @@ function PartsAndScannerTab({canManage,isProduction}){
     supplier:'',location:'',barcode:'',used_on_asset:'',
   };
   const [form,setForm]=useState(emptyForm);
-  const [formPhoto,setFormPhoto]=useState(''); // base64 data URL for the Add/Edit Part modal
+  const [formPhoto,setFormPhoto]=useState(''); // preview: existing photo_thumb_url, or a fresh base64 data URL from a new pick
+  const [formPhotoIsNew,setFormPhotoIsNew]=useState(false); // true only when the user picked a new file this session
   const [codeManual,setCodeManual]=useState(false); // true once user hand-edits the auto-generated part code
   const formPhotoFileRef=useRef(null);
 
@@ -3302,6 +3311,7 @@ function PartsAndScannerTab({canManage,isProduction}){
     try{
       const dataUrl=await resizeImage(file);
       setFormPhoto(dataUrl);
+      setFormPhotoIsNew(true);
     }catch(err){toast('Could not process image','err');}
     finally{e.target.value='';}
   }
@@ -3323,13 +3333,13 @@ function PartsAndScannerTab({canManage,isProduction}){
         savedPart=await api('/inventory/',{method:'POST',body:JSON.stringify(p)});
         toast('Part added');
       }
-      // If a photo was selected (or changed) in the form, upload it right after saving the part
-      if(formPhoto&&formPhoto!==editPart?.photo_url){
+      // If a new photo was picked in the form, upload it right after saving the part
+      if(formPhotoIsNew&&formPhoto){
         try{
           await api('/inventory/'+savedPart.id+'/photo',{method:'PUT',body:JSON.stringify({data:formPhoto})});
         }catch(photoErr){toast('Part saved, but photo upload failed: '+photoErr.message,'err');}
       }
-      setModal(false);setEditPart(null);setForm(emptyForm);setFormPhoto('');load();
+      setModal(false);setEditPart(null);setForm(emptyForm);setFormPhoto('');setFormPhotoIsNew(false);load();
     }catch(e){toast(e.message,'err');}
   }
 
@@ -3365,9 +3375,10 @@ function PartsAndScannerTab({canManage,isProduction}){
   // ── Photo upload (resize client-side to keep payload small) ──
   function openPhotoModal(part){
     setPhotoModal(part);
-    setPhotoPreview(part.photo_url||'');
+    setPhotoPreview(part.photo_thumb_url||part.photo_full_url||'');
+    setPhotoPreviewIsNew(false);
   }
-  function closePhotoModal(){setPhotoModal(null);setPhotoPreview('');}
+  function closePhotoModal(){setPhotoModal(null);setPhotoPreview('');setPhotoPreviewIsNew(false);}
 
   function resizeImage(file,maxDim=800,quality=0.75){
     return new Promise((resolve,reject)=>{
@@ -3398,12 +3409,13 @@ function PartsAndScannerTab({canManage,isProduction}){
     try{
       const dataUrl=await resizeImage(file);
       setPhotoPreview(dataUrl);
+      setPhotoPreviewIsNew(true);
     }catch(err){toast('Could not process image','err');}
     finally{e.target.value='';}
   }
 
   async function savePhoto(){
-    if(!photoModal||!photoPreview) return;
+    if(!photoModal||!photoPreviewIsNew||!photoPreview) return;
     setPhotoUploading(true);
     try{
       await api('/inventory/'+photoModal.id+'/photo',{method:'PUT',body:JSON.stringify({data:photoPreview})});
@@ -3566,7 +3578,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                 const qs=(catFilter?'?category='+encodeURIComponent(catFilter):'')+(lowOnly?(catFilter?'&':'?')+'low_stock=true':'');
                 downloadFile('/inventory/export/excel'+qs,'Inventory.xlsx');
               }}>📊 Export Excel</button>
-            <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setFormPhoto('');setCodeManual(false);setModal(true);}}>
+            <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setFormPhoto('');setFormPhotoIsNew(false);setCodeManual(false);setModal(true);}}>
               + Add Part
             </button>
           </>}
@@ -3612,8 +3624,8 @@ function PartsAndScannerTab({canManage,isProduction}){
                 <tr key={p.id} style={{background:rowBg}}>
                   <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{p.part_code}</span></td>
                   <td>
-                    {p.photo_url?(
-                      <img src={p.photo_url} alt={p.name} onClick={()=>setLightboxPhoto({url:p.photo_url,name:p.name})}
+                    {p.photo_thumb_url?(
+                      <img src={p.photo_thumb_url} alt={p.name} onClick={()=>setLightboxPhoto({url:p.photo_full_url||p.photo_thumb_url,name:p.name})}
                         style={{width:'42px',height:'42px',objectFit:'cover',borderRadius:'6px',cursor:'pointer',border:'1px solid #e2e8f0'}}/>
                     ):(
                       <div onClick={()=>canManage&&openPhotoModal(p)} style={{
@@ -3651,7 +3663,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                   <td style={{whiteSpace:'nowrap',position:'sticky',right:0,background:isTopup?'#fefce8':'#fff',boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
                     <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
-                      <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.photo_url?'Photo':'+ Photo'}</button>
+                      <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.has_photo?'Photo':'+ Photo'}</button>
                       <button onClick={()=>{setEditPart(p);setForm({
                         part_code:p.part_code,name:p.name,category:p.category||'',
                         description:p.description||'',unit:p.unit||'pcs',
@@ -3659,7 +3671,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                         unit_cost:p.unit_cost||'',supplier:p.supplier||'',
                         location:p.location||'',barcode:p.barcode||'',
                         used_on_asset:p.used_on_asset||'',
-                      });setFormPhoto(p.photo_url||'');setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
+                      });setFormPhoto(p.photo_thumb_url||p.photo_full_url||'');setFormPhotoIsNew(false);setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
                       <button onClick={()=>del(p.id,p.name)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Delete</button>
                     </>}
                   </td>
@@ -3672,7 +3684,7 @@ function PartsAndScannerTab({canManage,isProduction}){
 
       {/* Add / Edit modal — admin/manager only */}
       {modal&&canManage&&(
-        <Modal title={editPart?'Edit Part: '+editPart.part_code:'Add Spare Part'} onClose={()=>{setModal(false);setEditPart(null);setFormPhoto('');}}>
+        <Modal title={editPart?'Edit Part: '+editPart.part_code:'Add Spare Part'} onClose={()=>{setModal(false);setEditPart(null);setFormPhoto('');setFormPhotoIsNew(false);}}>
           <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
             {/* Photo picker */}
             <div style={{display:'flex',gap:'14px',alignItems:'center'}}>
@@ -3759,7 +3771,7 @@ function PartsAndScannerTab({canManage,isProduction}){
             </div>
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
-              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>{setModal(false);setEditPart(null);setFormPhoto('');}}>Cancel</button>
+              <button className="btn btn-secondary" style={{flex:1}} onClick={()=>{setModal(false);setEditPart(null);setFormPhoto('');setFormPhotoIsNew(false);}}>Cancel</button>
             </div>
           </div>
         </Modal>
@@ -3844,10 +3856,10 @@ function PartsAndScannerTab({canManage,isProduction}){
             <div style={{fontSize:'11px',color:'#94a3b8',textAlign:'center'}}>Photos are automatically resized — JPG/PNG recommended.</div>
 
             <div style={{display:'flex',gap:'10px',width:'100%'}}>
-              <button className="btn btn-primary" style={{flex:1}} onClick={savePhoto} disabled={!photoPreview||photoUploading}>
+              <button className="btn btn-primary" style={{flex:1}} onClick={savePhoto} disabled={!photoPreviewIsNew||photoUploading}>
                 {photoUploading?'Saving…':'💾 Save Photo'}
               </button>
-              {photoModal.photo_url&&(
+              {photoModal.has_photo&&(
                 <button className="btn" style={{flex:1,background:'#fef2f2',color:'#dc2626'}} onClick={removePhoto} disabled={photoUploading}>
                   🗑️ Remove
                 </button>
@@ -4002,8 +4014,8 @@ function PartsAndScannerTab({canManage,isProduction}){
               {scanPart&&!scanning&&(
                 <div className="card" style={{border:scanPart.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',background:scanPart.is_low_stock?'#fefce8':'#fff'}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'12px',gap:'12px'}}>
-                    {scanPart.photo_url&&(
-                      <img src={scanPart.photo_url} alt={scanPart.name} onClick={()=>setLightboxPhoto({url:scanPart.photo_url,name:scanPart.name})}
+                    {scanPart.photo_thumb_url&&(
+                      <img src={scanPart.photo_thumb_url} alt={scanPart.name} onClick={()=>setLightboxPhoto({url:scanPart.photo_full_url||scanPart.photo_thumb_url,name:scanPart.name})}
                         style={{width:'64px',height:'64px',objectFit:'cover',borderRadius:'10px',border:'1px solid #e2e8f0',flexShrink:0,cursor:'zoom-in'}}/>
                     )}
                     <div style={{flex:1}}>
@@ -4372,8 +4384,8 @@ function StockTakeTab(){
           {scanPart&&editForm&&!scanning&&(
             <div className="card" style={{border:'2px solid #e2e8f0'}}>
               <div style={{display:'flex',gap:'12px',marginBottom:'14px'}}>
-                {scanPart.photo_url&&(
-                  <img src={scanPart.photo_url} alt={scanPart.name} style={{width:'56px',height:'56px',objectFit:'cover',borderRadius:'8px',border:'1px solid #e2e8f0',flexShrink:0}}/>
+                {scanPart.photo_thumb_url&&(
+                  <img src={scanPart.photo_thumb_url} alt={scanPart.name} style={{width:'56px',height:'56px',objectFit:'cover',borderRadius:'8px',border:'1px solid #e2e8f0',flexShrink:0}}/>
                 )}
                 <div style={{flex:1}}>
                   <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{scanPart.part_code}</div>

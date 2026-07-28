@@ -87,8 +87,10 @@ async def ensure_schema_updates():
             await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_spare_parts_barcode ON spare_parts (barcode)"))
         if "used_on_asset" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN used_on_asset VARCHAR(200)"))
-        if "photo_url" not in spare_names:
-            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_url TEXT"))
+        if "photo_thumb_path" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_thumb_path VARCHAR(255)"))
+        if "photo_full_path" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_full_path VARCHAR(255)"))
         if "last_stock_take_at" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN last_stock_take_at DATETIME"))
         if "last_stock_take_by" not in spare_names:

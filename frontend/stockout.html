@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>Production Cutter Stock-Out</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f4f8;min-height:100vh;padding:16px 16px 40px;}
+  .container{max-width:500px;margin:0 auto;}
+  .header{background:#1e293b;border-radius:16px;padding:22px 20px;margin-bottom:16px;text-align:center;}
+  .header h1{color:#fff;font-size:19px;font-weight:800;margin-bottom:4px;}
+  .header p{color:#94a3b8;font-size:13px;}
+  .logo{width:44px;height:44px;background:#7c3aed;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:22px;margin:0 auto 12px;}
+  .card{background:#fff;border-radius:14px;padding:20px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,0.08);}
+  .card h2{font-size:14px;font-weight:700;color:#1e293b;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9;}
+  .field{margin-bottom:14px;}
+  .field:last-child{margin-bottom:0;}
+  label{display:block;font-size:13px;font-weight:600;color:#374151;margin-bottom:6px;}
+  label .req{color:#ef4444;margin-left:2px;}
+  input[type=text],input[type=number],select,textarea{width:100%;border:1.5px solid #e2e8f0;border-radius:10px;padding:11px 14px;font-size:15px;font-family:inherit;outline:none;background:#fff;color:#1e293b;transition:border-color 0.15s;}
+  input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{border-color:#7c3aed;box-shadow:0 0 0 3px rgba(124,58,237,0.12);}
+  textarea{resize:vertical;min-height:70px;line-height:1.5;}
+  select{appearance:auto;}
+  .stock-hint{font-size:12px;color:#94a3b8;margin-top:6px;}
+  .stock-hint.low{color:#d97706;font-weight:600;}
+  .qty-row{display:flex;align-items:stretch;gap:8px;}
+  .qty-btn{width:46px;flex-shrink:0;border:1.5px solid #e2e8f0;border-radius:10px;background:#f8fafc;font-size:20px;font-weight:700;color:#374151;cursor:pointer;user-select:none;}
+  .qty-btn:active{background:#eef2ff;}
+  input#qty{text-align:center;font-weight:700;}
+  .btn-submit{width:100%;background:#7c3aed;color:#fff;border:none;padding:16px;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;transition:background 0.15s;margin-top:4px;}
+  .btn-submit:hover{background:#6d28d9;}
+  .btn-submit:disabled{background:#94a3b8;cursor:not-allowed;}
+  .success-screen{display:none;text-align:center;padding:10px 0;}
+  .success-icon{font-size:64px;margin-bottom:12px;}
+  .success-screen h2{font-size:22px;font-weight:800;color:#16a34a;margin-bottom:8px;}
+  .success-screen p{color:#64748b;font-size:14px;line-height:1.6;margin-bottom:4px;}
+  .remain-badge{display:inline-block;background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a;padding:8px 20px;border-radius:999px;font-weight:700;font-size:15px;margin:12px 0;}
+  .btn-new{background:#f1f5f9;color:#374151;border:none;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;}
+  .error-msg{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;display:none;}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="logo">&#9986;&#65039;</div>
+    <h1>Production Cutter Stock-Out</h1>
+    <p>Take out cutter items — no login needed</p>
+  </div>
+
+  <div id="form-section">
+    <div class="error-msg" id="error-msg"></div>
+
+    <div class="card">
+      <h2>Item &amp; Quantity</h2>
+      <div class="field">
+        <label>Item <span class="req">*</span></label>
+        <select id="part-select"><option value="">Loading items...</option></select>
+        <div class="stock-hint" id="stock-hint"></div>
+      </div>
+      <div class="field">
+        <label>Quantity <span class="req">*</span></label>
+        <div class="qty-row">
+          <button type="button" class="qty-btn" onclick="stepQty(-1)">&minus;</button>
+          <input type="number" id="qty" value="1" min="1" inputmode="numeric"/>
+          <button type="button" class="qty-btn" onclick="stepQty(1)">+</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Your Details</h2>
+      <div class="field">
+        <label>Your Name <span class="req">*</span></label>
+        <input type="text" id="operator-name" placeholder="Enter your full name" maxlength="100"/>
+      </div>
+      <div class="field">
+        <label>Used On / Machine <small style="font-weight:400;color:#94a3b8">(optional)</small></label>
+        <input type="text" id="used-on" placeholder="e.g. Line 3, Cutter Station 2" maxlength="150"/>
+      </div>
+      <div class="field">
+        <label>Remarks <small style="font-weight:400;color:#94a3b8">(optional)</small></label>
+        <textarea id="remarks" placeholder="Any other information..." maxlength="300"></textarea>
+      </div>
+    </div>
+
+    <button class="btn-submit" id="submit-btn" onclick="submitStockOut()">Confirm Stock-Out</button>
+  </div>
+
+  <div class="success-screen" id="success-screen">
+    <div class="card">
+      <div class="success-icon">&#9989;</div>
+      <h2>Stocked Out!</h2>
+      <p id="success-msg"></p>
+      <div class="remain-badge" id="success-remain"></div>
+      <p style="color:#94a3b8;font-size:12px;margin-top:10px">This has been logged in the maintenance inventory system.</p>
+      <br/>
+      <button class="btn-new" onclick="resetForm()">Stock Out Another Item</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var API = '';
+var parts = [];
+
+window.addEventListener('DOMContentLoaded', function() {
+  fetch(API + '/public-stockout/parts').then(function(r){ return r.json(); }).then(function(list) {
+    parts = list;
+    var sel = document.getElementById('part-select');
+    sel.innerHTML = '<option value="">Select item...</option>';
+    list.forEach(function(p) {
+      var opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.part_code + ' — ' + p.name + ' (' + p.quantity_on_hand + ' ' + p.unit + ' available)';
+      sel.appendChild(opt);
+    });
+    if (list.length === 0) {
+      sel.innerHTML = '<option value="">No Production Cutter items found</option>';
+    }
+  }).catch(function() {
+    document.getElementById('part-select').innerHTML = '<option value="">Failed to load — please refresh</option>';
+  });
+  document.getElementById('part-select').addEventListener('change', updateStockHint);
+});
+
+function updateStockHint() {
+  var id = document.getElementById('part-select').value;
+  var hint = document.getElementById('stock-hint');
+  var part = parts.filter(function(p){ return p.id === id; })[0];
+  if (!part) { hint.textContent = ''; hint.className = 'stock-hint'; return; }
+  hint.textContent = part.quantity_on_hand + ' ' + part.unit + ' currently in stock';
+  hint.className = 'stock-hint' + (part.quantity_on_hand <= 3 ? ' low' : '');
+  var qtyInput = document.getElementById('qty');
+  if (parseInt(qtyInput.value, 10) > part.quantity_on_hand) qtyInput.value = Math.max(1, part.quantity_on_hand);
+}
+
+function stepQty(delta) {
+  var el = document.getElementById('qty');
+  var v = (parseInt(el.value, 10) || 1) + delta;
+  el.value = Math.max(1, v);
+}
+
+function showError(msg) {
+  var el = document.getElementById('error-msg');
+  el.textContent = msg; el.style.display = 'block';
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function submitStockOut() {
+  var partId  = document.getElementById('part-select').value;
+  var qty     = parseInt(document.getElementById('qty').value, 10);
+  var name    = document.getElementById('operator-name').value.trim();
+  var usedOn  = document.getElementById('used-on').value.trim();
+  var remarks = document.getElementById('remarks').value.trim();
+
+  document.getElementById('error-msg').style.display = 'none';
+
+  if (!partId)         { showError('Please select an item.'); return; }
+  if (!qty || qty < 1) { showError('Please enter a valid quantity.'); return; }
+  if (!name)           { showError('Please enter your name.'); return; }
+
+  var btn = document.getElementById('submit-btn');
+  btn.disabled = true; btn.textContent = 'Submitting...';
+
+  try {
+    var payload = {
+      part_id: partId,
+      quantity: qty,
+      operator_name: name,
+      used_on: usedOn || null,
+      remarks: remarks || null,
+    };
+    var res = await fetch(API + '/public-stockout/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (!res.ok) { var err = await res.json().catch(function(){ return {}; }); throw new Error(err.detail || 'Submission failed.'); }
+    var data = await res.json();
+    document.getElementById('success-msg').textContent    = data.message;
+    document.getElementById('success-remain').textContent = data.remaining_qty + ' left in stock';
+    document.getElementById('form-section').style.display  = 'none';
+    document.getElementById('success-screen').style.display = 'block';
+    window.scrollTo(0, 0);
+  } catch(e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Confirm Stock-Out';
+  }
+}
+
+function resetForm() {
+  document.getElementById('form-section').style.display   = 'block';
+  document.getElementById('success-screen').style.display = 'none';
+  document.getElementById('qty').value = '1';
+  document.getElementById('operator-name').value = '';
+  document.getElementById('used-on').value = '';
+  document.getElementById('remarks').value = '';
+  document.getElementById('stock-hint').textContent = '';
+  window.scrollTo(0, 0);
+}
+</script>
+</body>
+</html>

@@ -168,14 +168,35 @@ def _other_location_group(location: Optional[str], asset_name: Optional[str]) ->
     return None
 
 
-def _wo_downtime_hours(actual_hours, created_at, completed_at, held_hours) -> float:
+# A work order can be marked "affected" by the technician when it's logged,
+# but once the asset's downtime formula (divisor, set via the ⚙️ Downtime
+# Formula popup) is applied, the recalculated downtime hours may fall under
+# this minimum. Below that threshold it no longer counts as a production-
+# affecting stoppage, so it's reclassified as non-affected everywhere
+# affected/non-affected downtime is reported — regardless of the flag
+# originally stored on the work order.
+AFFECTED_DOWNTIME_MIN_HOURS = 0.5
+
+
+def _effective_affected(affected_downtime_flag: bool, downtime_hours: Optional[float]) -> bool:
+    """Reclassifies a work order as non-affected if its post-formula downtime
+    hours fall below AFFECTED_DOWNTIME_MIN_HOURS, even if it was originally
+    marked affected."""
+    return bool(affected_downtime_flag) and (downtime_hours or 0.0) >= AFFECTED_DOWNTIME_MIN_HOURS
+
+
+def _wo_downtime_hours(actual_hours, created_at, completed_at, held_hours, divisor: float = 1.0) -> float:
     """Same fallback used elsewhere: prefer the manually-entered actual_hours,
-    otherwise derive it from elapsed working time for completed work orders."""
+    otherwise derive it from elapsed working time for completed work orders.
+    Then divides by the asset's downtime_divisor (default 1.0 = no change) —
+    see the Asset model for why some machines need this."""
     if actual_hours:
-        return actual_hours
-    if completed_at and created_at:
-        return max(working_hours_between(created_at, completed_at) - (held_hours or 0), 0.0)
-    return 0.0
+        hours = actual_hours
+    elif completed_at and created_at:
+        hours = max(working_hours_between(created_at, completed_at) - (held_hours or 0), 0.0)
+    else:
+        return 0.0
+    return hours / (divisor or 1.0)
 
 
 @router.get("/work-orders")
@@ -215,6 +236,7 @@ async def analyse_work_orders(
             Asset.name.label("asset_name"),
             Asset.category.label("asset_category"),
             Asset.location.label("asset_location"),
+            Asset.downtime_divisor.label("asset_downtime_divisor"),
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(WorkOrder.is_deleted == False)
@@ -260,6 +282,13 @@ async def analyse_work_orders(
             # held_hours excludes time the work order spent on_hold, so a
             # pause doesn't count against its downtime.
             downtime = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
+        if downtime is not None:
+            downtime = downtime / (r.asset_downtime_divisor or 1.0)
+
+        # Reclassify to non-affected if the formula-adjusted downtime is
+        # too small to count as production-affecting (see
+        # AFFECTED_DOWNTIME_MIN_HOURS above).
+        effective_affected = _effective_affected(r.affected_downtime, downtime)
 
         # The technician selects a Root Cause (e.g. "Bearing", "Motor") from
         # a fixed list when completing the work order — it's embedded in the
@@ -277,8 +306,9 @@ async def analyse_work_orders(
             "type":           r.type.value,
             "priority":       r.priority.value,
             "status":         r.status.value,
-            "downtime_type":   "affected" if r.affected_downtime else "non_affected",
-            "affected_downtime": bool(r.affected_downtime),
+            "downtime_type":   "affected" if effective_affected else "non_affected",
+            "affected_downtime": effective_affected,
+            "affected_downtime_original": bool(r.affected_downtime),
             "downtime_hours": downtime,
             "created_at":     r.created_at.isoformat() if r.created_at else None,
             "completed_at":   r.completed_at.isoformat() if r.completed_at else None,
@@ -500,6 +530,7 @@ async def analyse_by_machine_timeline(
             WorkOrder.held_hours,
             Asset.id.label("asset_id"),
             Asset.name.label("asset_name"),
+            Asset.downtime_divisor.label("asset_downtime_divisor"),
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(WorkOrder.is_deleted == False)
@@ -543,6 +574,7 @@ async def analyse_by_machine_timeline(
             downtime = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
         if not downtime:
             continue
+        downtime = downtime / (r.asset_downtime_divisor or 1.0)
 
         day = r.created_at.strftime("%Y-%m-%d") if r.created_at else "Unknown"
         name = r.asset_name
@@ -600,7 +632,7 @@ async def get_uptime(
         month_end = datetime(yr, mo + 1, 1)
 
     q = (
-        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at, WorkOrder.held_hours)
+        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at, WorkOrder.held_hours, Asset.downtime_divisor)
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
             WorkOrder.created_at >= month_start,
@@ -619,7 +651,12 @@ async def get_uptime(
         h = r.actual_hours
         if h is None and r.completed_at and r.created_at:
             h = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
-        affected_downtime_hours += h or 0
+        hrs = (h or 0) / (r.downtime_divisor or 1.0)
+        # Below the minimum, the formula-adjusted downtime no longer counts
+        # as production-affecting, so it's excluded here too (see
+        # AFFECTED_DOWNTIME_MIN_HOURS).
+        if hrs >= AFFECTED_DOWNTIME_MIN_HOURS:
+            affected_downtime_hours += hrs
 
     affected_downtime_hours = round(affected_downtime_hours, 2)
     uptime_pct = (
@@ -647,8 +684,8 @@ async def get_assets_for_filter(
     _: User = Depends(get_current_user),
 ):
     """Returns all assets for the filter dropdown."""
-    result = await db.execute(select(Asset.id, Asset.name, Asset.asset_code).order_by(Asset.name))
-    return [{"id": str(r.id), "name": r.name, "asset_code": r.asset_code} for r in result.fetchall()]
+    result = await db.execute(select(Asset.id, Asset.name, Asset.asset_code, Asset.downtime_divisor).order_by(Asset.name))
+    return [{"id": str(r.id), "name": r.name, "asset_code": r.asset_code, "downtime_divisor": r.downtime_divisor} for r in result.fetchall()]
 
 
 @router.get("/locations")
@@ -680,7 +717,7 @@ async def mrr_monthly_summary(
     q = (
         select(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
-            WorkOrder.held_hours, Asset.location,
+            WorkOrder.held_hours, Asset.location, Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
@@ -700,7 +737,7 @@ async def mrr_monthly_summary(
     for r in rows:
         m = r.created_at.month
         g = _location_group(r.location)
-        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours)
+        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         months[m][g]["cases"] += 1
         months[m][g]["hours"] += hrs
 
@@ -764,7 +801,7 @@ async def mrr_autoline_detail(
         select(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
             WorkOrder.held_hours, WorkOrder.affected_downtime,
-            Asset.location, Asset.name.label("asset_name"),
+            Asset.location, Asset.name.label("asset_name"), Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
@@ -795,11 +832,11 @@ async def mrr_autoline_detail(
             unclassified += 1
             continue
         m = r.created_at.month
-        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours)
+        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         cell = months[m][r.location][cat]
         cell["cases_all"] += 1
         cell["hours_all"] += hrs
-        if r.affected_downtime:
+        if _effective_affected(r.affected_downtime, hrs):
             cell["cases_affected"] += 1
             cell["hours_affected"] += hrs
 
@@ -852,7 +889,7 @@ async def mrr_month_snapshot(
     q = (
         select(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
-            WorkOrder.held_hours, Asset.location, Asset.name.label("asset_name"),
+            WorkOrder.held_hours, Asset.location, Asset.name.label("asset_name"), Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
@@ -870,7 +907,7 @@ async def mrr_month_snapshot(
     unclassified = 0
 
     for r in rows:
-        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours)
+        hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         if r.location in AUTOLINES:
             grp = _autoline_asset_group(r.asset_name)
             if grp is None:

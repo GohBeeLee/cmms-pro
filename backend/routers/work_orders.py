@@ -19,6 +19,7 @@ from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
 from routers.analysis import working_hours_between
 from routers.stock import _log_movement, _ensure_table as _ensure_stock_table
+from stock_status import compute_stock_status
 from photo_storage import save_photo
 from wo_numbering import insert_with_unique_wo_number
 
@@ -598,10 +599,12 @@ async def complete_work_order(
             qty_before, part.quantity_on_hand, current_user,
             reason="Used on work order completion", reference=wo.wo_number,
         )
-        if part.quantity_on_hand <= part.reorder_level:
+        severity = compute_stock_status(part.quantity_on_hand, part.reorder_level, bool(getattr(part,"is_critical",False)))
+        if severity != "ok":
             await ws_manager.broadcast_event("inventory", "inventory.low_stock", {
                 "part_id": str(part.id), "part_name": part.name,
                 "quantity_on_hand": part.quantity_on_hand,
+                "stock_status": severity,
             })
 
     await db.flush()
@@ -630,7 +633,8 @@ async def parts_availability(
         "quantity_on_hand": p.quantity_on_hand,
         "reorder_level":    p.reorder_level,
         "is_available":     p.quantity_on_hand > 0,
-        "is_low_stock":     p.quantity_on_hand <= p.reorder_level,
+        "is_low_stock":     compute_stock_status(p.quantity_on_hand, p.reorder_level, bool(getattr(p,"is_critical",False))) != "ok",
+        "stock_status":     compute_stock_status(p.quantity_on_hand, p.reorder_level, bool(getattr(p,"is_critical",False))),
         "unit_cost":        p.unit_cost,
         "location":         p.location,
         "barcode":          getattr(p, "barcode", None),

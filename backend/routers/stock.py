@@ -21,6 +21,7 @@ from db import get_db
 from models import SparePart, User
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
+from stock_status import compute_stock_status
 
 router = APIRouter(prefix="/stock", tags=["stock"], dependencies=[Depends(forbid_viewer)])
 
@@ -100,6 +101,8 @@ async def _log_movement(
 def _part_summary(p: SparePart) -> dict:
     qty   = p.quantity_on_hand or 0
     reord = p.reorder_level    or 0
+    is_critical_flag = bool(getattr(p, "is_critical", False))
+    severity = compute_stock_status(qty, reord, is_critical_flag)
     return {
         "id":               str(p.id),
         "part_code":        p.part_code,
@@ -119,7 +122,9 @@ def _part_summary(p: SparePart) -> dict:
         "last_stock_take_by": getattr(p, "last_stock_take_by", None),
         "unit":             p.unit or "pcs",
         "status":           "Topup" if qty <= reord else "Enough",
-        "is_low_stock":     qty <= reord,
+        "is_low_stock":     severity != "ok",
+        "is_critical":      is_critical_flag,
+        "stock_status":     severity,
     }
 
 
@@ -308,12 +313,14 @@ async def stock_out(
     await db.flush()
 
     # Low stock alert
-    if qty_after <= (part.reorder_level or 0):
+    severity = compute_stock_status(qty_after, part.reorder_level or 0, bool(getattr(part,"is_critical",False)))
+    if severity != "ok":
         await ws_manager.broadcast_event("inventory", "inventory.low_stock", {
             "part_id":      str(part.id),
             "part_name":    part.name,
             "quantity":     qty_after,
             "reorder_level":part.reorder_level,
+            "stock_status": severity,
         })
 
     await ws_manager.broadcast_event("inventory", "inventory.stock_out", {
@@ -330,7 +337,8 @@ async def stock_out(
         "part":       _part_summary(part),
         "qty_before": qty_before,
         "qty_after":  qty_after,
-        "low_stock":  qty_after <= (part.reorder_level or 0),
+        "low_stock":  severity != "ok",
+        "stock_status": severity,
     }
 
 

@@ -90,6 +90,12 @@ class Asset(Base):
     status: Mapped[AssetStatus] = mapped_column(SAEnum(AssetStatus), default=AssetStatus.operational)
     purchase_date: Mapped[datetime | None] = mapped_column(DateTime)
     last_maintained: Mapped[datetime | None] = mapped_column(DateTime)
+    # Divides this asset's computed downtime hours wherever downtime is
+    # calculated for reporting (Root Cause Analysis, Uptime %, MRR reports,
+    # Machine Timeline) — e.g. 2 for a machine with a redundant/parallel
+    # unit where only half the elapsed repair time represents true
+    # production impact. Default 1.0 = no adjustment.
+    downtime_divisor: Mapped[float] = mapped_column(Float, default=1.0)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -211,6 +217,12 @@ class SparePart(Base):
     location: Mapped[str | None] = mapped_column(String(100))
     barcode: Mapped[str | None] = mapped_column(String(100), index=True)
     used_on_asset: Mapped[str | None] = mapped_column(String(200))
+    # Manually-set escalation flag: when a part is at/below its reorder
+    # point, this bumps it from "low" to "critical" severity regardless of
+    # how close to zero it is — for parts an admin knows matter more than
+    # the numbers alone would suggest (sole backup unit, long lead time,
+    # etc). Has no effect while stock is still above the reorder point.
+    is_critical: Mapped[bool] = mapped_column(Boolean, default=False)
     # Photos are compressed JPEG files on disk (see photo_storage.py), not
     # base64 text on the row — same reasoning as WorkOrderPhoto below: keeps
     # the Inventory list endpoint (which returns every part in one response)

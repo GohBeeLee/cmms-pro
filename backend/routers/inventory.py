@@ -26,6 +26,7 @@ from auth import get_current_user, forbid_viewer
 from models import User
 from websocket_manager import ws_manager
 from photo_storage import save_photo, delete_photo_files
+from stock_status import compute_stock_status
 
 router = APIRouter(prefix="/inventory", tags=["inventory"], dependencies=[Depends(forbid_viewer)])
 ROOM  = "inventory"
@@ -75,11 +76,14 @@ class PartIn(BaseModel):
     barcode:          Optional[str]   = None
     used_on_asset:    Optional[str]   = None
     unit:             Optional[str]   = "pcs"
+    is_critical:      Optional[bool]  = None
 
 
 def _dict(p: SparePart, show_cost: bool = True) -> dict:
     qty   = p.quantity_on_hand or 0
     reord = p.reorder_level    or 0
+    is_critical_flag = bool(getattr(p, "is_critical", False))
+    severity = compute_stock_status(qty, reord, is_critical_flag)
     d = {
         "id":               str(p.id),
         "part_code":        p.part_code,
@@ -99,7 +103,9 @@ def _dict(p: SparePart, show_cost: bool = True) -> dict:
         "last_stock_take_by": getattr(p, "last_stock_take_by", None),
         "unit":             p.unit or "pcs",
         "status":           "Topup" if qty <= reord else "Enough",
-        "is_low_stock":     qty <= reord,
+        "is_low_stock":     severity != "ok",
+        "is_critical":      is_critical_flag,
+        "stock_status":     severity,   # "ok" | "low" | "critical"
         "created_at":       p.created_at.isoformat() if p.created_at else None,
         "updated_at":       p.updated_at.isoformat() if p.updated_at else None,
     }
@@ -198,6 +204,8 @@ async def download_template(_: User = Depends(get_current_user)):
         ("Barcode",              False, "Barcode or QR number (optional)"),
         ("Threshold *",          True,  "Min stock level — alert when Quantity ≤ Threshold"),
         ("Status(Enough/Topup)", False, "AUTO-CALCULATED — leave blank"),
+        ("Old No",               False, "Only fill in to RENAME an existing part's code — put its CURRENT code here and the new code in 'No' above. Leave blank for normal add/update rows."),
+        ("Critical",             False, "Yes = always treat as critical once at/below Threshold, regardless of how much is left. Leave blank to not change this."),
     ]
     for c, (h, req, hint) in enumerate(cols, 1):
         cell = ws.cell(row=4, column=c, value=h)
@@ -216,16 +224,16 @@ async def download_template(_: User = Depends(get_current_user)):
 
     # Sample rows
     samples = [
-        ["Electrical","E-001","Fuse 10A",           "Glass fuse 10A 250V",   50,"Rack A1","All machines",    0.80,"","BC001001",10,""],
-        ["Electrical","E-002","Fuse 16A",           "Glass fuse 16A 250V",   30,"Rack A1","Compressor",       1.20,"","BC001002",10,""],
-        ["Electrical","E-003","Contactor 9A",       "LC1D09 24VDC coil",      5,"Rack A2","Conveyor Motor",  45.00,"","BC001003", 2,""],
-        ["Mechanical","M-001","Bearing 6205",       "Deep groove 25x52mm",   20,"Shelf B1","Pump A",           8.50,"","BC002001", 5,""],
-        ["Mechanical","M-002","Bearing 6206",       "Deep groove 30x62mm",   15,"Shelf B1","Motor #1",         9.20,"","BC002002", 5,""],
-        ["Mechanical","M-003","V-Belt A42",         "Classical V-belt",        8,"Shelf B2","Compressor",     12.00,"","BC002003", 3,""],
-        ["Pneumatic", "P-001","SMC Filter Element", "AF20-F02 element",        6,"Rack C1","Pneumatic line",  22.00,"","BC003001", 2,""],
-        ["Pneumatic", "P-002","Solenoid Valve 5/2", "SY3120-5LZD-M5",          4,"Rack C2","Cylinder line",  85.00,"","BC003002", 2,""],
-        ["Consumable","C-001","Cable Tie 300mm",    "Black nylon 300mm",     200,"Rack D1","General",          0.05,"","BC004001",50,""],
-        ["Consumable","C-002","WD-40 Spray 400ml",  "Multi-use lubricant",    10,"Rack D2","General",         12.00,"","BC004002", 3,""],
+        ["Electrical","E-001","Fuse 10A",           "Glass fuse 10A 250V",   50,"Rack A1","All machines",    0.80,"","BC001001",10,"","",""],
+        ["Electrical","E-002","Fuse 16A",           "Glass fuse 16A 250V",   30,"Rack A1","Compressor",       1.20,"","BC001002",10,"","",""],
+        ["Electrical","E-003","Contactor 9A",       "LC1D09 24VDC coil",      5,"Rack A2","Conveyor Motor",  45.00,"","BC001003", 2,"","",""],
+        ["Mechanical","M-001","Bearing 6205",       "Deep groove 25x52mm",   20,"Shelf B1","Pump A",           8.50,"","BC002001", 5,"","",""],
+        ["Mechanical","M-002","Bearing 6206",       "Deep groove 30x62mm",   15,"Shelf B1","Motor #1",         9.20,"","BC002002", 5,"","",""],
+        ["Mechanical","M-003","V-Belt A42",         "Classical V-belt",        8,"Shelf B2","Compressor",     12.00,"","BC002003", 3,"","",""],
+        ["Pneumatic", "P-001","SMC Filter Element", "AF20-F02 element",        6,"Rack C1","Pneumatic line",  22.00,"","BC003001", 2,"","",""],
+        ["Pneumatic", "P-002","Solenoid Valve 5/2", "SY3120-5LZD-M5",          4,"Rack C2","Cylinder line",  85.00,"","BC003002", 2,"","",""],
+        ["Consumable","C-001","Cable Tie 300mm",    "Black nylon 300mm",     200,"Rack D1","General",          0.05,"","BC004001",50,"","",""],
+        ["Consumable","C-002","WD-40 Spray 400ml",  "Multi-use lubricant",    10,"Rack D2","General",         12.00,"","BC004002", 3,"","",""],
     ]
     alt = [PatternFill("solid",start_color="FFFFFF"), PatternFill("solid",start_color="F7FBFF")]
     for r, row in enumerate(samples, 6):
@@ -235,12 +243,12 @@ async def download_template(_: User = Depends(get_current_user)):
             cell.alignment = Alignment(vertical="center", horizontal="right" if c in (5,8,9,11) else "left")
         ws.row_dimensions[r].height = 18
     for r in range(16, 56):
-        for c in range(1, 13):
+        for c in range(1, 15):
             ws.cell(row=r,column=c).fill = alt[r%2]
             ws.cell(row=r,column=c).border = border
         ws.row_dimensions[r].height = 18
 
-    for i, w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18], 1):
+    for i, w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18,14,10], 1):
         from openpyxl.utils import get_column_letter
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A6"
@@ -288,6 +296,7 @@ async def import_excel(
     aliases = {
         "category":"category","category *":"category",
         "no":"part_code","no *":"part_code","part_code":"part_code",
+        "old no":"old_code","old code":"old_code","previous no":"old_code","previous code":"old_code",
         "part item":"name","part item *":"name","name":"name",
         "description":"description",
         "quantity":"quantity","quantity *":"quantity","qty":"quantity",
@@ -300,6 +309,7 @@ async def import_excel(
         "threshold *":"reorder_level","min stock":"reorder_level",
         "status(enough/topup)":"_skip","status":"_skip",
         "supplier":"supplier","unit":"unit",
+        "critical":"is_critical","critical (yes/no)":"is_critical","always critical":"is_critical",
     }
 
     def find_header_row(ws):
@@ -346,7 +356,7 @@ async def import_excel(
     # simply becomes a new category going forward (see matching logic below).
     valid_cats = set(DEFAULT_CATEGORIES)
 
-    inserted, updated, skipped = 0, 0, []
+    inserted, updated, renamed, skipped = 0, 0, 0, []
 
     def gcol(rv, col_map, key, default=""):
         idx = col_map.get(key)
@@ -369,6 +379,7 @@ async def import_excel(
             if all(v is None or str(v).strip()=='' for v in rv): continue
 
             raw_no = gcol(rv,col_map,"part_code")
+            old_no = gcol(rv,col_map,"old_code")
             name   = gcol(rv,col_map,"name")
 
             # Skip the export's own TOTAL footer row silently — it's not a
@@ -412,47 +423,53 @@ async def import_excel(
             barcode       = gcol(rv,col_map,"barcode")      or None
             supplier      = gcol(rv,col_map,"supplier")     or None
             unit          = gcol(rv,col_map,"unit")         or "pcs"
+            critical_raw  = gcol(rv,col_map,"is_critical")  or ""
+            critical_val  = critical_raw.strip().lower() in ("yes","y","true","1","critical") if critical_raw else None
 
-            if part_code in existing:
+            action = None  # 'rename' | 'update' | 'insert'
+            if old_no and old_no in existing and old_no != part_code:
+                # Rename: keep the same part (same id, same history/stock
+                # movements/PartsUsed links), just change its code — instead
+                # of the new code matching nothing and creating a duplicate.
+                if part_code in existing:
+                    skipped.append({"sheet":ws.title,"part_code":part_code,
+                        "reason":f"Cannot rename {old_no} -> {part_code}: {part_code} is already in use by another part"})
+                    continue
+                p = existing.pop(old_no)
+                p.part_code = part_code
+                action = "rename"
+            elif part_code in existing:
                 p = existing[part_code]
-                p.name             = name
-                p.category         = category
-                p.description      = description
-                p.quantity_on_hand = qty
-                p.reorder_level    = reorder_level
-                if unit_cost  is not None: p.unit_cost = unit_cost
-                if location:  p.location  = location
-                if supplier:  p.supplier  = supplier
-                p.unit = unit
-                _safe_set(p,"barcode",       barcode)
-                _safe_set(p,"used_on_asset", used_on)
-                p.updated_at = datetime.utcnow()
-                updated += 1
+                action = "update"
             else:
-                p = SparePart(
-                    part_code        = part_code,
-                    name             = name,
-                    category         = category,
-                    description      = description,
-                    quantity_on_hand = qty,
-                    reorder_level    = reorder_level,
-                    unit_cost        = unit_cost,
-                    location         = location,
-                    supplier         = supplier,
-                    unit             = unit,
-                )
-                _safe_set(p,"barcode",       barcode)
-                _safe_set(p,"used_on_asset", used_on)
+                p = SparePart(part_code=part_code, name=name, category=category, unit=unit)
                 db.add(p)
-                existing[part_code] = p
-                inserted += 1
+                action = "insert"
+
+            p.name             = name
+            p.category         = category
+            p.description      = description
+            p.quantity_on_hand = qty
+            p.reorder_level    = reorder_level
+            if unit_cost  is not None: p.unit_cost = unit_cost
+            if location:  p.location  = location
+            if supplier:  p.supplier  = supplier
+            p.unit = unit
+            _safe_set(p,"barcode",       barcode)
+            _safe_set(p,"used_on_asset", used_on)
+            if critical_val is not None: _safe_set(p,"is_critical", critical_val)
+            p.updated_at = datetime.utcnow()
+            existing[part_code] = p
+            if action == "rename": renamed += 1
+            elif action == "update": updated += 1
+            else: inserted += 1
 
     await db.flush()
     return {
-        "success":True,"inserted":inserted,"updated":updated,
+        "success":True,"inserted":inserted,"updated":updated,"renamed":renamed,
         "skipped":len(skipped),"skipped_details":skipped,
         "sheets_processed":[ws.title for ws,_,_ in data_sheets],
-        "message":f"Import complete: {inserted} added, {updated} updated, {len(skipped)} skipped.",
+        "message":f"Import complete: {inserted} added, {updated} updated, {renamed} renamed, {len(skipped)} skipped.",
     }
 
 
@@ -718,7 +735,7 @@ async def stock_take_status(
 
 @router.get("/")
 async def list_parts(
-    low_stock:bool=False, category:Optional[str]=None,
+    low_stock:bool=False, critical_only:bool=False, category:Optional[str]=None,
     skip:int=0, limit:int=5000,
     db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
@@ -732,7 +749,11 @@ async def list_parts(
     # filters), and within each category ordered by part number smallest to
     # largest — see _category_sort_key / _natural_sort_key above.
     all_parts = sorted(all_parts, key=lambda p: (_category_sort_key(p.category), _natural_sort_key(p.part_code)))
-    return [_dict(p,show_cost) for p in all_parts]
+    out = [_dict(p,show_cost) for p in all_parts]
+    # critical_only filters on the computed severity tier — not a plain
+    # column, so this is applied after fetching rather than in the query.
+    if critical_only: out = [d for d in out if d["stock_status"]=="critical"]
+    return out
 
 
 @router.post("/", status_code=201)
@@ -755,6 +776,7 @@ async def create_part(
     )
     _safe_set(p,"barcode",      body.barcode)
     _safe_set(p,"used_on_asset",body.used_on_asset)
+    _safe_set(p,"is_critical",  bool(body.is_critical))
     db.add(p); await db.flush(); await db.refresh(p)
     await ws_manager.broadcast_event(ROOM,"inventory.created",{"id":str(p.id),"name":p.name})
     return _dict(p,_can_view_cost(current_user))
@@ -773,6 +795,11 @@ async def update_part(
     _require_admin_or_manager(current_user)
     p=await _get(part_id,db)
     updates=body.model_dump(exclude_unset=True,exclude_none=True)
+    new_code=updates.get("part_code")
+    if new_code and new_code!=p.part_code:
+        clash=(await db.execute(select(SparePart).where(SparePart.part_code==new_code))).scalar_one_or_none()
+        if clash:
+            raise HTTPException(400, f"Code '{new_code}' is already in use by {clash.name}")
     for k,v in updates.items():
         if k in("barcode","used_on_asset"): _safe_set(p,k,v)
         else:

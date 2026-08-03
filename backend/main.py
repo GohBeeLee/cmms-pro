@@ -27,6 +27,8 @@ from routers.work_orders import router as wo_router
 from routers.inventory import router as inventory_router
 from routers.pm_schedules import router as pm_router, _generate_wo_from_pm
 from routers.requests import router as requests_router
+from routers.public_stockout import router as public_stockout_router
+from stock_status import CRITICAL_SQL
 from routers.export_import import router as data_router
 from routers.users import router as users_router
 from routers.stock import router as stock_router
@@ -80,6 +82,10 @@ async def ensure_schema_updates():
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN hold_started_at DATETIME"))
         if "held_hours" not in names:
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN held_hours FLOAT NOT NULL DEFAULT 0"))
+        asset_columns = (await conn.execute(text("PRAGMA table_info(assets)"))).mappings().all()
+        asset_names = {col["name"] for col in asset_columns}
+        if "downtime_divisor" not in asset_names:
+            await conn.execute(text("ALTER TABLE assets ADD COLUMN downtime_divisor FLOAT NOT NULL DEFAULT 1.0"))
         spare_columns = (await conn.execute(text("PRAGMA table_info(spare_parts)"))).mappings().all()
         spare_names = {col["name"] for col in spare_columns}
         if "barcode" not in spare_names:
@@ -91,6 +97,8 @@ async def ensure_schema_updates():
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_thumb_path VARCHAR(255)"))
         if "photo_full_path" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN photo_full_path VARCHAR(255)"))
+        if "is_critical" not in spare_names:
+            await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN is_critical BOOLEAN DEFAULT 0"))
         if "last_stock_take_at" not in spare_names:
             await conn.execute(text("ALTER TABLE spare_parts ADD COLUMN last_stock_take_at DATETIME"))
         if "last_stock_take_by" not in spare_names:
@@ -183,6 +191,7 @@ app.include_router(wo_router)
 app.include_router(inventory_router)
 app.include_router(pm_router)
 app.include_router(requests_router)    # public — no auth needed
+app.include_router(public_stockout_router)  # public — no auth needed
 app.include_router(data_router)        # export + import (Excel)
 app.include_router(users_router)       # technician list for assignment
 app.include_router(stock_router)       # stock in/out + history
@@ -222,6 +231,7 @@ async def get_kpi(db: AsyncSession = Depends(get_db), current_user=Depends(forbi
         "work_orders_completed_today": (await db.execute(select(func.count()).select_from(WorkOrder).where(WorkOrder.completed_at >= today_start))).scalar(),
         "pm_schedules_due_soon":       (await db.execute(select(func.count()).select_from(PMSchedule).where(PMSchedule.is_active == True, PMSchedule.next_due <= week_ahead))).scalar(),
         "low_stock_parts":             (await db.execute(select(func.count()).select_from(SparePart).where(SparePart.quantity_on_hand <= SparePart.reorder_level))).scalar(),
+        "critical_parts":              (await db.execute(text(f"SELECT COUNT(*) FROM spare_parts WHERE {CRITICAL_SQL}"))).scalar(),
         "total_technicians":           (await db.execute(select(func.count()).select_from(UserModel).where(UserModel.is_active == True))).scalar(),
     }
 
@@ -237,6 +247,11 @@ async def serve_frontend():
 async def serve_request_form(asset_id: str = None):
     path = os.path.join(FRONTEND_DIR, "request.html")
     return FileResponse(path) if os.path.exists(path) else HTMLResponse("<h2>Request form not found.</h2>")
+
+@app.get("/stock-out", include_in_schema=False)
+async def serve_stockout_form():
+    path = os.path.join(FRONTEND_DIR, "stockout.html")
+    return FileResponse(path) if os.path.exists(path) else HTMLResponse("<h2>Stock-out form not found.</h2>")
 
 @app.get("/qr", include_in_schema=False)
 async def serve_qr(request: Request):
@@ -258,6 +273,30 @@ button{{background:#2563eb;color:#fff;border:none;padding:12px 28px;border-radiu
 <body><div class="box">
 <h1>&#128295; Machine Repair Request</h1>
 <p>Scan this QR code to report a machine problem</p>
+<img src="https://api.qrserver.com/v1/create-qr-code/?size=280x280&data={url}" width="280" height="280"/>
+<div class="url">{url}</div>
+<button onclick="window.print()">&#128438; Print QR Code</button>
+</div></body></html>"""
+    return HTMLResponse(html)
+
+@app.get("/stock-out-qr", include_in_schema=False)
+async def serve_stockout_qr(request: Request):
+    path = str(app.url_path_for("serve_stockout_form")).rstrip("/")
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    url = f"{scheme}://{host}{path}"
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+<title>Production Cutter Stock-Out QR Code</title>
+<style>body{{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;background:#f8fafc;}}
+.box{{background:#fff;border-radius:16px;padding:40px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.08);max-width:360px;width:100%;}}
+h1{{color:#1e293b;font-size:20px;margin-bottom:4px;}} p{{color:#64748b;font-size:13px;margin-bottom:20px;}}
+img{{border-radius:12px;border:1px solid #e2e8f0;margin-bottom:16px;}}
+.url{{font-size:11px;color:#94a3b8;word-break:break-all;margin-bottom:20px;}}
+button{{background:#2563eb;color:#fff;border:none;padding:12px 28px;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}}
+@media print{{button{{display:none;}}body{{background:#fff;}}}}</style></head>
+<body><div class="box">
+<h1>&#9986;&#65039; Production Cutter Stock-Out</h1>
+<p>Scan this QR code to stock out a Production Cutter item — no login needed</p>
 <img src="https://api.qrserver.com/v1/create-qr-code/?size=280x280&data={url}" width="280" height="280"/>
 <div class="url">{url}</div>
 <button onclick="window.print()">&#128438; Print QR Code</button>

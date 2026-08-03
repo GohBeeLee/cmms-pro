@@ -68,6 +68,7 @@ class AssetUpdate(BaseModel):
     serial_number: Optional[str] = None
     status: Optional[AssetStatus] = None
     notes: Optional[str] = None
+    downtime_divisor: Optional[float] = None
 
 class AssetOut(BaseModel):
     id: UUID
@@ -83,6 +84,7 @@ class AssetOut(BaseModel):
     last_maintained: Optional[datetime]
     notes: Optional[str]
     created_at: datetime
+    downtime_divisor: float = 1.0
 
     model_config = {"from_attributes": True}
 

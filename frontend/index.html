@@ -639,6 +639,7 @@ function Dashboard(){
     {icon:'✅',label:'Completed Today',value:kpi.work_orders_completed_today,bg:'#f0fdf4'},
     {icon:'📅',label:'PM Due (7 days)',value:kpi.pm_schedules_due_soon,bg:'#faf5ff',alert:kpi.pm_schedules_due_soon>0},
     {icon:'📦',label:'Low Stock Parts',value:kpi.low_stock_parts,bg:'#fff7ed',alert:kpi.low_stock_parts>0},
+    {icon:'🔴',label:'Critical Parts',value:kpi.critical_parts,bg:'#fef2f2',alert:kpi.critical_parts>0},
     {icon:'👥',label:'Active Users',value:kpi.total_technicians,bg:'#f0fdfa'},
   ]:[];
 
@@ -1744,6 +1745,11 @@ function HistoryLog(){
   const [rcLocations,setRcLocations]=useState([]);
   const [rcAnalysis,setRcAnalysis]=useState(null);
   const [rcAnalysisLoading,setRcAnalysisLoading]=useState(true);
+  const [dfModal,setDfModal]=useState(false);       // Downtime Formula popup open/closed
+  const [dfSearch,setDfSearch]=useState('');
+  const [dfSelected,setDfSelected]=useState(null);  // selected asset object
+  const [dfDivisor,setDfDivisor]=useState('1');
+  const [dfSaving,setDfSaving]=useState(false);
   const [analysis,setAnalysis]=useState(null);
   const [analysisLoading,setAnalysisLoading]=useState(true);
   // ── Per-machine comparison ──
@@ -1791,6 +1797,22 @@ function HistoryLog(){
 
   async function loadAssetsList(){
     try{setAllAssets(await api('/analysis/assets'));}catch(e){}
+  }
+  async function saveDowntimeFormula(){
+    if(!dfSelected) return;
+    const val=parseFloat(dfDivisor);
+    if(!val||val<=0){toast('Enter a divisor greater than 0','err');return;}
+    setDfSaving(true);
+    try{
+      await api('/assets/'+dfSelected.id,{method:'PATCH',body:JSON.stringify({downtime_divisor:val})});
+      toast('Downtime formula updated for '+dfSelected.name,'ok');
+      await loadAssetsList();
+      // Downtime figures for this asset changed — refresh whichever
+      // analysis tabs are already loaded so numbers stay in sync.
+      loadAnalysis(); loadRootCauseAnalysis();
+      setDfModal(false);
+    }catch(e){toast(e.message,'err');}
+    finally{setDfSaving(false);}
   }
   async function loadMachineTimeline(){
     setMachineTimelineLoading(true);
@@ -2023,6 +2045,7 @@ function HistoryLog(){
         <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>History Log</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Complete record of all work orders</p></div>
         <div style={{display:'flex',gap:'8px'}}>
         {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>setShowDeleted(v=>!v)}>🗑️ Deleted Work Orders ({deletedWos.length})</button>}
+        {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{setDfModal(true);setDfSelected(null);setDfSearch('');}}>⚙️ Downtime Formula</button>}
         <label style={{cursor:'pointer'}}>
           <span className="btn btn-secondary" style={{fontSize:'13px',display:'inline-block'}}>
             {importing ? '⏳ Importing…' : '📤 Import Excel'}
@@ -2934,6 +2957,77 @@ function HistoryLog(){
           )}
         </Modal>
       )}
+
+      {dfModal&&(
+        <Modal title="⚙️ Downtime Formula" onClose={()=>setDfModal(false)}>
+          <div style={{fontSize:'12px',color:'#64748b',marginBottom:'14px',lineHeight:1.6}}>
+            Some machines (e.g. one with a spare/parallel unit) shouldn't count their full repair time as downtime.
+            Pick a machine and set a divisor — its computed downtime will be divided by this number everywhere it's
+            reported (Root Cause Analysis, Uptime %, MRR reports, Machine Timeline). Leave at 1 for no change.
+          </div>
+
+          {!dfSelected?(
+            <div>
+              <input className="inp" placeholder="Search machine name or code…" value={dfSearch}
+                onChange={e=>setDfSearch(e.target.value)} autoFocus/>
+              <div style={{maxHeight:'320px',overflowY:'auto',marginTop:'10px',border:'1px solid #f1f5f9',borderRadius:'10px'}}>
+                {allAssets
+                  .filter(a=>!dfSearch.trim()||normalizeSearch(a.name).includes(normalizeSearch(dfSearch))||normalizeSearch(a.asset_code||'').includes(normalizeSearch(dfSearch)))
+                  .slice(0,50)
+                  .map(a=>(
+                    <div key={a.id} onClick={()=>{setDfSelected(a);setDfDivisor(String(a.downtime_divisor||1));}}
+                      style={{padding:'10px 14px',cursor:'pointer',borderBottom:'1px solid #f8fafc',display:'flex',justifyContent:'space-between',alignItems:'center'}}
+                      onMouseEnter={e=>e.currentTarget.style.background='#f8fafc'} onMouseLeave={e=>e.currentTarget.style.background=''}>
+                      <div>
+                        <div style={{fontWeight:600,fontSize:'13px',color:'#1e293b'}}>{a.name}</div>
+                        <div style={{fontSize:'11px',color:'#94a3b8',fontFamily:'monospace'}}>{a.asset_code}</div>
+                      </div>
+                      {a.downtime_divisor&&a.downtime_divisor!==1&&(
+                        <span style={{fontSize:'11px',fontWeight:700,color:'#7c3aed',background:'#f5f3ff',padding:'2px 10px',borderRadius:'999px'}}>÷{a.downtime_divisor}</span>
+                      )}
+                    </div>
+                  ))}
+                {allAssets.length===0&&<div style={{padding:'20px',textAlign:'center',color:'#94a3b8',fontSize:'13px'}}>Loading machines…</div>}
+              </div>
+            </div>
+          ):(
+            <div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',background:'#f8fafc',borderRadius:'10px',padding:'12px 14px',marginBottom:'16px'}}>
+                <div>
+                  <div style={{fontWeight:700,fontSize:'14px',color:'#1e293b'}}>{dfSelected.name}</div>
+                  <div style={{fontSize:'11px',color:'#94a3b8',fontFamily:'monospace'}}>{dfSelected.asset_code}</div>
+                </div>
+                <button onClick={()=>setDfSelected(null)} style={{fontSize:'12px',color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontWeight:600}}>Change</button>
+              </div>
+
+              <label className="lbl">Divide downtime by</label>
+              <div style={{display:'flex',gap:'8px',marginBottom:'10px',flexWrap:'wrap'}}>
+                {[1,2,3,4].map(n=>(
+                  <button key={n} onClick={()=>setDfDivisor(String(n))} style={{
+                    padding:'8px 16px',borderRadius:'8px',cursor:'pointer',fontSize:'13px',fontWeight:700,
+                    border:dfDivisor===String(n)?'1.5px solid #7c3aed':'1.5px solid #e2e8f0',
+                    background:dfDivisor===String(n)?'#f5f3ff':'#fff',color:dfDivisor===String(n)?'#7c3aed':'#475569',
+                  }}>{n===1?'No change':'÷'+n}</button>
+                ))}
+              </div>
+              <input type="number" className="inp" min="0.1" step="0.1" value={dfDivisor}
+                onChange={e=>setDfDivisor(e.target.value)} placeholder="Custom divisor"/>
+              {parseFloat(dfDivisor)>0&&(
+                <div style={{fontSize:'12px',color:'#64748b',marginTop:'8px'}}>
+                  Example: a 6h repair on this machine will count as <strong>{(6/parseFloat(dfDivisor)).toFixed(2)}h</strong> of downtime in reports.
+                </div>
+              )}
+
+              <div style={{display:'flex',gap:'10px',marginTop:'20px'}}>
+                <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setDfModal(false)}>Cancel</button>
+                <button className="btn btn-primary" style={{flex:1}} onClick={saveDowntimeFormula} disabled={dfSaving}>
+                  {dfSaving?'Saving…':'Save Formula'}
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }
@@ -3172,6 +3266,10 @@ function InventoryAndStock(){
           <p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>{isProduction?'Production Cutter stock in/out':'Scan, manage parts, and track stock movements'}</p>
         </div>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
+          {canManage&&<button onClick={()=>window.open('/stock-out-qr','_blank')} style={{
+            padding:'9px 16px',borderRadius:'8px',border:'1px solid #ddd6fe',cursor:'pointer',
+            fontSize:'14px',fontWeight:700,background:'#f5f3ff',color:'#7c3aed',
+          }}>📱 Operator Stock-Out QR</button>}
           {[
             ['parts','📦 Parts & Scanner'],
             ...(canManage?[['stocktake','📋 Stock Take']]:[]),
@@ -3234,11 +3332,19 @@ function nextPartCode(category,parts){
 
 function PartsAndScannerTab({canManage,isProduction}){
   const [parts,setParts]=useState([]);
+  // Unfiltered, all-categories snapshot used ONLY for auto-generating the
+  // next part code — `parts` above can be narrowed by catFilter, and using
+  // that filtered view for code generation meant a category with no parts
+  // visible under the current filter would wrongly fall back to a fresh
+  // derived prefix (colliding with similarly-named categories, e.g.
+  // "Electrical Components" and "Electronic Components" both deriving "EC").
+  const [allPartsForCode,setAllPartsForCode]=useState([]);
   const [categories,setCategories]=useState([]);
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
   const [catFilter,setCatFilter]=useState(isProduction?'Production Cutter':'');
   const [lowOnly,setLowOnly]=useState(false);
+  const [criticalOnly,setCriticalOnly]=useState(false);
   const [modal,setModal]=useState(false);
   const [editPart,setEditPart]=useState(null);
   const [importModal,setImportModal]=useState(false);
@@ -3274,7 +3380,7 @@ function PartsAndScannerTab({canManage,isProduction}){
   const emptyForm={
     part_code:'',name:'',category:'',description:'',unit:'pcs',
     quantity_on_hand:0,reorder_level:5,unit_cost:'',
-    supplier:'',location:'',barcode:'',used_on_asset:'',
+    supplier:'',location:'',barcode:'',used_on_asset:'',is_critical:false,
   };
   const [form,setForm]=useState(emptyForm);
   const [formPhoto,setFormPhoto]=useState(''); // preview: existing photo_thumb_url, or a fresh base64 data URL from a new pick
@@ -3284,15 +3390,18 @@ function PartsAndScannerTab({canManage,isProduction}){
 
   async function load(){
     try{
-      let url='/inventory/?low_stock='+lowOnly+'&limit=2000';
+      let url='/inventory/?low_stock='+lowOnly+'&critical_only='+criticalOnly+'&limit=2000';
       if(catFilter) url+='&category='+encodeURIComponent(catFilter);
-      const [p,cats]=await Promise.all([api(url),api('/inventory/categories')]);
+      const calls=[api(url),api('/inventory/categories')];
+      if(catFilter) calls.push(api('/inventory/?low_stock=false&limit=2000'));
+      const [p,cats,allP]=await Promise.all(calls);
       setParts(p);
       setCategories(cats);
+      setAllPartsForCode(catFilter?allP:p);
     }catch(e){toast(e.message,'err');}
     finally{setLoading(false);}
   }
-  useEffect(()=>{load();},[lowOnly,catFilter]);
+  useEffect(()=>{load();},[lowOnly,criticalOnly,catFilter]);
   useWS('inventory',load);
 
   useEffect(()=>{ if(scanOpen) setTimeout(()=>barcodeRef.current?.focus(),150); },[scanOpen]);
@@ -3554,7 +3663,8 @@ function PartsAndScannerTab({canManage,isProduction}){
       ||normalizeSearch(p.description).includes(q)
       ||normalizeSearch(p.barcode).includes(q);
   });
-  const topupCount=filtered.filter(p=>p.is_low_stock).length;
+  const criticalCount=filtered.filter(p=>p.stock_status==='critical').length;
+  const lowCount=filtered.filter(p=>p.stock_status==='low').length;
 
   return (
     <div>
@@ -3597,8 +3707,14 @@ function PartsAndScannerTab({canManage,isProduction}){
         <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer',whiteSpace:'nowrap'}}>
           <input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/> ⚠️ Topup only
         </label>
-        {topupCount>0&&<span style={{background:'#fef9c3',color:'#854d0e',padding:'3px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
-          {topupCount} part{topupCount>1?'s':''} need Topup
+        <label style={{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',color:'#64748b',cursor:'pointer',whiteSpace:'nowrap'}}>
+          <input type="checkbox" checked={criticalOnly} onChange={e=>setCriticalOnly(e.target.checked)}/> 🔴 Critical only
+        </label>
+        {criticalCount>0&&<span style={{background:'#fee2e2',color:'#991b1b',padding:'3px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
+          🔴 {criticalCount} critical
+        </span>}
+        {lowCount>0&&<span style={{background:'#fef9c3',color:'#854d0e',padding:'3px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
+          🟠 {lowCount} low
         </span>}
         {!canManage&&<span style={{background:'#f1f5f9',color:'#64748b',padding:'3px 12px',borderRadius:'999px',fontSize:'11px'}}>
           👁️ View only — prices hidden
@@ -3617,8 +3733,10 @@ function PartsAndScannerTab({canManage,isProduction}){
               ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}</th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
-              const isTopup=p.is_low_stock;
-              const rowBg=isTopup?'#fefce8':'';
+              const sev=p.stock_status||(p.is_low_stock?'low':'ok');
+              const isTopup=sev!=='ok';
+              const isCritical=sev==='critical';
+              const rowBg=isCritical?'#fef2f2':isTopup?'#fefce8':'';
               const total=p.total_amount!=null?'RM '+p.total_amount.toFixed(2):'—';
               return(
                 <tr key={p.id} style={{background:rowBg}}>
@@ -3635,10 +3753,10 @@ function PartsAndScannerTab({canManage,isProduction}){
                       }} title={canManage?'Add photo':''}>🖼️</div>
                     )}
                   </td>
-                  <td style={{fontWeight:600}}>{p.name}</td>
+                  <td style={{fontWeight:600}}>{p.name}{p.is_critical&&<span title="Always treated as critical when low" style={{marginLeft:'6px',fontSize:'11px'}}>📌</span>}</td>
                   <td><span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'999px',background:'#f1f5f9',color:'#374151'}}>{p.category||'—'}</span></td>
                   <td style={{color:'#64748b',fontSize:'12px',maxWidth:'140px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={p.description||''}>{p.description||'—'}</td>
-                  <td style={{fontWeight:700,color:isTopup?'#ea580c':'#1e293b',textAlign:'right'}}>{p.quantity_on_hand}</td>
+                  <td style={{fontWeight:700,color:isCritical?'#dc2626':isTopup?'#ea580c':'#1e293b',textAlign:'right'}}>{p.quantity_on_hand}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.location||'—'}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.used_on_asset||'—'}</td>
                   {canManage&&<>
@@ -3656,11 +3774,11 @@ function PartsAndScannerTab({canManage,isProduction}){
                   <td>
                     <span style={{
                       display:'inline-block',padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,
-                      background:isTopup?'#fef9c3':'#dcfce7',
-                      color:isTopup?'#854d0e':'#166534',
-                    }}>{p.status||'—'}</span>
+                      background:isCritical?'#fee2e2':isTopup?'#fef9c3':'#dcfce7',
+                      color:isCritical?'#991b1b':isTopup?'#854d0e':'#166534',
+                    }}>{isCritical?'🔴 Critical':isTopup?'🟠 Low':'🟢 OK'}</span>
                   </td>
-                  <td style={{whiteSpace:'nowrap',position:'sticky',right:0,background:isTopup?'#fefce8':'#fff',boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
+                  <td style={{whiteSpace:'nowrap',position:'sticky',right:0,background:isCritical?'#fef2f2':isTopup?'#fefce8':'#fff',boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
                     <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
                       <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.has_photo?'Photo':'+ Photo'}</button>
@@ -3670,7 +3788,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                         quantity_on_hand:p.quantity_on_hand,reorder_level:p.reorder_level,
                         unit_cost:p.unit_cost||'',supplier:p.supplier||'',
                         location:p.location||'',barcode:p.barcode||'',
-                        used_on_asset:p.used_on_asset||'',
+                        used_on_asset:p.used_on_asset||'',is_critical:!!p.is_critical,
                       });setFormPhoto(p.photo_thumb_url||p.photo_full_url||'');setFormPhotoIsNew(false);setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
                       <button onClick={()=>del(p.id,p.name)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Delete</button>
                     </>}
@@ -3714,10 +3832,11 @@ function PartsAndScannerTab({canManage,isProduction}){
 
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
               <div><label className="lbl">No (Part Code) *</label>
-                <input className="inp" disabled={!!editPart} value={form.part_code}
+                <input className="inp" value={form.part_code}
                   onChange={e=>{setCodeManual(true);setForm({...form,part_code:e.target.value});}}
                   placeholder={editPart?'':'Pick a category to auto-generate…'}/>
                 {!editPart&&<div style={{fontSize:'11px',color:'#94a3b8',marginTop:'3px'}}>Auto-generated from category — edit if you need a different code</div>}
+                {editPart&&form.part_code!==editPart.part_code&&<div style={{fontSize:'11px',color:'#d97706',marginTop:'3px'}}>⚠️ Renaming — history and stock stay linked to this part, only the code label changes</div>}
               </div>
               <div><label className="lbl">Category</label>
                 <input className="inp" list="cat-options" value={form.category} onChange={e=>{
@@ -3725,7 +3844,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                   setForm(f=>{
                     const nf={...f,category:cat};
                     if(!editPart&&!codeManual){
-                      nf.part_code=cat?nextPartCode(cat,parts):'';
+                      nf.part_code=cat?nextPartCode(cat,allPartsForCode):'';
                     }
                     return nf;
                   });
@@ -3769,6 +3888,10 @@ function PartsAndScannerTab({canManage,isProduction}){
                 <input className="inp" value={form.barcode} onChange={e=>setForm({...form,barcode:e.target.value})} placeholder="Scan or type"/>
               </div>
             </div>
+            <label style={{display:'flex',alignItems:'center',gap:'8px',fontSize:'13px',color:'#374151',cursor:'pointer',marginTop:'10px'}}>
+              <input type="checkbox" checked={!!form.is_critical} onChange={e=>setForm({...form,is_critical:e.target.checked})}/>
+              📌 Always treat as critical when at/below threshold
+            </label>
             <div style={{display:'flex',gap:'10px',marginTop:'8px'}}>
               <button className="btn btn-primary" style={{flex:1}} onClick={save}>Save</button>
               <button className="btn btn-secondary" style={{flex:1}} onClick={()=>{setModal(false);setEditPart(null);setFormPhoto('');setFormPhotoIsNew(false);}}>Cancel</button>
@@ -4011,8 +4134,11 @@ function PartsAndScannerTab({canManage,isProduction}){
             {/* Right: part card + result */}
             <div style={{display:'flex',flexDirection:'column',gap:'16px'}}>
               {scanning&&<div className="card" style={{display:'flex',alignItems:'center',justifyContent:'center',padding:'50px'}}><Spinner/></div>}
-              {scanPart&&!scanning&&(
-                <div className="card" style={{border:scanPart.is_low_stock?'2px solid #f59e0b':'2px solid #e2e8f0',background:scanPart.is_low_stock?'#fefce8':'#fff'}}>
+              {scanPart&&!scanning&&(()=>{
+                const sev=scanPart.stock_status||(scanPart.is_low_stock?'low':'ok');
+                const isCritical=sev==='critical', isTopup=sev!=='ok';
+                return (
+                <div className="card" style={{border:isCritical?'2px solid #dc2626':isTopup?'2px solid #f59e0b':'2px solid #e2e8f0',background:isCritical?'#fef2f2':isTopup?'#fefce8':'#fff'}}>
                   <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:'12px',gap:'12px'}}>
                     {scanPart.photo_thumb_url&&(
                       <img src={scanPart.photo_thumb_url} alt={scanPart.name} onClick={()=>setLightboxPhoto({url:scanPart.photo_full_url||scanPart.photo_thumb_url,name:scanPart.name})}
@@ -4020,14 +4146,14 @@ function PartsAndScannerTab({canManage,isProduction}){
                     )}
                     <div style={{flex:1}}>
                       <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700,marginBottom:'4px'}}>{scanPart.part_code}</div>
-                      <div style={{fontWeight:800,color:'#1e293b',fontSize:'16px',marginBottom:'4px'}}>{scanPart.name}</div>
+                      <div style={{fontWeight:800,color:'#1e293b',fontSize:'16px',marginBottom:'4px'}}>{scanPart.name}{scanPart.is_critical&&<span title="Always treated as critical when low" style={{marginLeft:'6px',fontSize:'12px'}}>📌</span>}</div>
                       <div style={{fontSize:'12px',color:'#64748b'}}>{scanPart.category}{scanPart.description&&' · '+scanPart.description}</div>
                     </div>
-                    <span style={{padding:'4px 12px',borderRadius:'999px',fontSize:'11px',fontWeight:700,flexShrink:0,background:scanPart.is_low_stock?'#fef9c3':'#dcfce7',color:scanPart.is_low_stock?'#854d0e':'#166534'}}>{scanPart.status}</span>
+                    <span style={{padding:'4px 12px',borderRadius:'999px',fontSize:'11px',fontWeight:700,flexShrink:0,background:isCritical?'#fee2e2':isTopup?'#fef9c3':'#dcfce7',color:isCritical?'#991b1b':isTopup?'#854d0e':'#166534'}}>{isCritical?'🔴 Critical':isTopup?'🟠 Low':'🟢 OK'}</span>
                   </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',background:'#f8fafc',borderRadius:'10px',padding:'12px',marginBottom:'12px'}}>
                     <div style={{textAlign:'center'}}>
-                      <div style={{fontSize:'24px',fontWeight:800,color:scanPart.is_low_stock?'#ea580c':'#2563eb'}}>{scanPart.quantity_on_hand}</div>
+                      <div style={{fontSize:'24px',fontWeight:800,color:isCritical?'#dc2626':isTopup?'#ea580c':'#2563eb'}}>{scanPart.quantity_on_hand}</div>
                       <div style={{fontSize:'11px',color:'#94a3b8'}}>Current Stock</div>
                     </div>
                     <div style={{textAlign:'center',borderLeft:'1px solid #e2e8f0',borderRight:'1px solid #e2e8f0'}}>
@@ -4045,13 +4171,14 @@ function PartsAndScannerTab({canManage,isProduction}){
                     {canManage&&scanPart.unit_cost!=null&&<div>💰 <strong>Unit Price:</strong> RM {scanPart.unit_cost.toFixed(2)}</div>}
                     {scanPart.barcode&&<div>🔲 <strong>Barcode:</strong> <span style={{fontFamily:'monospace'}}>{scanPart.barcode}</span></div>}
                   </div>
-                  {scanPart.is_low_stock&&(
-                    <div style={{marginTop:'10px',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:'8px',padding:'8px 12px',fontSize:'12px',color:'#991b1b',fontWeight:600}}>
-                      ⚠️ Low stock — below minimum level!
+                  {isTopup&&(
+                    <div style={{marginTop:'10px',background:isCritical?'#fef2f2':'#fffbeb',border:isCritical?'1px solid #fecaca':'1px solid #fde68a',borderRadius:'8px',padding:'8px 12px',fontSize:'12px',color:isCritical?'#991b1b':'#92400e',fontWeight:600}}>
+                      {isCritical?'🔴 Critical — restock immediately!':'🟠 Low stock — below minimum level'}
                     </div>
                   )}
                 </div>
-              )}
+                );
+              })()}
               {moveResult&&(
                 <div style={{background:moveResult.low_stock?'#fef2f2':mode==='out'?'#fefce8':'#f0fdf4',border:`2px solid ${moveResult.low_stock?'#fca5a5':mode==='out'?'#fde68a':'#bbf7d0'}`,borderRadius:'12px',padding:'14px'}}>
                   <div style={{fontWeight:700,fontSize:'14px',marginBottom:'8px',color:moveResult.low_stock?'#991b1b':mode==='out'?'#b45309':'#16a34a'}}>

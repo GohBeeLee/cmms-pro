@@ -23,7 +23,7 @@ from websocket_manager import ws_manager
 from routers.analysis import working_hours_between, _wo_downtime_hours
 from routers.stock import _log_movement, _ensure_table as _ensure_stock_table
 from stock_status import compute_stock_status
-from photo_storage import save_photo
+from photo_storage import save_photo, PHOTOS_DIR
 from wo_numbering import insert_with_unique_wo_number
 
 router = APIRouter(prefix="/work-orders", tags=["work_orders"])
@@ -689,9 +689,11 @@ async def export_mrr_form(
         raise HTTPException(500, "MRR template is missing from the server.")
     try:
         from openpyxl import load_workbook
-        from openpyxl.styles import Alignment
+        from openpyxl.styles import Alignment, Font
+        from openpyxl.drawing.image import Image as XLImage
+        from PIL import Image as PILImage
     except ImportError:
-        raise HTTPException(500, "openpyxl not installed on server. Run: pip install openpyxl")
+        raise HTTPException(500, "openpyxl/Pillow not installed on server. Run: pip install openpyxl Pillow")
 
     wo = await _get_wo(wo_id, db)
     desc = wo.description or ""
@@ -749,6 +751,52 @@ async def export_mrr_form(
         ws["D28"] = round(downtime_hours, 2)
     # B33/D33 ("Verified by requestor" / "Date") are left blank — that's a
     # physical signature line, signed after this is printed.
+
+    # ── Photo Evidence sheet ──────────────────────────────────────────────
+    # A second sheet, separate from the controlled "Repair Request" print
+    # layout above (which stays byte-identical to the official form) —
+    # operator photos from the initial report and technician photos from
+    # completion, grouped and labeled so it's clear which is which.
+    photos = list(wo.photos or [])
+    if photos:
+        ws2 = wb.create_sheet("Photos")
+        ws2.column_dimensions["B"].width = 46
+        ws2["B1"] = f"Photo Evidence — {wo.wo_number}"
+        ws2["B1"].font = Font(bold=True, size=14)
+
+        groups = [
+            ("operator",   "📋 Reported by Operator"),
+            ("completion", "🔧 Completed by Technician"),
+        ]
+        row = 3
+        for kind_key, label in groups:
+            group = [p for p in photos if p.kind == kind_key]
+            if not group:
+                continue
+            ws2.cell(row=row, column=2, value=label).font = Font(bold=True, size=12)
+            row += 2
+            for ph in group:
+                abs_path = os.path.join(PHOTOS_DIR, ph.full_path)
+                if not os.path.exists(abs_path):
+                    continue  # photo file missing on disk — skip rather than fail the export
+                try:
+                    with PILImage.open(abs_path) as im:
+                        w, h = im.size
+                    scale = min(1.0, 340 / max(w, h))
+                    disp_w, disp_h = int(w * scale), int(h * scale)
+                    xl_img = XLImage(abs_path)
+                    xl_img.width, xl_img.height = disp_w, disp_h
+                    ws2.add_image(xl_img, f"B{row}")
+                    needed_rows = max(1, -(-disp_h // 20))  # ceil(px / ~20px per default row)
+                    cap_row = row + needed_rows
+                    caption = ph.filename or "photo"
+                    if ph.created_at:
+                        caption += "  ·  " + (ph.created_at + timedelta(hours=8)).strftime("%d %b %Y %H:%M")
+                    ws2.cell(row=cap_row, column=2, value=caption).font = Font(italic=True, size=9, color="64748B")
+                    row = cap_row + 2
+                except Exception:
+                    continue  # corrupt/unreadable image — skip rather than fail the export
+            row += 1
 
     buf = io.BytesIO()
     wb.save(buf)

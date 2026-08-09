@@ -237,6 +237,31 @@ class SparePart(Base):
     parts_used: Mapped[list["PartsUsed"]] = relationship(back_populates="spare_part")
 
 
+class AssetBOMItem(Base):
+    """
+    Bill of Materials: which spare parts a given machine requires, and how
+    many. Distinct from PartsUsed (which is a log of parts actually
+    consumed on past work orders) — a BOM entry exists whether or not the
+    part has ever been used yet, so it can drive stock planning ahead of a
+    failure rather than only after one.
+    """
+    __tablename__ = "asset_bom_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("assets.id"))
+    spare_part_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("spare_parts.id"))
+    qty_required: Mapped[int] = mapped_column(Integer, default=1)
+    notes: Mapped[str | None] = mapped_column(String(255))
+    # True for rows created by the "seed from history" action rather than
+    # typed in by an admin — purely informational, doesn't change behavior.
+    seeded_from_history: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    asset: Mapped["Asset"] = relationship()
+    spare_part: Mapped["SparePart"] = relationship()
+
+
 class PartsUsed(Base):
     __tablename__ = "parts_used"
 

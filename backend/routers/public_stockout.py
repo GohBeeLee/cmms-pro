@@ -55,6 +55,7 @@ async def get_public_stockout_parts(db: AsyncSession = Depends(get_db)):
         {
             "id": str(p.id), "part_code": p.part_code, "name": p.name,
             "quantity_on_hand": p.quantity_on_hand, "unit": p.unit,
+            "barcode": getattr(p, "barcode", None),
         }
         for p in result.scalars().all()
     ]

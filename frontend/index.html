@@ -598,15 +598,17 @@ function Dashboard(){
   const [kpi,setKpi]=useState(null);
   const [wos,setWos]=useState([]);
   const [technicians,setTechnicians]=useState([]);
+  const [completedByMonth,setCompletedByMonth]=useState(null);
 
   async function load(){
     try{
-      const [k,w,t]=await Promise.all([
+      const [k,w,t,c]=await Promise.all([
         api('/dashboard/kpi'),
         api('/work-orders/?limit=200'),
         api('/users/technicians'),
+        api('/dashboard/completed-by-month'),
       ]);
-      setKpi(k); setWos(w); setTechnicians(t);
+      setKpi(k); setWos(w); setTechnicians(t); setCompletedByMonth(c);
     }catch(e){toast(e.message,'err');}
   }
   useEffect(()=>{load();},[]);
@@ -729,6 +731,33 @@ function Dashboard(){
             {cP.length>0?<RC.ResponsiveContainer width="100%" height={200}><RC.BarChart data={cP}><RC.XAxis dataKey="name" tick={{fontSize:12}}/><RC.YAxis allowDecimals={false} tick={{fontSize:12}}/><RC.Tooltip/><RC.Bar dataKey="value" radius={[6,6,0,0]}>{cP.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}</RC.Bar></RC.BarChart></RC.ResponsiveContainer>:<Empty msg="No data"/>}
           </div>
         </div>}
+
+        {/* Completed cases by month — cumulative to date, oldest → newest */}
+        {RC&&(()=>{
+          const cM=completedByMonth?.by_month||[];
+          const MONTH_COLORS=['#2563eb','#0891b2','#16a34a','#65a30d','#d97706','#ea580c','#dc2626','#db2777','#7c3aed','#4f46e5','#0d9488','#57534e'];
+          return (
+            <div className="card" style={{marginTop:'18px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px',flexWrap:'wrap',gap:'8px'}}>
+                <h3 style={{fontWeight:700,color:'#1e293b',fontSize:'14px',margin:0}}>✅ Completed Cases by Month</h3>
+                <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'4px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
+                  {completedByMonth?.total_completed??0} completed to date
+                </span>
+              </div>
+              {cM.length>0?(
+                <RC.ResponsiveContainer width="100%" height={Math.max(260,Math.ceil(cM.length/4)*26+220)}>
+                  <RC.PieChart>
+                    <RC.Pie data={cM} dataKey="count" nameKey="label" cx="50%" cy="50%" outerRadius={95} label={d=>d.label+' ('+d.count+')'}>
+                      {cM.map((_,i)=><RC.Cell key={i} fill={MONTH_COLORS[i%MONTH_COLORS.length]}/>)}
+                    </RC.Pie>
+                    <RC.Tooltip formatter={(v,n)=>[v+' cases',n]}/>
+                    <RC.Legend/>
+                  </RC.PieChart>
+                </RC.ResponsiveContainer>
+              ):<Empty msg="No completed cases yet"/>}
+            </div>
+          );
+        })()}
       </>}
     </div>
   );
@@ -765,6 +794,7 @@ function MaintenanceAlertBoard(){
   const [taskModal,setTaskModal]=useState(false);
   const [taskForm,setTaskForm]=useState(emptyTask);
   const [taskSubmitting,setTaskSubmitting]=useState(false);
+  const [expandedDesc,setExpandedDesc]=useState({}); // wo_id -> bool, full description toggle
 
   async function beep(force=false){
     if(!force&&!soundEnabledRef.current) return;
@@ -954,6 +984,9 @@ function MaintenanceAlertBoard(){
         const cardHoldReason=isOnHold?lastHoldReason(w.description):null;
         const displayTitle=(w.asset?.name||w.title||'').replace(/^\[TASK\]\s*/,'');
         const cardPhotos=extractPhotos(w);
+        const descText=(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title;
+        const isDescExpanded=!!expandedDesc[w.id];
+        const isDescLong=descText.length>180||descText.split('\n').length>4;
         // Maintenance tasks (admin-assigned, not a production request) get a
         // distinct indigo theme so they're never mistaken for a breakdown
         // report at a glance. Critical priority still wins visually either
@@ -972,7 +1005,8 @@ function MaintenanceAlertBoard(){
                 <div style={{fontSize:'11px',color:isCritical?'#fecaca':'#94a3b8',marginTop:'4px'}}>Started {fmtDT(w.created_at)}{w.held_hours>0&&<span> · Held: {w.held_hours.toFixed(1)}h so far</span>}</div>
                 {isOnHold&&cardHoldReason&&<div style={{fontSize:'12px',color:isCritical?'#fed7aa':'#9a3412',marginTop:'6px',fontStyle:'italic'}}>“{cardHoldReason}”</div>}
               </div>}
-          <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:'70px',overflow:'hidden',marginBottom:cardPhotos.length>0?'10px':'12px'}}>{(w.description||w.title||'No description').split('\n').filter(l=>l.startsWith('Category')||l.startsWith('Problem')||l.startsWith('Remarks')||l.startsWith('Assigned')).join('\n')||w.title}</div>
+          <div style={{fontSize:'13px',color:isCritical?'#fee2e2':'#374151',whiteSpace:'pre-line',maxHeight:isDescExpanded?'none':'70px',overflow:'hidden',marginBottom:isDescLong?'4px':(cardPhotos.length>0?'10px':'12px')}}>{descText}</div>
+          {isDescLong&&<button onClick={()=>setExpandedDesc(prev=>({...prev,[w.id]:!prev[w.id]}))} style={{background:'none',border:'none',padding:0,cursor:'pointer',fontSize:'12px',fontWeight:700,color:isCritical?'#fca5a5':'#2563eb',marginBottom:cardPhotos.length>0?'10px':'12px'}}>{isDescExpanded?'▲ Show less':'▼ Show more'}</button>}
           {cardPhotos.length>0&&<div style={{marginBottom:'12px'}}>
             <PhotoViewer photos={cardPhotos}/>
           </div>}
@@ -1828,6 +1862,16 @@ function HistoryLog(){
     try{
       const qs=['hours_per_day='+(parseFloat(hoursPerDay)||19)];
       if(locationFilter) qs.push('location='+encodeURIComponent(locationFilter));
+      // The uptime endpoint reports a single month. Derive which one from
+      // the shared date range filter (From Date wins, falling back to To
+      // Date) so this card follows the same date controls as the other
+      // analysis tabs instead of always defaulting to the current month.
+      const anchor=dateFrom||dateTo;
+      if(anchor){
+        const [y,m]=anchor.split('-');
+        qs.push('year='+y);
+        qs.push('month='+parseInt(m,10));
+      }
       setUptime(await api('/analysis/uptime?'+qs.join('&')));
     }catch(e){}
   }
@@ -1891,8 +1935,8 @@ function HistoryLog(){
   useEffect(()=>{const t=setInterval(loadRootCauseAnalysis,30000);return()=>clearInterval(t);},[dateFrom,dateTo,rcLocations]);
   useEffect(()=>{loadLocations();loadAssetsList();},[]);
   useEffect(()=>{loadMachineTimeline();},[dateFrom,dateTo,selectedAssetIds]);
-  useEffect(()=>{loadUptime();},[hoursPerDay,locationFilter]);
-  useEffect(()=>{const t=setInterval(loadUptime,60000);return()=>clearInterval(t);},[hoursPerDay,locationFilter]); // refresh uptime every 60s
+  useEffect(()=>{loadUptime();},[hoursPerDay,locationFilter,dateFrom,dateTo]);
+  useEffect(()=>{const t=setInterval(loadUptime,60000);return()=>clearInterval(t);},[hoursPerDay,locationFilter,dateFrom,dateTo]); // refresh uptime every 60s
   useEffect(()=>{loadMrrSummary();loadMrrAutoline();},[mrrYear]);
   useEffect(()=>{loadMrrSnap();},[mrrSnapMonth,mrrSnapYear]);
   useWS('work_orders',()=>{load();loadAnalysis();loadMachineTimeline();loadUptime();loadMrrSummary();loadMrrAutoline();loadMrrSnap();if(isAdmin)loadDeleted();});
@@ -1907,7 +1951,8 @@ function HistoryLog(){
     const matchFrom = !dateFrom || toUTC(w.created_at) >= new Date(dateFrom);
     const matchTo   = !dateTo   || toUTC(w.created_at) <= new Date(dateTo+'T23:59:59');
     const matchType = recordType==='all' || w.type===recordType;
-    return matchText && matchFrom && matchTo && matchType;
+    const matchLocation = !locationFilter || w.asset?.location===locationFilter;
+    return matchText && matchFrom && matchTo && matchType && matchLocation;
   });
 
   function parseField(desc, field){
@@ -1946,6 +1991,7 @@ function HistoryLog(){
     const at = parseField(wo.description,'Actions taken');
     setEditForm({
       title:            wo.title||'',
+      asset_id:         wo.asset?.id||'',
       priority:         wo.priority||'medium',
       status:           wo.status||'completed',
       actual_hours:     wo.actual_hours!=null?wo.actual_hours:'',
@@ -1970,6 +2016,7 @@ function HistoryLog(){
     try{
       const body={};
       if(editForm.title)      body.title=editForm.title;
+      if(editForm.asset_id && editForm.asset_id!==editing.asset?.id) body.asset_id=editForm.asset_id;
       if(editForm.priority)   body.priority=editForm.priority;
       if(editForm.status)     body.status=editForm.status;
       body.affected_downtime=editForm.affected_downtime;
@@ -2124,7 +2171,7 @@ function HistoryLog(){
             {locations.map(x=><option key={x.location} value={x.location}>{x.location}</option>)}
           </select>
         </div>
-        <button className="btn btn-primary" onClick={load}>🔄 Refresh</button>
+        <button className="btn btn-primary" onClick={()=>{load();loadUptime();loadAnalysis();loadRootCauseAnalysis();loadMachineTimeline();}}>🔄 Refresh</button>
       </div>
 
       {/* ── Analysis Tabs ── */}
@@ -2782,6 +2829,7 @@ function HistoryLog(){
                   <td style={{position:'sticky',right:0,background:rowBg,boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
                     <div style={{display:'flex',gap:'4px'}}>
                       <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
+                      <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>downloadFile('/work-orders/'+w.id+'/export/mrr','MRR_'+w.wo_number+'.xlsx')} title="Export as the official MRR form">📄 MRR</button>
                       {isAdmin&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>openEdit(w)}>✏️ Edit</button>}
                       {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px',color:'#dc2626'}} onClick={()=>deleteWo(w)}>🗑️ Delete</button>}
                     </div>
@@ -2796,6 +2844,9 @@ function HistoryLog(){
       {/* Detail modal */}
       {selected&&(
         <Modal title={selected.wo_number+' — '+( selected.asset?.name||'—')} onClose={()=>setSelected(null)} large>
+          <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'10px'}}>
+            <button className="btn btn-secondary" style={{fontSize:'12px'}} onClick={()=>downloadFile('/work-orders/'+selected.id+'/export/mrr','MRR_'+selected.wo_number+'.xlsx')}>📄 Export MRR Form</button>
+          </div>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div>
               <div className="section-title">Work Order Details</div>
@@ -2840,8 +2891,14 @@ function HistoryLog(){
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
               <div>
-                <label className="lbl">Title</label>
-                <input className="inp" value={editForm.title} onChange={e=>setEditForm({...editForm,title:e.target.value})}/>
+                <label className="lbl">Machine</label>
+                <select className="inp" value={editForm.asset_id||''} onChange={e=>setEditForm({...editForm,asset_id:e.target.value})}>
+                  {editing.asset&&!allAssets.some(a=>a.id===editing.asset.id)&&(
+                    <option value={editing.asset.id}>{editing.asset.name}{editing.asset.asset_code?' ('+editing.asset.asset_code+')':''}</option>
+                  )}
+                  {allAssets.map(a=><option key={a.id} value={a.id}>{a.name}{a.asset_code?' ('+a.asset_code+')':''}</option>)}
+                </select>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>Corrects the machine if the operator reported the wrong one.</div>
               </div>
               <div>
                 <label className="lbl">Priority</label>
@@ -3045,6 +3102,12 @@ function Assets(){
   const importFileRef=useRef(null);
   const emptyForm={asset_code:'',name:'',category:'',location:'',manufacturer:'',model:'',serial_number:'',status:'operational',notes:''};
   const [form,setForm]=useState(emptyForm);
+  const [bomAsset,setBomAsset]=useState(null);      // asset whose BOM modal is open
+  const [bomItems,setBomItems]=useState([]);
+  const [bomLoading,setBomLoading]=useState(false);
+  const [bomParts,setBomParts]=useState([]);        // all spare parts, for the "add part" picker
+  const [bomPartSearch,setBomPartSearch]=useState('');
+  const [bomSeeding,setBomSeeding]=useState(false);
   const CATS=['Multi Handling System (MHS)','Machine','Robot','Forklift (Gas)','Forklift (Battery)','Forklift (Diesel)','Utilities','Other'];
   const STATS=['operational','under_maintenance','out_of_service','decommissioned'];
 
@@ -3076,6 +3139,54 @@ function Assets(){
     }catch(e){
       toast('Cannot delete — asset has linked work orders. Use Decommission instead.','err');
     }
+  }
+
+  // ── Bill of Materials (BOM) ─────────────────────────────────────────────
+  async function openBom(asset){
+    setBomAsset(asset);setBomItems([]);setBomPartSearch('');setBomLoading(true);
+    try{
+      const [items,parts]=await Promise.all([
+        api('/assets/'+asset.id+'/bom'),
+        bomParts.length>0?Promise.resolve(bomParts):api('/inventory/?limit=2000'),
+      ]);
+      setBomItems(items);setBomParts(parts);
+    }catch(e){toast(e.message,'err');}
+    finally{setBomLoading(false);}
+  }
+
+  async function reloadBom(){
+    if(!bomAsset) return;
+    try{setBomItems(await api('/assets/'+bomAsset.id+'/bom'));}catch(e){toast(e.message,'err');}
+  }
+
+  async function addBomPart(part){
+    try{
+      await api('/assets/'+bomAsset.id+'/bom',{method:'POST',body:JSON.stringify({spare_part_id:part.id,qty_required:1})});
+      setBomPartSearch('');reloadBom();
+    }catch(e){toast(e.message,'err');}
+  }
+
+  async function updateBomQty(item,qty){
+    const q=Math.max(1,parseInt(qty)||1);
+    setBomItems(bomItems.map(i=>i.id===item.id?{...i,qty_required:q,low_stock:i.quantity_on_hand<q}:i)); // optimistic
+    try{await api('/assets/bom/'+item.id,{method:'PATCH',body:JSON.stringify({qty_required:q})});}
+    catch(e){toast(e.message,'err');reloadBom();}
+  }
+
+  async function deleteBomItem(item){
+    if(!confirm('Remove "'+item.part_name+'" from this machine\'s BOM?')) return;
+    try{await api('/assets/bom/'+item.id,{method:'DELETE'});toast('Removed from BOM');reloadBom();}
+    catch(e){toast(e.message,'err');}
+  }
+
+  async function seedBomFromHistory(){
+    setBomSeeding(true);
+    try{
+      const res=await api('/assets/'+bomAsset.id+'/bom/seed-from-history',{method:'POST'});
+      if(res.added>0){toast('Added '+res.added+' part(s) from repair history');reloadBom();}
+      else toast(res.message||'No new parts found in repair history','err');
+    }catch(e){toast(e.message,'err');}
+    finally{setBomSeeding(false);}
   }
 
   // ── Excel import ────────────────────────────────────────────────────────
@@ -3166,6 +3277,8 @@ function Assets(){
                 <td style={{whiteSpace:'nowrap'}}>
                   <button onClick={()=>{setEditing(a);setForm({...emptyForm,...a});setModal(true);}}
                     style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'8px'}}>Edit</button>
+                  <button onClick={()=>openBom(a)}
+                    style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'8px'}}>BOM</button>
                   <button onClick={()=>decommission(a.id,a.name)}
                     style={{color:'#d97706',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'8px'}}>Decommission</button>
                   <button onClick={()=>hardDel(a.id,a.name)}
@@ -3244,6 +3357,67 @@ function Assets(){
                 </div>
               )}
               <button className="btn btn-primary" style={{width:'100%',marginTop:'12px'}} onClick={()=>setImportModal(false)}>Close</button>
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* Bill of Materials modal */}
+      {bomAsset&&(
+        <Modal title={'BOM — '+bomAsset.name+' ('+bomAsset.asset_code+')'} onClose={()=>setBomAsset(null)} large>
+          {bomLoading?<Spinner/>:(
+            <div>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+                <p style={{fontSize:'12px',color:'#94a3b8',margin:0}}>Parts this machine requires, and how many. Used to flag when stock can't cover a repair.</p>
+                <button className="btn btn-secondary" style={{fontSize:'12px',whiteSpace:'nowrap'}} disabled={bomSeeding} onClick={seedBomFromHistory}>
+                  {bomSeeding?'Seeding…':'⏳ Seed from Repair History'}
+                </button>
+              </div>
+
+              {bomItems.length===0?(
+                <Empty msg="No BOM items yet — add parts below, or seed from repair history."/>
+              ):(
+                <div className="ovf" style={{marginBottom:'16px'}}><table>
+                  <thead><tr>{['Part','Qty Required','On Hand','Reorder Lvl','Notes',''].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                  <tbody>{bomItems.map(item=>(
+                    <tr key={item.id} style={item.low_stock?{background:'#fef2f2'}:{}}>
+                      <td style={{fontWeight:600}}>{item.part_name}<div style={{fontFamily:'monospace',fontSize:'11px',color:'#94a3b8'}}>{item.part_code}</div></td>
+                      <td>
+                        <input type="number" min="1" className="inp" style={{width:'70px',padding:'6px 8px'}}
+                          value={item.qty_required} onChange={e=>updateBomQty(item,e.target.value)}/>
+                        <span style={{fontSize:'11px',color:'#94a3b8',marginLeft:'4px'}}>{item.unit}</span>
+                      </td>
+                      <td style={{color:item.low_stock?'#dc2626':'#374151',fontWeight:item.low_stock?800:400}}>
+                        {item.quantity_on_hand}{item.low_stock&&<span style={{marginLeft:'6px',fontSize:'11px',background:'#fee2e2',color:'#991b1b',padding:'2px 8px',borderRadius:'999px',fontWeight:700}}>LOW</span>}
+                      </td>
+                      <td style={{color:'#64748b'}}>{item.reorder_level}</td>
+                      <td style={{fontSize:'11px',color:'#94a3b8',maxWidth:'220px'}}>{item.notes}</td>
+                      <td><button onClick={()=>deleteBomItem(item)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Remove</button></td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+              )}
+
+              <div className="card" style={{background:'#f8fafc',padding:'14px'}}>
+                <label className="lbl">Add a part to this BOM</label>
+                <input className="inp" placeholder="Search parts by name or code…" value={bomPartSearch} onChange={e=>setBomPartSearch(e.target.value)}/>
+                {bomPartSearch.trim()&&(()=>{
+                  const q=bomPartSearch.toLowerCase();
+                  const already=new Set(bomItems.map(i=>i.spare_part_id));
+                  const results=bomParts.filter(p=>!already.has(p.id)&&(p.name.toLowerCase().includes(q)||p.part_code.toLowerCase().includes(q))).slice(0,8);
+                  return (
+                    <div style={{marginTop:'8px',maxHeight:'220px',overflowY:'auto',border:'1px solid #e2e8f0',borderRadius:'8px'}}>
+                      {results.length===0?<div style={{padding:'12px',fontSize:'12px',color:'#94a3b8'}}>No matching parts (or already in this BOM).</div>:results.map(p=>(
+                        <div key={p.id} onClick={()=>addBomPart(p)} style={{padding:'10px 12px',cursor:'pointer',borderBottom:'1px solid #f1f5f9',display:'flex',justifyContent:'space-between'}}
+                          onMouseEnter={e=>e.currentTarget.style.background='#f1f5f9'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+                          <span style={{fontSize:'13px',fontWeight:600}}>{p.name} <span style={{fontFamily:'monospace',fontSize:'11px',color:'#94a3b8'}}>({p.part_code})</span></span>
+                          <span style={{fontSize:'12px',color:'#7c3aed',fontWeight:700}}>+ Add</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           )}
         </Modal>

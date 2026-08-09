@@ -236,6 +236,52 @@ async def get_kpi(db: AsyncSession = Depends(get_db), current_user=Depends(forbi
     }
 
 
+# ── Dashboard: Completed cases by month ──────────────────────────────────
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+@app.get("/dashboard/completed-by-month", tags=["dashboard"])
+async def get_completed_by_month(db: AsyncSession = Depends(get_db), current_user=Depends(forbid_viewer)):
+    """
+    Every completed work order to date, grouped by the month it was
+    completed in. Used for the Dashboard's "Completed Cases by Month" pie
+    chart — returned pre-sorted in chronological order (oldest month first)
+    rather than relying on the frontend to sort.
+    """
+    from models import WorkOrder, WorkOrderStatus
+
+    completed_ats = (
+        await db.execute(
+            select(WorkOrder.completed_at).where(
+                WorkOrder.status == WorkOrderStatus.completed,
+                WorkOrder.completed_at.isnot(None),
+                WorkOrder.is_deleted == False,
+            )
+        )
+    ).scalars().all()
+
+    counts: dict[str, int] = {}
+    for dt in completed_ats:
+        key = f"{dt.year:04d}-{dt.month:02d}"
+        counts[key] = counts.get(key, 0) + 1
+
+    # "YYYY-MM" string keys sort chronologically as plain strings.
+    by_month = [
+        {
+            "year": int(key[:4]),
+            "month": int(key[5:7]),
+            "label": f"{_MONTH_ABBR[int(key[5:7]) - 1]} {key[:4]}",
+            "count": count,
+        }
+        for key, count in sorted(counts.items())
+    ]
+
+    return {
+        "total_completed": len(completed_ats),
+        "by_month": by_month,
+    }
+
+
 # ── Serve frontend ────────────────────────────────────────────────────────
 @app.get("/", include_in_schema=False)
 async def serve_frontend():

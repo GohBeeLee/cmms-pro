@@ -22,6 +22,7 @@
   input[type=text]:focus,select:focus,textarea:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,0.12);}
   textarea{resize:vertical;min-height:90px;line-height:1.5;}
   select{appearance:auto;}
+  select:disabled{background:#f1f5f9;color:#94a3b8;cursor:not-allowed;}
   .urgency-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
   .urgency-btn{border:2px solid #e2e8f0;border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;transition:all 0.15s;background:#fff;user-select:none;}
   .urgency-btn span{font-size:13px;font-weight:600;color:#64748b;display:block;}
@@ -71,8 +72,12 @@
     <div class="card">
       <h2>Machine &amp; Problem</h2>
       <div class="field">
+        <label>Location <span class="req">*</span></label>
+        <select id="location-select"><option value="">Loading locations...</option></select>
+      </div>
+      <div class="field">
         <label>Machine / Asset <span class="req">*</span></label>
-        <select id="asset-select"><option value="">Loading machines...</option></select>
+        <select id="asset-select" disabled><option value="">Select a location first...</option></select>
       </div>
       <div class="field">
         <label>Problem Category <span class="req">*</span></label>
@@ -154,6 +159,8 @@
 var API = '';
 var urgency = 'medium';
 var photos = [];
+var allAssets = [];
+var NO_LOCATION = 'No location set';
 
 // A per-machine QR code links to /request/<asset_id> (path) — some older
 // codes or shared links may instead use /request?asset=<asset_id> (query
@@ -165,28 +172,70 @@ function getPrefilledAssetId() {
   return params.get('asset') || null;
 }
 
+function populateAssetsForLocation(location) {
+  var sel = document.getElementById('asset-select');
+  if (!location) {
+    sel.innerHTML = '<option value="">Select a location first...</option>';
+    sel.disabled = true;
+    return;
+  }
+  var matches = allAssets.filter(function(a) { return (a.location || NO_LOCATION) === location; });
+  sel.innerHTML = '<option value="">Select machine...</option>';
+  matches.forEach(function(a) {
+    var opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = a.name + ' (' + a.asset_code + ')';
+    sel.appendChild(opt);
+  });
+  sel.disabled = false;
+}
+
+function onLocationChange() {
+  populateAssetsForLocation(document.getElementById('location-select').value);
+}
+
 window.addEventListener('DOMContentLoaded', function() {
   var prefillId = getPrefilledAssetId();
   fetch(API + '/requests/assets').then(function(r){ return r.json(); }).then(function(assets) {
-    var sel = document.getElementById('asset-select');
-    sel.innerHTML = '<option value="">Select machine...</option>';
+    allAssets = assets;
+
+    // Build the location list from the machines themselves, grouped so the
+    // operator narrows down to a handful of machines instead of scrolling
+    // through the whole plant.
+    var locations = [];
     assets.forEach(function(a) {
-      var opt = document.createElement('option');
-      opt.value = a.id;
-      opt.textContent = a.name + ' (' + a.asset_code + ')' + (a.location ? ' - ' + a.location : '');
-      sel.appendChild(opt);
+      var loc = a.location || NO_LOCATION;
+      if (locations.indexOf(loc) === -1) locations.push(loc);
     });
+    locations.sort(function(a, b) { return a === NO_LOCATION ? 1 : b === NO_LOCATION ? -1 : a.localeCompare(b); });
+
+    var locSel = document.getElementById('location-select');
+    locSel.innerHTML = '<option value="">Select location...</option>';
+    locations.forEach(function(loc) {
+      var opt = document.createElement('option');
+      opt.value = loc;
+      opt.textContent = loc;
+      locSel.appendChild(opt);
+    });
+
     if (prefillId) {
       var match = assets.filter(function(a){ return a.id === prefillId; })[0];
       if (match) {
-        sel.value = match.id;
+        var loc = match.location || NO_LOCATION;
+        locSel.value = loc;
+        populateAssetsForLocation(loc);
+        document.getElementById('asset-select').value = match.id;
         document.getElementById('prefill-asset-name').textContent = match.name + ' (' + match.asset_code + ')';
         document.getElementById('prefill-banner').style.display = 'block';
+        return;
       }
     }
+    populateAssetsForLocation(''); // keep the machine dropdown locked until a location is picked
   }).catch(function() {
+    document.getElementById('location-select').innerHTML = '<option value="">Failed to load - please refresh</option>';
     document.getElementById('asset-select').innerHTML = '<option value="">Failed to load - please refresh</option>';
   });
+  document.getElementById('location-select').addEventListener('change', onLocationChange);
 });
 
 function selU(level) {
@@ -323,9 +372,19 @@ function resetForm() {
   document.getElementById('success-screen').style.display = 'none';
   // Keep the pre-filled machine selected if this session started from a
   // per-machine QR code — operators reporting a second issue on the same
-  // machine shouldn't have to re-scan or hunt the dropdown again.
+  // machine shouldn't have to re-pick the location or hunt the dropdown
+  // again.
   var prefillId = getPrefilledAssetId();
-  document.getElementById('asset-select').value     = prefillId || '';
+  var prefillMatch = prefillId ? allAssets.filter(function(a){ return a.id === prefillId; })[0] : null;
+  if (prefillMatch) {
+    var loc = prefillMatch.location || NO_LOCATION;
+    document.getElementById('location-select').value = loc;
+    populateAssetsForLocation(loc);
+    document.getElementById('asset-select').value = prefillMatch.id;
+  } else {
+    document.getElementById('location-select').value = '';
+    populateAssetsForLocation('');
+  }
   document.getElementById('problem-category').value = '';
   document.getElementById('problem-desc').value     = '';
   document.getElementById('operator-name').value    = '';

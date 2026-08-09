@@ -3,10 +3,13 @@ Work Orders Router — photos stored as compressed JPEGs on the persistent
 disk (see photo_storage.py), referenced from work_order_photos rows.
 """
 import re
+import io
+import os
 import base64
 from uuid import UUID
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,7 +20,7 @@ from db import get_db
 from models import WorkOrder, WorkOrderPhoto, PartsUsed, SparePart, User, WorkOrderStatus, UserRole, Asset, TaskAssignment, TaskStatus
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
-from routers.analysis import working_hours_between
+from routers.analysis import working_hours_between, _wo_downtime_hours
 from routers.stock import _log_movement, _ensure_table as _ensure_stock_table
 from stock_status import compute_stock_status
 from photo_storage import save_photo
@@ -75,6 +78,7 @@ class WOUpdate(BaseModel):
     actual_hours:     Optional[float] = None
     affected_downtime: Optional[bool] = None
     assigned_to_user: Optional[str] = None
+    asset_id:         Optional[str] = None
 
 
 # ── Photo helpers ──────────────────────────────────────────────────────────
@@ -326,6 +330,16 @@ async def update_work_order(
         wo.affected_downtime = body.affected_downtime
     if body.assigned_to_user:
         wo.assigned_to_user = UUID(body.assigned_to_user)
+    if body.asset_id:
+        # Operators sometimes report the wrong machine on a request — let an
+        # admin correct which asset a work order is attached to. Restricted
+        # to admins since this changes downtime/analysis attribution.
+        if current_user.role != UserRole.admin:
+            raise HTTPException(403, "Only admins can change a work order's machine")
+        new_asset = await db.get(Asset, UUID(body.asset_id))
+        if not new_asset:
+            raise HTTPException(404, "Asset not found")
+        wo.asset_id = new_asset.id
     wo.updated_at = datetime.utcnow()
     await db.flush()
     await ws_manager.broadcast_event(ROOM, "work_order.updated", {
@@ -639,3 +653,109 @@ async def parts_availability(
         "location":         p.location,
         "barcode":          getattr(p, "barcode", None),
     } for p in result.scalars().all()]
+
+
+# ── MRR (Machine Repair Request) export ─────────────────────────────────────
+# Fills the company's official MRR form (Doc No F/SMT-06) for a single work
+# order, using the exact controlled-document template rather than
+# recreating it from scratch, so it matches what's already printed/filed
+# on paper. Everything gets pulled from data already on the work order —
+# the free-text description tags written by requests.py (on submission)
+# and the completion flow (on completion) — see those for the "Label :
+# value" convention this parses.
+
+_MRR_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "..", "templates", "MRR_form.xlsx")
+
+
+def _extract_field(description: str, *labels: str) -> str:
+    """Pulls a 'Label   : value' line out of a work order's free-text
+    description. Tries each label in turn and returns the first match."""
+    if not description:
+        return ""
+    for label in labels:
+        m = re.search(rf"^{re.escape(label)}\s*:\s*(.+)$", description, re.MULTILINE)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+@router.get("/{wo_id}/export/mrr")
+async def export_mrr_form(
+    wo_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    if not os.path.exists(_MRR_TEMPLATE_PATH):
+        raise HTTPException(500, "MRR template is missing from the server.")
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.styles import Alignment
+    except ImportError:
+        raise HTTPException(500, "openpyxl not installed on server. Run: pip install openpyxl")
+
+    wo = await _get_wo(wo_id, db)
+    desc = wo.description or ""
+
+    requested_by = _extract_field(desc, "Submitted by", "Requested by")
+    category     = _extract_field(desc, "Category")
+    problem      = _extract_field(desc, "Problem") or wo.title
+    remarks_in   = _extract_field(desc, "Remarks")
+    tested_by    = _extract_field(desc, "Completed by")
+    root_cause   = _extract_field(desc, "Root cause")
+    actions      = _extract_field(desc, "Actions taken")
+
+    problem_lines = []
+    if category: problem_lines.append(f"Category: {category}")
+    problem_lines.append(problem)
+    if remarks_in: problem_lines.append(f"Remarks: {remarks_in}")
+    problem_text = "\n".join(problem_lines)
+
+    corrective_lines = []
+    if root_cause: corrective_lines.append(f"Root cause: {root_cause}")
+    corrective_lines.append(actions or "")
+    corrective_text = "\n".join(corrective_lines)
+
+    divisor = wo.asset.downtime_divisor if wo.asset else 1.0
+    downtime_hours = _wo_downtime_hours(wo.actual_hours, wo.created_at, wo.completed_at, wo.held_hours, divisor)
+
+    # Timestamps are stored in UTC — shift to Malaysia time (UTC+8, no DST)
+    # for display, matching the completion-note stamps elsewhere in the app.
+    broke_down = (wo.created_at + timedelta(hours=8)) if wo.created_at else None
+    fixed_up   = (wo.completed_at + timedelta(hours=8)) if wo.completed_at else None
+
+    wb = load_workbook(_MRR_TEMPLATE_PATH)
+    ws = wb["Repair Request"]
+
+    ws["D6"] = wo.wo_number
+    if broke_down:
+        ws["B9"] = broke_down.strftime("%d %b %Y")
+        ws["D9"] = broke_down.strftime("%H:%M")
+    ws["B10"] = f"{wo.asset.name} ({wo.asset.asset_code})" if wo.asset else ""
+    ws["D10"] = requested_by
+
+    ws.merge_cells("B12:D17")
+    ws["B12"] = problem_text
+    ws["B12"].alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
+
+    ws.merge_cells("B20:D26")
+    ws["B20"] = corrective_text
+    ws["B20"].alignment = Alignment(wrap_text=True, vertical="top", horizontal="left")
+
+    if fixed_up:
+        ws["B27"] = fixed_up.strftime("%d %b %Y")
+        ws["D27"] = fixed_up.strftime("%H:%M")
+    ws["B28"] = tested_by
+    if downtime_hours:
+        ws["D28"] = round(downtime_hours, 2)
+    # B33/D33 ("Verified by requestor" / "Date") are left blank — that's a
+    # physical signature line, signed after this is printed.
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"MRR_{wo.wo_number}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

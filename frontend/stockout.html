@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
 <title>Production Cutter Stock-Out</title>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0;}
   body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f4f8;min-height:100vh;padding:16px 16px 40px;}
@@ -38,6 +39,12 @@
   .remain-badge{display:inline-block;background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a;padding:8px 20px;border-radius:999px;font-weight:700;font-size:15px;margin:12px 0;}
   .btn-new{background:#f1f5f9;color:#374151;border:none;padding:12px 24px;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px;}
   .error-msg{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;display:none;}
+  .btn-scan{width:100%;background:#f5f3ff;color:#7c3aed;border:1.5px solid #ddd6fe;padding:11px;border-radius:10px;font-size:14px;font-weight:700;cursor:pointer;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px;}
+  .btn-scan:active{background:#ede9fe;}
+  .scanner-panel{margin-top:12px;}
+  #camera-view{width:100%;border-radius:10px;overflow:hidden;background:#0f172a;}
+  .scan-status{font-size:12px;color:#64748b;margin-top:8px;text-align:center;line-height:1.5;}
+  .btn-cancel-scan{width:100%;background:#f1f5f9;color:#374151;border:none;padding:11px;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;margin-top:8px;}
 </style>
 </head>
 <body>
@@ -57,6 +64,12 @@
         <label>Item <span class="req">*</span></label>
         <select id="part-select"><option value="">Loading items...</option></select>
         <div class="stock-hint" id="stock-hint"></div>
+        <button type="button" class="btn-scan" id="scan-btn" onclick="openScanner()">📷 Scan QR / Barcode</button>
+        <div class="scanner-panel" id="scanner-panel" style="display:none;">
+          <div id="camera-view"></div>
+          <div class="scan-status" id="scan-status">Point the camera at the item's QR code or barcode…</div>
+          <button type="button" class="btn-cancel-scan" onclick="closeScanner()">Cancel Scan</button>
+        </div>
       </div>
       <div class="field">
         <label>Quantity <span class="req">*</span></label>
@@ -141,6 +154,72 @@ function stepQty(delta) {
   el.value = Math.max(1, v);
 }
 
+// ── QR / barcode scan (operator's phone camera, no login) ──
+var html5Qr = null;
+
+function openScanner() {
+  document.getElementById('error-msg').style.display = 'none';
+  var panel  = document.getElementById('scanner-panel');
+  var status = document.getElementById('scan-status');
+  panel.style.display = 'block';
+  status.textContent = 'Point the camera at the item\u2019s QR code or barcode\u2026';
+  panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+  if (typeof Html5Qrcode === 'undefined') {
+    status.textContent = 'Scanner failed to load \u2014 please select the item manually.';
+    return;
+  }
+  if (html5Qr) return; // already running
+
+  html5Qr = new Html5Qrcode('camera-view', {
+    // Use the browser's fast native barcode decoder on devices that support
+    // it (same approach as the main CMMS app's barcode scanners).
+    useBarCodeDetectorIfSupported: true,
+    verbose: false,
+  });
+
+  html5Qr.start(
+    { facingMode: 'environment' },
+    { fps: 8, qrbox: { width: 260, height: 160 }, aspectRatio: 1.7777778 },
+    onScanSuccess,
+    function () { /* ignore per-frame decode misses */ }
+  ).catch(function (e) {
+    status.textContent = 'Could not access the camera (' + (e.message || e) + '). Please select the item manually.';
+  });
+}
+
+function onScanSuccess(decodedText) {
+  var code = (decodedText || '').trim().toLowerCase();
+  var match = parts.filter(function (p) {
+    return (p.barcode && p.barcode.toLowerCase() === code) || (p.part_code && p.part_code.toLowerCase() === code);
+  })[0];
+
+  if (!match) {
+    document.getElementById('scan-status').textContent = 'No item matches "' + decodedText + '". Keep scanning, or cancel to pick it manually.';
+    return; // keep the camera running so they can retry
+  }
+
+  document.getElementById('part-select').value = match.id;
+  updateStockHint();
+  closeScanner();
+}
+
+function closeScanner() {
+  var panel = document.getElementById('scanner-panel');
+  if (html5Qr) {
+    html5Qr.stop().then(function () {
+      html5Qr.clear();
+      html5Qr = null;
+      panel.style.display = 'none';
+    }).catch(function () {
+      html5Qr = null;
+      panel.style.display = 'none';
+    });
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
 function showError(msg) {
   var el = document.getElementById('error-msg');
   el.textContent = msg; el.style.display = 'block';
@@ -159,6 +238,8 @@ async function submitStockOut() {
   if (!partId)         { showError('Please select an item.'); return; }
   if (!qty || qty < 1) { showError('Please enter a valid quantity.'); return; }
   if (!name)           { showError('Please enter your name.'); return; }
+
+  if (html5Qr) closeScanner();
 
   var btn = document.getElementById('submit-btn');
   btn.disabled = true; btn.textContent = 'Submitting...';

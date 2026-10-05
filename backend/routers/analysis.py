@@ -17,6 +17,8 @@ router = APIRouter(prefix="/analysis", tags=["analysis"], dependencies=[Depends(
 # ── Production shift schedule (Malaysia local time, UTC+8, no DST) ──────────
 # Shift 1: 08:30–18:30   Shift 2: 19:30–06:30 (next day)
 # Rest break (inside Shift 1): 12:30–13:30 daily, except Friday 13:00–14:00.
+# Rest break (inside Shift 2): 00:30–01:30 every night (12:30am–1:30am).
+# Working time per day = 9h + 10h = 19h.
 # Mirrors calcDowntime()/workingMsBetween() in frontend/index.html so the
 # live Alert Board counters and these reports always agree. Only elapsed
 # time actually inside a running shift counts as downtime — the two
@@ -27,7 +29,7 @@ MY_TZ_OFFSET = timedelta(hours=8)
 
 def _shift_windows_for_day(day: datetime):
     """`day` is a naive datetime at 00:00 representing a Malaysia-local
-    calendar date. Returns the 3 working windows for that date as naive-UTC
+    calendar date. Returns the 4 working windows for that date as naive-UTC
     (start, end) datetime pairs."""
     is_friday = day.weekday() == 4  # Monday=0 ... Friday=4
     rest_start = day.replace(hour=13, minute=0) if is_friday else day.replace(hour=12, minute=30)
@@ -35,11 +37,15 @@ def _shift_windows_for_day(day: datetime):
     shift1_start = day.replace(hour=8, minute=30)
     shift1_end   = day.replace(hour=18, minute=30)
     shift2_start = day.replace(hour=19, minute=30)
-    shift2_end   = (day + timedelta(days=1)).replace(hour=6, minute=30)
+    next_day = day + timedelta(days=1)
+    night_rest_start = next_day.replace(hour=0, minute=30)
+    night_rest_end   = next_day.replace(hour=1, minute=30)
+    shift2_end   = next_day.replace(hour=6, minute=30)
     windows_local = [
         (shift1_start, rest_start),
         (rest_end, shift1_end),
-        (shift2_start, shift2_end),
+        (shift2_start, night_rest_start),
+        (night_rest_end, shift2_end),
     ]
     return [(s - MY_TZ_OFFSET, e - MY_TZ_OFFSET) for s, e in windows_local]
 
@@ -653,7 +659,7 @@ async def analyse_by_machine_timeline(
 async def get_uptime(
     year:  Optional[int] = Query(None, description="Year, defaults to current"),
     month: Optional[int] = Query(None, description="Month 1-12, defaults to current"),
-    hours_per_day: float = Query(20.0, description="Operating hours per day used in the uptime formula (2 shifts minus daily rest break = 20h/day per the production schedule)"),
+    hours_per_day: float = Query(19.0, description="Operating hours per day used in the uptime formula (Shift 1 9h + Shift 2 10h, after both rest breaks = 19h/day per the production schedule)"),
     location: Optional[str] = Query(None, description="Filter by asset/production line location"),
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),

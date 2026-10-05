@@ -50,3 +50,22 @@ CRITICAL_SQL = (
     "))"
 )
 LOW_OR_CRITICAL_SQL = "(reorder_level > 0 AND quantity_on_hand <= reorder_level)"
+
+def weighted_avg_cost(qty_before, cost_before, qty_in, price_in):
+    """
+    Moving weighted-average unit cost after receiving a new batch.
+
+        new_avg = (qty_before * cost_before + qty_in * price_in)
+                  / (qty_before + qty_in)
+
+    Falls back to the new batch price when there is no old stock left to
+    average with (qty_before <= 0) or the old stock had no recorded cost.
+    Rounded to 4 decimals to limit drift; display rounds to 2.
+    """
+    qty_before = qty_before or 0
+    if qty_in is None or qty_in <= 0 or price_in is None:
+        return cost_before
+    if qty_before <= 0 or cost_before is None:
+        return round(float(price_in), 4)
+    total_qty = qty_before + qty_in
+    return round((qty_before * cost_before + qty_in * price_in) / total_qty, 4)

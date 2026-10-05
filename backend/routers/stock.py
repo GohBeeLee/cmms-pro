@@ -21,7 +21,7 @@ from db import get_db
 from models import SparePart, User
 from auth import get_current_user, forbid_viewer
 from websocket_manager import ws_manager
-from stock_status import compute_stock_status
+from stock_status import compute_stock_status, weighted_avg_cost
 
 router = APIRouter(prefix="/stock", tags=["stock"], dependencies=[Depends(forbid_viewer)])
 
@@ -54,9 +54,34 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 """
 
 
+# Columns added after the table first shipped — added in place for existing
+# databases (SQLite has no "ADD COLUMN IF NOT EXISTS").
+_EXTRA_COLUMNS = {
+    "unit_price":      "REAL",   # price paid per unit for THIS batch (stock-in)
+    "avg_cost_before": "REAL",   # part's average unit cost before this movement
+    "avg_cost_after":  "REAL",   # part's average unit cost after this movement
+}
+
+
 async def _ensure_table(db: AsyncSession):
     await db.execute(text(CREATE_TABLE))
+    existing = {r[1] for r in (await db.execute(text("PRAGMA table_info(stock_movements)"))).fetchall()}
+    for col, typ in _EXTRA_COLUMNS.items():
+        if col not in existing:
+            await db.execute(text(f"ALTER TABLE stock_movements ADD COLUMN {col} {typ}"))
     await db.commit()
+
+
+def _can_view_cost(user: User) -> bool:
+    return user.role.value in ("admin", "manager")
+
+
+def _strip_cost(row: dict, user: User) -> dict:
+    """Hide price columns from technicians (same rule as the Inventory list)."""
+    if not _can_view_cost(user):
+        for k in ("unit_price", "avg_cost_before", "avg_cost_after"):
+            row.pop(k, None)
+    return row
 
 
 async def _log_movement(
@@ -69,16 +94,21 @@ async def _log_movement(
     user:           User,
     reason:         Optional[str] = None,
     reference:      Optional[str] = None,
+    unit_price:      Optional[float] = None,
+    avg_cost_before: Optional[float] = None,
+    avg_cost_after:  Optional[float] = None,
 ):
     await db.execute(
         text("""
             INSERT INTO stock_movements
             (id, part_id, part_code, part_name, movement, quantity,
              qty_before, qty_after, reason, reference,
-             performed_by_id, performed_by_name, created_at)
+             performed_by_id, performed_by_name, created_at,
+             unit_price, avg_cost_before, avg_cost_after)
             VALUES (:id, :part_id, :part_code, :part_name, :movement, :quantity,
                     :qty_before, :qty_after, :reason, :reference,
-                    :performed_by_id, :performed_by_name, :created_at)
+                    :performed_by_id, :performed_by_name, :created_at,
+                    :unit_price, :avg_cost_before, :avg_cost_after)
         """),
         {
             "id":                 str(uuid4()),
@@ -94,6 +124,9 @@ async def _log_movement(
             "performed_by_id":    str(user.id),
             "performed_by_name":  user.name,
             "created_at":         datetime.utcnow().isoformat(),
+            "unit_price":         unit_price,
+            "avg_cost_before":    avg_cost_before,
+            "avg_cost_after":     avg_cost_after,
         }
     )
 
@@ -135,6 +168,10 @@ class StockMoveIn(BaseModel):
     quantity:  int   = 1
     reason:    Optional[str] = None
     reference: Optional[str] = None   # e.g. PO number, delivery note
+    # Price paid per unit for this batch (stock-in only, admin/manager only).
+    # When given, the part's unit_cost becomes the weighted average of the
+    # existing stock and this batch. Leave empty to keep the current average.
+    unit_price: Optional[float] = None
 
 class StockMoveOut(BaseModel):
     part_id:   str
@@ -245,6 +282,20 @@ async def stock_in(
 
     qty_before = part.quantity_on_hand or 0
     qty_after  = qty_before + body.quantity
+
+    # Weighted-average unit cost (admin/manager only, and only when a batch
+    # price was entered — otherwise the average is left untouched).
+    avg_before = part.unit_cost
+    unit_price = None
+    if body.unit_price is not None:
+        if not _can_view_cost(current_user):
+            raise HTTPException(403, "Only admins and managers can enter a unit price")
+        if body.unit_price < 0:
+            raise HTTPException(400, "Unit price cannot be negative")
+        unit_price = round(float(body.unit_price), 4)
+        part.unit_cost = weighted_avg_cost(qty_before, avg_before, body.quantity, unit_price)
+    avg_after = part.unit_cost
+
     part.quantity_on_hand = qty_after
     part.updated_at       = datetime.utcnow()
 
@@ -252,6 +303,7 @@ async def stock_in(
         db, part, "stock_in", body.quantity,
         qty_before, qty_after, current_user,
         reason=body.reason, reference=body.reference,
+        unit_price=unit_price, avg_cost_before=avg_before, avg_cost_after=avg_after,
     )
     await db.flush()
 
@@ -269,6 +321,9 @@ async def stock_in(
         "part":       _part_summary(part),
         "qty_before": qty_before,
         "qty_after":  qty_after,
+        # Only revealed to admin/manager
+        **({"unit_price": unit_price, "avg_cost_before": avg_before, "avg_cost_after": avg_after}
+           if _can_view_cost(current_user) else {}),
     }
 
 
@@ -448,7 +503,7 @@ async def get_history(
     performed_by:Optional[str]  = None,
     limit:       int            = 200,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Full stock movement history with optional filters."""
     await _ensure_table(db)
@@ -480,14 +535,15 @@ async def get_history(
         SELECT id, part_id, part_code, part_name, movement,
                quantity, qty_before, qty_after,
                reason, reference,
-               performed_by_id, performed_by_name, created_at
+               performed_by_id, performed_by_name, created_at,
+               unit_price, avg_cost_before, avg_cost_after
         FROM stock_movements
         {where}
         ORDER BY created_at DESC
         LIMIT :limit
     """
     rows = (await db.execute(text(sql), params)).fetchall()
-    return [dict(r._mapping) for r in rows]
+    return [_strip_cost(dict(r._mapping), current_user) for r in rows]
 
 
 @router.get("/history/{part_id}")
@@ -495,7 +551,7 @@ async def get_part_history(
     part_id: str,
     limit:   int = 50,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Movement history for a single part."""
     await _ensure_table(db)
@@ -504,7 +560,8 @@ async def get_part_history(
             SELECT id, part_id, part_code, part_name, movement,
                    quantity, qty_before, qty_after,
                    reason, reference,
-                   performed_by_id, performed_by_name, created_at
+                   performed_by_id, performed_by_name, created_at,
+                   unit_price, avg_cost_before, avg_cost_after
             FROM stock_movements
             WHERE part_id = :pid
             ORDER BY created_at DESC
@@ -512,7 +569,7 @@ async def get_part_history(
         """),
         {"pid": part_id, "limit": limit}
     )).fetchall()
-    return [dict(r._mapping) for r in rows]
+    return [_strip_cost(dict(r._mapping), current_user) for r in rows]
 
 
 # ── Export history to Excel ────────────────────────────────────────────────
@@ -524,7 +581,7 @@ async def export_history_excel(
     date_from: Optional[str] = None,
     date_to:   Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ):
     """Export stock movement history to Excel."""
     try:
@@ -557,7 +614,7 @@ async def export_history_excel(
     hfl  = PatternFill("solid", start_color="1E3A5F")
     df   = Font(name="Arial", size=10)
 
-    ws.merge_cells("A1:L1")
+    ws.merge_cells("A1:M1")
     ws["A1"] = f"CMMS Pro — Stock Movement History  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(rows)} records"
     ws["A1"].font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
     ws["A1"].fill = hfl
@@ -565,6 +622,9 @@ async def export_history_excel(
     ws.row_dimensions[1].height = 26
 
     headers = ["Date/Time","Part Code","Part Name","Movement","Qty Change","Qty Before","Qty After","Reason","Reference","Performed By"]
+    show_cost = _can_view_cost(current_user)
+    if show_cost:
+        headers += ["Batch Unit Price (RM)","Avg Cost Before (RM)","Avg Cost After (RM)"]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=2, column=c, value=h)
         cell.font = hf; cell.fill = hfl; cell.border = bdr
@@ -590,13 +650,15 @@ async def export_history_excel(
             m["reference"]  or "",
             m["performed_by_name"] or "",
         ]
+        if show_cost:
+            row_data += [m["unit_price"], m["avg_cost_before"], m["avg_cost_after"]]
         for c, v in enumerate(row_data, 1):
             cell = ws.cell(row=r, column=c, value=v)
             cell.font = df; cell.fill = fill; cell.border = bdr
             cell.alignment = Alignment(vertical="center")
         ws.row_dimensions[r].height = 18
 
-    for i, w in enumerate([18,12,28,14,12,12,12,24,18,18],1):
+    for i, w in enumerate([18,12,28,14,12,12,12,24,18,18,20,20,20],1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A3"
 

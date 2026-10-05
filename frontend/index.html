@@ -146,14 +146,15 @@ const ROOT_CAUSE_INFO = {
   "Wiring":             {short:"loose / broken / shorted wire or cable",  desc:"Cable or wire is loose, broken, shorted, chafed or has a bad connector or terminal. Includes damaged cables on moving parts."},
   "Interference Signal":{short:"electrical noise / false signal",         desc:"Electrical noise or interference caused false or unstable signals (e.g. poor shielding or earthing, cables routed near power lines) with no failed component found."},
 
-  "CV Files":           {short:"CV file / drawing / data file problem",   desc:"Problem with the CV (control / configuration) files or recipe data loaded in the machine, such as a wrong, missing or corrupted file. Fixed by restoring or reloading the correct file."},
-  "Setting":            {short:"wrong parameter setting",                 desc:"A machine or process parameter was wrong or changed (speed, timing, temperature, pressure, etc.). Fixed by changing the setting back, with no part replaced."},
+  "CV Files":           {short:"CV file / recipe / data file problem",    desc:"Problem with the CV (control / configuration) files or recipe data loaded in the machine, such as a wrong, missing or corrupted file. Fixed by restoring or reloading the correct file."},
+  "Setting":            {short:"wrong machine / parameter setting",       desc:"A machine or process parameter was wrong or changed (speed, timing, temperature, pressure, etc.). Fixed by changing the setting back, with no part replaced."},
   "Hardware":           {short:"other hardware / structural part",        desc:"Physical machine part failed or is damaged and does not fit Mechanical or Electrical, e.g. frame, cover, guard, bracket, tool or fixture."},
   "Glue Pot":           {short:"glue pot / glue system problem",          desc:"Problem with the glue pot or glue system: heater, temperature, blocked nozzle or pump, glue level, or glue build-up."},
   "Software Bug":       {short:"program / logic / software error",        desc:"Fault caused by the PLC/HMI or machine software: program error, logic problem, software hang, wrong sequence or communication error that was fixed by a reset, reload or program change."},
   "Operator Mistake":   {short:"wrong operation / handling by operator",  desc:"Stoppage caused by incorrect operation or handling, such as wrong button or sequence, wrong set-up, or not following the procedure. Use only when the machine itself was healthy."},
   "Material":           {short:"bad / wrong raw or packing material",     desc:"Incoming material caused the stop, e.g. out-of-spec, damaged, warped, wet or wrong material, or inconsistent quality. The machine itself was fine."},
-  "Miscellaneous":      {short:"none of the above (NOT RELATED TO MACHINE)",  desc:"Use for non-machine request, example: factory / building/ facilities etc."},}
+  "Miscellaneous":      {short:"none of the above (explain in Actions)",  desc:"Use only if no other cause fits. Please describe the real cause clearly in Actions Taken or Remarks."},
+};
 
 // Dropdown + live description + collapsible full guide.
 // Values remain the plain root-cause names, so reports and analysis are unchanged.
@@ -487,6 +488,7 @@ function normalizeSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,''); }
 // Calculate downtime between two UTC timestamps
 // ── Production shift schedule (Malaysia local time, UTC+8, no DST) ──
 // Shift 1: 08:30–18:30   Shift 2: 19:30–06:30 (next day)
+// Shift 2 rest break: 00:30–01:30 every night (12:30am–1:30am)
 // Rest break (inside Shift 1): 12:30–13:30 every day, except Friday 13:00–14:00.
 // Downtime must only accumulate while a shift is actually running, so the
 // two gaps between shifts (06:30–08:30 and 18:30–19:30) and the daily rest
@@ -501,7 +503,7 @@ function myLocalInstant(y, m, d, hh, mm) {
   return new Date(Date.UTC(y, m, d, hh, mm, 0, 0) - MY_TZ_OFFSET_MS);
 }
 
-// Returns the 3 working windows (as true-UTC [start,end] Date pairs) that
+// Returns the 4 working windows (as true-UTC [start,end] Date pairs) that
 // are anchored on the Malaysia-local calendar day (y,m,d).
 function shiftWindowsForDay(y, m, d) {
   const dow = new Date(Date.UTC(y, m, d)).getUTCDay(); // 0=Sun..6=Sat
@@ -511,7 +513,8 @@ function shiftWindowsForDay(y, m, d) {
   return [
     [myLocalInstant(y, m, d, 8, 30),               myLocalInstant(y, m, d, restStart[0], restStart[1])],
     [myLocalInstant(y, m, d, restEnd[0], restEnd[1]), myLocalInstant(y, m, d, 18, 30)],
-    [myLocalInstant(y, m, d, 19, 30),               myLocalInstant(y, m, d + 1, 6, 30)], // spills into next day
+    [myLocalInstant(y, m, d, 19, 30),               myLocalInstant(y, m, d + 1, 0, 30)], // Shift 2, before night rest break
+    [myLocalInstant(y, m, d + 1, 1, 30),            myLocalInstant(y, m, d + 1, 6, 30)], // Shift 2, after night rest break (spills into next day)
   ];
 }
 
@@ -4027,6 +4030,10 @@ function PartsAndScannerTab({canManage,isProduction}){
   const [qty,setQty]=useState(1);
   const [reason,setReason]=useState('');
   const [reference,setReference]=useState('');
+  const [unitPrice,setUnitPrice]=useState(''); // price paid per unit for this stock-in batch (admin/manager only)
+  // ── Spare part readiness popup ──
+  const [includeProdCutter,setIncludeProdCutter]=useState(true); // readiness popup: count the Production Cutter category or not
+  const [readiness,setReadiness]=useState(null);       // null = closed, {loading} | {total,inStock,pct,scope} | {error}
   const [moveResult,setMoveResult]=useState(null);
   const barcodeRef=useRef(null);
   // ── Camera scanning ──
@@ -4299,18 +4306,38 @@ function PartsAndScannerTab({canManage,isProduction}){
     }
     try{
       const endpoint=mode==='in'?'/stock/in':'/stock/out';
-      const data=await api(endpoint,{method:'POST',body:JSON.stringify({part_id:scanPart.id,quantity:qty,reason:reason||null,reference:reference||null})});
+      const data=await api(endpoint,{method:'POST',body:JSON.stringify({part_id:scanPart.id,quantity:qty,reason:reason||null,reference:reference||null,...(mode==='in'&&canManage&&unitPrice!==''?{unit_price:parseFloat(unitPrice)}:{})})});
       setMoveResult(data);
       toast(data.message,data.low_stock?'err':'ok');
       setScanPart(data.part);
-      setQty(1);setReason('');setReference('');setBarcode('');
+      setQty(1);setReason('');setReference('');setUnitPrice('');setBarcode('');
       setTimeout(()=>barcodeRef.current?.focus(),200);
       load();
     }catch(e){toast(e.message,'err');}
   }
 
+  // Spare part readiness = items with stock on hand > 0 / all items in the list.
+  // Uses the current Category + Search filters, but deliberately ignores the
+  // "Topup only" / "Critical only" toggles (they would hide the healthy items
+  // and make the percentage meaningless).
+  async function openReadiness(){
+    setReadiness({loading:true});
+    try{
+      let url='/inventory/?low_stock=false&critical_only=false&limit=2000';
+      if(catFilter) url+='&category='+encodeURIComponent(catFilter);
+      let list=await api(url);
+      if(search.trim()){
+        const q=normalizeSearch(search);
+        list=list.filter(p=>normalizeSearch(p.name).includes(q)||normalizeSearch(p.part_code).includes(q)||normalizeSearch(p.description).includes(q)||normalizeSearch(p.barcode).includes(q));
+      }
+      setReadiness({list,
+        scope:(catFilter||'All categories')+(search.trim()?` · Search: "${search.trim()}"`:'')});
+    }catch(e){setReadiness({error:e.message});}
+  }
+  const isProdCutter=p=>(p.category||'').trim().toLowerCase()==='production cutter';
+
   function openScanner(prefillBarcode){
-    setScanOpen(true);setScanPart(null);setMoveResult(null);setBarcode(prefillBarcode||'');setQty(1);setReason('');setReference('');
+    setScanOpen(true);setScanPart(null);setMoveResult(null);setBarcode(prefillBarcode||'');setQty(1);setReason('');setReference('');setUnitPrice('');
     if(prefillBarcode) setTimeout(()=>lookupBarcode(prefillBarcode),50);
   }
   function closeScanner(){stopCamera();setScanOpen(false);setScanPart(null);setMoveResult(null);setBarcode('');}
@@ -4328,9 +4355,67 @@ function PartsAndScannerTab({canManage,isProduction}){
 
   return (
     <div>
+      {readiness&&(
+        <Modal title="📊 Spare Part Readiness" onClose={()=>setReadiness(null)}>
+          {readiness.loading?<Spinner/>:readiness.error?(
+            <div style={{color:'#dc2626',fontSize:'13px'}}>{readiness.error}</div>
+          ):(()=>{
+            // Include/exclude only makes sense when the page isn't already narrowed to one category
+            const canToggle=!catFilter;
+            const list=(canToggle&&!includeProdCutter)?readiness.list.filter(p=>!isProdCutter(p)):readiness.list;
+            const total=list.length;
+            const inStock=list.filter(p=>(p.quantity_on_hand||0)>0).length;
+            const pct=total?(inStock/total)*100:0;
+            const pcCount=readiness.list.filter(isProdCutter).length;
+            return (
+            <div>
+              <div style={{fontSize:'12px',color:'#64748b',marginBottom:'10px'}}>Scope: <strong>{readiness.scope}</strong></div>
+              {canToggle?(
+                <label style={{display:'flex',alignItems:'center',gap:'8px',fontSize:'13px',color:'#334155',cursor:'pointer',marginBottom:'12px',padding:'8px 10px',background:'#f8fafc',borderRadius:'8px',border:'1px solid #e2e8f0'}}>
+                  <input type="checkbox" checked={includeProdCutter} onChange={e=>setIncludeProdCutter(e.target.checked)}/>
+                  <span>Include <strong>Production Cutter</strong> category <span style={{color:'#94a3b8'}}>({pcCount} items)</span></span>
+                </label>
+              ):(
+                <div style={{fontSize:'11px',color:'#94a3b8',marginBottom:'12px'}}>
+                  Category filter is set to "{catFilter}". Set it to "All categories" to choose whether Production Cutter is included.
+                </div>
+              )}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'14px'}}>
+                <div style={{background:'#eff6ff',borderRadius:'10px',padding:'14px',textAlign:'center'}}>
+                  <div style={{fontSize:'28px',fontWeight:800,color:'#2563eb'}}>{total}</div>
+                  <div style={{fontSize:'12px',color:'#64748b'}}>Total items in list</div>
+                </div>
+                <div style={{background:'#f0fdf4',borderRadius:'10px',padding:'14px',textAlign:'center'}}>
+                  <div style={{fontSize:'28px',fontWeight:800,color:'#16a34a'}}>{inStock}</div>
+                  <div style={{fontSize:'12px',color:'#64748b'}}>Items available (qty &gt; 0)</div>
+                </div>
+              </div>
+              <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:'8px'}}>
+                  <span style={{fontSize:'13px',fontWeight:700,color:'#1e293b'}}>Spare part readiness</span>
+                  <span style={{fontSize:'26px',fontWeight:800,color:'#2563eb'}}>{pct.toFixed(1)}%</span>
+                </div>
+                <div style={{height:'10px',background:'#e2e8f0',borderRadius:'999px',overflow:'hidden'}}>
+                  <div style={{width:pct+'%',height:'100%',background:'#2563eb'}}/>
+                </div>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'8px'}}>
+                  = {inStock} items with stock ÷ {total} items in list
+                </div>
+              </div>
+              <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'10px'}}>
+                Follows the current Category and Search filters. "Topup only" / "Critical only" are ignored here.
+              </div>
+            </div>
+            );
+          })()}
+        </Modal>
+      )}
       {/* Action bar */}
       <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'16px'}}>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
+          <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={openReadiness} title="Spare part readiness summary">
+            📊 Readiness
+          </button>
           <button className="btn btn-success" style={{fontSize:'13px',fontWeight:700}} onClick={()=>openScanner()}>
             🔲 Scan to Stock In/Out
           </button>
@@ -4388,7 +4473,7 @@ function PartsAndScannerTab({canManage,isProduction}){
             <thead><tr>
               {[
                 'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
-                ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
+                ...(canManage?['Avg Unit Price (RM)','Total (RM)']:[]),
                 'Barcode','Threshold','Last Checked','Status','Actions',
               ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}<ColResizer/></th>)}
             </tr></thead>
@@ -4776,6 +4861,25 @@ function PartsAndScannerTab({canManage,isProduction}){
                         }
                       </select>
                     </div>
+                    {mode==='in'&&canManage&&(()=>{
+                      const price=parseFloat(unitPrice);
+                      const oldQty=scanPart.quantity_on_hand||0, oldCost=scanPart.unit_cost;
+                      let preview=null;
+                      if(!isNaN(price)&&price>=0&&qty>=1){
+                        preview=(oldQty>0&&oldCost!=null)?(oldQty*oldCost+qty*price)/(oldQty+qty):price;
+                      }
+                      return (
+                        <div>
+                          <label className="lbl">Unit Price (RM) — this batch <small style={{fontWeight:400,color:'#94a3b8'}}>(optional)</small></label>
+                          <input type="number" step="0.01" min={0} className="inp" placeholder="Price per unit of the new stock" value={unitPrice} onChange={e=>setUnitPrice(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitMove()}/>
+                          <div style={{fontSize:'12px',color:'#64748b',marginTop:'4px',lineHeight:1.5}}>
+                            Current average: <strong>{oldCost!=null?'RM '+oldCost.toFixed(2):'—'}</strong> ({oldQty} {scanPart.unit||'pcs'})
+                            {preview!=null&&<> → New average: <strong style={{color:'#16a34a'}}>RM {preview.toFixed(2)}</strong></>}
+                          </div>
+                          {unitPrice===''&&<div style={{fontSize:'11px',color:'#94a3b8',marginTop:'2px'}}>Leave empty to keep the current average price unchanged.</div>}
+                        </div>
+                      );
+                    })()}
                     <div>
                       <label className="lbl">Reference <small style={{fontWeight:400,color:'#94a3b8'}}>(WO No / PO No)</small></label>
                       <input className="inp" placeholder="e.g. WO-202506-0012" value={reference} onChange={e=>setReference(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitMove()}/>
@@ -4828,7 +4932,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                   <div style={{fontSize:'12px',color:'#374151',lineHeight:1.9}}>
                     {scanPart.location&&<div>📍 <strong>Location:</strong> {scanPart.location}</div>}
                     {scanPart.used_on_asset&&<div>🏭 <strong>Used on:</strong> {scanPart.used_on_asset}</div>}
-                    {canManage&&scanPart.unit_cost!=null&&<div>💰 <strong>Unit Price:</strong> RM {scanPart.unit_cost.toFixed(2)}</div>}
+                    {canManage&&scanPart.unit_cost!=null&&<div>💰 <strong>Avg Unit Price:</strong> RM {scanPart.unit_cost.toFixed(2)} <span style={{color:'#94a3b8'}}>· Stock value RM {((scanPart.quantity_on_hand||0)*scanPart.unit_cost).toFixed(2)}</span></div>}
                     {scanPart.barcode&&<div>🔲 <strong>Barcode:</strong> <span style={{fontFamily:'monospace'}}>{scanPart.barcode}</span></div>}
                   </div>
                   {isTopup&&(
@@ -4856,6 +4960,12 @@ function PartsAndScannerTab({canManage,isProduction}){
                       </div>
                     ))}
                   </div>
+                  {mode==='in'&&moveResult.unit_price!=null&&(
+                    <div style={{marginTop:'10px',background:'rgba(255,255,255,0.7)',borderRadius:'8px',padding:'10px',fontSize:'12px',color:'#374151',lineHeight:1.7}}>
+                      <div>🧾 <strong>Batch price:</strong> RM {moveResult.unit_price.toFixed(2)} × {Math.abs(moveResult.qty_after-moveResult.qty_before)}</div>
+                      <div>💰 <strong>Average unit price:</strong> {moveResult.avg_cost_before!=null?'RM '+moveResult.avg_cost_before.toFixed(2):'—'} → <strong style={{color:'#16a34a'}}>RM {moveResult.avg_cost_after.toFixed(2)}</strong></div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -5239,6 +5349,8 @@ function StockTakeTab(){
 
 // ── Stock Movement History (kept separate) ─────────────────────────────────
 function StockHistoryTab(){
+  const {user:histUser}=useAuth();
+  const canSeeCost=histUser&&(histUser.role==='admin'||histUser.role==='manager');
   const [history,setHistory]=useState([]);
   const [histLoading,setHistLoading]=useState(false);
   const [histFilter,setHistFilter]=useState('');
@@ -5330,7 +5442,7 @@ function StockHistoryTab(){
         {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
           <div className="ovf"><table className="resizable-table">
             <thead><tr>
-              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}<ColResizer/></th>)}
+              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After',...(canSeeCost?['Batch Price (RM)','Avg Price (RM)']:[]),'Reason','Reference','Performed By'].map(h=><th key={h}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{history.map((h,i)=>{
               const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
@@ -5350,6 +5462,10 @@ function StockHistoryTab(){
                   </td>
                   <td style={{textAlign:'right',color:'#64748b'}}>{h.qty_before}</td>
                   <td style={{textAlign:'right',fontWeight:600,color:'#1e293b'}}>{h.qty_after}</td>
+                  {canSeeCost&&<>
+                    <td style={{textAlign:'right',color:'#64748b'}}>{h.unit_price!=null?h.unit_price.toFixed(2):'—'}</td>
+                    <td style={{textAlign:'right',color:'#64748b',whiteSpace:'nowrap'}}>{h.unit_price!=null&&h.avg_cost_after!=null?<>{h.avg_cost_before!=null?h.avg_cost_before.toFixed(2)+' → ':''}<strong style={{color:'#16a34a'}}>{h.avg_cost_after.toFixed(2)}</strong></>:'—'}</td>
+                  </>}
                   <td style={{color:'#64748b',fontSize:'12px'}}>{h.reason||'—'}</td>
                   <td style={{fontFamily:'monospace',fontSize:'12px',color:'#2563eb'}}>{h.reference||'—'}</td>
                   <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{h.performed_by_name}</td>

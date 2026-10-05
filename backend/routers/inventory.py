@@ -26,7 +26,7 @@ from auth import get_current_user, forbid_viewer
 from models import User
 from websocket_manager import ws_manager
 from photo_storage import save_photo, delete_photo_files
-from stock_status import compute_stock_status
+from stock_status import compute_stock_status, weighted_avg_cost
 
 router = APIRouter(prefix="/inventory", tags=["inventory"], dependencies=[Depends(forbid_viewer)])
 ROOM  = "inventory"
@@ -822,11 +822,16 @@ async def delete_part(part_id:UUID,db:AsyncSession=Depends(get_db),current_user:
 
 @router.post("/{part_id}/restock")
 async def restock(
-    part_id:UUID, quantity:int,
+    part_id:UUID, quantity:int, unit_price:Optional[float]=None,
     db:AsyncSession=Depends(get_db), current_user:User=Depends(get_current_user),
 ):
     if quantity<1: raise HTTPException(400,"Quantity must be at least 1")
     p=await _get(part_id,db)
+    if unit_price is not None:
+        # New batch price -> weighted-average unit cost (admin/manager only)
+        if not _can_view_cost(current_user): raise HTTPException(403,"Only admins and managers can enter a unit price")
+        if unit_price<0: raise HTTPException(400,"Unit price cannot be negative")
+        p.unit_cost=weighted_avg_cost(p.quantity_on_hand or 0,p.unit_cost,quantity,unit_price)
     p.quantity_on_hand+=quantity
     p.updated_at=datetime.utcnow()
     await db.flush()

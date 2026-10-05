@@ -416,7 +416,8 @@ async def import_excel(
             qty           = int(gnum(rv,col_map,"quantity",0) or 0)
             uc_raw        = gnum(rv,col_map,"unit_cost")
             unit_cost     = round(float(uc_raw),4) if uc_raw is not None else None
-            reorder_level = int(gnum(rv,col_map,"reorder_level",5) or 5)
+            reorder_level_raw = gnum(rv,col_map,"reorder_level",5)
+            reorder_level = 5 if reorder_level_raw is None else int(reorder_level_raw)
             description   = gcol(rv,col_map,"description")  or None
             location      = gcol(rv,col_map,"location")     or None
             used_on       = gcol(rv,col_map,"used_on")      or None
@@ -770,7 +771,7 @@ async def create_part(
         category=body.category or "Other",
         description=body.description,
         quantity_on_hand=body.quantity_on_hand or 0,
-        reorder_level=body.reorder_level or 5,
+        reorder_level=body.reorder_level if body.reorder_level is not None else 5,
         unit_cost=body.unit_cost, supplier=body.supplier,
         location=body.location, unit=body.unit or "pcs",
     )

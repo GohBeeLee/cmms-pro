@@ -137,8 +137,35 @@ class WorkOrder(Base):
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
     deleted_by: Mapped[str | None] = mapped_column(String(150))
+    delete_reason: Mapped[str | None] = mapped_column(String(500))
+    cancel_reason: Mapped[str | None] = mapped_column(String(500))
     restored_at: Mapped[datetime | None] = mapped_column(DateTime)
     restored_by: Mapped[str | None] = mapped_column(String(150))
+    # When this work order's affected_downtime was automatically flipped to
+    # False because its downtime window overlapped a still-affected work
+    # order on a "General Facilities" asset (production was already halted
+    # by that failure, so this machine's concurrent downtime isn't counted
+    # as its own separate production loss) — the id of that General
+    # Facilities work order. NULL means affected_downtime reflects a value
+    # someone actually chose, not this auto rule. See _reconcile_gf_overlap
+    # in routers/work_orders.py: this is how the rule tells "I auto-
+    # suppressed this, restore it once the overlap ends" apart from "an
+    # admin genuinely marked this non-affected", so it never overwrites the
+    # latter.
+    downtime_suppressed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("work_orders.id"), nullable=True
+    )
+    # Accumulated working hours (shift-schedule aware, like held_hours) that
+    # this work order has spent overlapping an active General Facilities
+    # failure — i.e. how much of its downtime is attributable to that
+    # overlap rather than its own separate breakdown. Carved out of the
+    # affected-downtime total for reporting (see _wo_downtime_split in
+    # routers/analysis.py) while the work order's own total downtime hours
+    # stay unchanged. gf_overlap_started_at marks when the CURRENT overlap
+    # segment began (NULL when not currently overlapping) — bookkeeping only,
+    # mirrors hold_started_at/held_hours above.
+    gf_overlap_hours: Mapped[float] = mapped_column(Float, default=0.0)
+    gf_overlap_started_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     asset: Mapped["Asset"] = relationship(back_populates="work_orders")
     assignments: Mapped[list["TaskAssignment"]] = relationship(back_populates="work_order")

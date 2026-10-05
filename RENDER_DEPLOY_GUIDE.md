@@ -101,7 +101,7 @@ Open it in any browser, anywhere in the world!
 
 Login:
     Email:    admin@cmms.com
-    Password: password123
+    Password: 1234
 
 ---
 

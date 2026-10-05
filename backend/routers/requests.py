@@ -17,6 +17,7 @@ from models import WorkOrder, WorkOrderType, WorkOrderStatus, Priority, Asset, W
 from websocket_manager import ws_manager
 from photo_storage import save_photo
 from wo_numbering import insert_with_unique_wo_number
+from routers.work_orders import _reconcile_gf_overlap
 
 router = APIRouter(prefix="/requests", tags=["requests"])
 
@@ -169,6 +170,10 @@ async def submit_repair_request(
                 thumb_path=saved["thumb_path"], full_path=saved["full_path"],
             ))
     await db.flush()
+    # An operator-submitted request defaults to affected_downtime=True, so
+    # it can itself start (if on a General Facilities asset) or fall inside
+    # a General Facilities overlap — re-evaluate before it's returned.
+    await _reconcile_gf_overlap(db)
 
     await ws_manager.broadcast_event("requests", "request.new", {
         "id": str(wo.id), "wo_number": wo_number,

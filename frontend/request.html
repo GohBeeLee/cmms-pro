@@ -45,6 +45,11 @@
   .btn-submit:hover{background:#1d4ed8;}
   .btn-submit:disabled{background:#94a3b8;cursor:not-allowed;}
   .success-screen{display:none;text-align:center;padding:10px 0;}
+  .success-summary{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;margin:16px 0;text-align:left;}
+  .success-summary-row{display:flex;gap:10px;padding:6px 0;font-size:13px;border-bottom:1px solid #eef2f6;}
+  .success-summary-row:last-child{border-bottom:none;}
+  .success-summary-label{flex:0 0 100px;font-weight:700;color:#64748b;}
+  .success-summary-row span:last-child{color:#1e293b;flex:1;word-break:break-word;}
   .success-icon{font-size:64px;margin-bottom:12px;}
   .success-screen h2{font-size:22px;font-weight:800;color:#16a34a;margin-bottom:8px;}
   .success-screen p{color:#64748b;font-size:14px;line-height:1.6;margin-bottom:4px;}
@@ -148,6 +153,14 @@
       <h2>Request Submitted!</h2>
       <div class="wo-badge" id="success-wo"></div>
       <p id="success-msg"></p>
+
+      <div class="success-summary" id="success-summary">
+        <div class="success-summary-row"><span class="success-summary-label">Location</span><span id="summary-location"></span></div>
+        <div class="success-summary-row"><span class="success-summary-label">Machine</span><span id="summary-machine"></span></div>
+        <div class="success-summary-row"><span class="success-summary-label">Problem</span><span id="summary-problem"></span></div>
+        <div class="success-summary-row"><span class="success-summary-label">Requested by</span><span id="summary-requestor"></span></div>
+      </div>
+
       <p style="color:#94a3b8;font-size:12px;margin-top:10px">The maintenance team has been notified.</p>
       <br/>
       <button class="btn-new" onclick="resetForm()">Submit Another Request</button>
@@ -354,9 +367,16 @@ async function submitRequest() {
     };
     var res = await fetch(API + '/requests/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     if (!res.ok) { var err = await res.json().catch(function(){ return {}; }); throw new Error(err.detail || 'Submission failed.'); }
-    var data = await res.json();
+    var data  = await res.json();
+    var asset = allAssets.filter(function(a){ return a.id === assetId; })[0];
+
     document.getElementById('success-wo').textContent  = data.wo_number;
     document.getElementById('success-msg').textContent = data.message;
+    document.getElementById('summary-location').textContent = (asset && asset.location) || '—';
+    document.getElementById('summary-machine').textContent  = asset ? (asset.name + ' (' + asset.asset_code + ')') : '—';
+    document.getElementById('summary-problem').textContent  = category + ' — ' + desc;
+    document.getElementById('summary-requestor').textContent = name;
+
     document.getElementById('form-section').style.display  = 'none';
     document.getElementById('success-screen').style.display = 'block';
     window.scrollTo(0, 0);

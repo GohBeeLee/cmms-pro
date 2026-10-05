@@ -37,8 +37,10 @@
   .modal-box{background:#fff;border-radius:16px;width:100%;max-width:580px;max-height:93vh;overflow-y:auto;margin:16px;}
   .modal-lg{max-width:760px;}
   table{width:100%;border-collapse:collapse;}
-  th{background:#f8fafc;color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:11px 16px;text-align:left;white-space:nowrap;}
+  th{background:#f8fafc;color:#64748b;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;padding:11px 16px;text-align:left;white-space:nowrap;position:relative;overflow:hidden;text-overflow:ellipsis;}
   td{padding:11px 16px;font-size:13px;color:#374151;border-bottom:1px solid #f1f5f9;}
+  .col-resizer{position:absolute;right:0;top:0;bottom:0;width:6px;cursor:col-resize;user-select:none;z-index:5;}
+  .col-resizer:hover,.col-resizer:active{background:rgba(37,99,235,0.4);}
   tr:last-child td{border-bottom:none;}
   tr:hover td{background:#fafafa;}
   .spinner{border:3px solid #e2e8f0;border-top:3px solid #3b82f6;border-radius:50%;width:32px;height:32px;animation:spin 0.8s linear infinite;margin:48px auto;}
@@ -122,6 +124,79 @@ const ROOT_CAUSE_GROUPS = {
 // Flat list kept for any code that still expects a plain array (e.g. validation)
 const ROOT_CAUSES = Object.values(ROOT_CAUSE_GROUPS).flat();
 
+// Reference text shown to technicians when choosing a root cause.
+// "short" appears next to the option in the dropdown, "desc" in the help box.
+const ROOT_CAUSE_INFO = {
+  "Bearing":            {short:"worn / noisy / seized bearing",           desc:"Bearing is worn, damaged, noisy, overheated, loose or seized. Choose this when replacing or greasing a bearing fixed the problem."},
+  "Chain":              {short:"chain stretched / broken / jumped",       desc:"Drive or conveyor chain is stretched, broken, jumped a sprocket, dry or needs tensioning. Includes sprocket wear caused by the chain."},
+  "Belt":               {short:"belt slipping / torn / worn",             desc:"Timing belt or V-belt is slipping, torn, worn, loose or mis-tracked. Includes belt tension adjustment and belt replacement."},
+  "Fastener":           {short:"loose / missing screw, bolt, nut",        desc:"Bolt, screw, nut, pin, key or clamp is loose, sheared or missing, causing the fault. Tightening or replacing a fastener fixed it."},
+  "Wear Parts":         {short:"normal wear of consumable parts",         desc:"A consumable or wear part reached end of life (e.g. blade, pad, guide, roller, bush, seal). Use when the part simply wore out and is not covered by a more specific cause."},
+  "Universal Joint":    {short:"U-joint / coupling worn or broken",       desc:"Universal joint, shaft coupling or drive shaft joint is worn, has play, or is broken."},
+  "Pneumatic":          {short:"air cylinder / valve / hose / air leak",  desc:"Problem in the air system: cylinder, solenoid valve, air hose, fitting, regulator or air leak, or low air pressure at the machine."},
+  "Alignment":          {short:"parts out of position / misaligned",      desc:"Machine parts, guides, rollers or shafts are out of alignment or position, causing jams or poor running. Fixed by re-aligning, not by replacing a part."},
+  "Cutter Adjustment":  {short:"cutter gap / position needs re-setting",  desc:"Cutter, knife or blade position, gap or pressure needed re-adjustment. Use for adjustment only; if the cutter blade itself was worn out, choose Wear Parts."},
+
+  "Motor":              {short:"motor / drive / inverter fault",          desc:"Motor burnt, overheated, tripped or not running; includes motor winding, motor brake, and inverter / VFD / drive faults."},
+  "Sensor":             {short:"sensor dirty / faulty / misaligned",      desc:"Proximity, photo-electric, limit switch, encoder or other sensor is faulty, dirty, loose or mis-positioned and gives a wrong or no signal."},
+  "PLC":                {short:"PLC / I/O module / HMI fault",            desc:"Fault in the PLC CPU, I/O module, communication module or HMI/touch-screen hardware. For program or logic problems choose Software Bug."},
+  "Power Trip":         {short:"breaker / fuse / overload tripped",       desc:"Breaker, fuse, overload relay or main supply tripped or lost power (including power dip or outage). Choose a more specific cause if you found why it tripped."},
+  "Controller":         {short:"temperature / speed / other controller",  desc:"Stand-alone controller or module is faulty or mis-set, e.g. temperature controller, speed controller, counter, timer, servo / drive controller."},
+  "Control Panel":      {short:"relay / contactor / switch / button",     desc:"Fault inside the control panel or on its components: relay, contactor, push button, selector switch, power supply, terminal or emergency-stop circuit."},
+  "Wiring":             {short:"loose / broken / shorted wire or cable",  desc:"Cable or wire is loose, broken, shorted, chafed or has a bad connector or terminal. Includes damaged cables on moving parts."},
+  "Interference Signal":{short:"electrical noise / false signal",         desc:"Electrical noise or interference caused false or unstable signals (e.g. poor shielding or earthing, cables routed near power lines) with no failed component found."},
+
+  "CV Files":           {short:"CV file / drawing / data file problem",   desc:"Problem with the CV (control / configuration) files or recipe data loaded in the machine, such as a wrong, missing or corrupted file. Fixed by restoring or reloading the correct file."},
+  "Setting":            {short:"wrong parameter setting",                 desc:"A machine or process parameter was wrong or changed (speed, timing, temperature, pressure, etc.). Fixed by changing the setting back, with no part replaced."},
+  "Hardware":           {short:"other hardware / structural part",        desc:"Physical machine part failed or is damaged and does not fit Mechanical or Electrical, e.g. frame, cover, guard, bracket, tool or fixture."},
+  "Glue Pot":           {short:"glue pot / glue system problem",          desc:"Problem with the glue pot or glue system: heater, temperature, blocked nozzle or pump, glue level, or glue build-up."},
+  "Software Bug":       {short:"program / logic / software error",        desc:"Fault caused by the PLC/HMI or machine software: program error, logic problem, software hang, wrong sequence or communication error that was fixed by a reset, reload or program change."},
+  "Operator Mistake":   {short:"wrong operation / handling by operator",  desc:"Stoppage caused by incorrect operation or handling, such as wrong button or sequence, wrong set-up, or not following the procedure. Use only when the machine itself was healthy."},
+  "Material":           {short:"bad / wrong raw or packing material",     desc:"Incoming material caused the stop, e.g. out-of-spec, damaged, warped, wet or wrong material, or inconsistent quality. The machine itself was fine."},
+  "Miscellaneous":      {short:"none of the above (NOT RELATED TO MACHINE)",  desc:"Use for non-machine request, example: factory / building/ facilities etc."},}
+
+// Dropdown + live description + collapsible full guide.
+// Values remain the plain root-cause names, so reports and analysis are unchanged.
+function RootCauseSelect({value, onChange}) {
+  const [showGuide, setShowGuide] = useState(false);
+  const info = ROOT_CAUSE_INFO[value];
+  return (
+    <div>
+      <select className="inp" value={value||''} onChange={e=>onChange(e.target.value)}>
+        <option value="">Select root cause…</option>
+        {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
+          <optgroup key={group} label={group}>
+            {items.map(rc=><option key={rc} value={rc}>{rc}{ROOT_CAUSE_INFO[rc]?' — '+ROOT_CAUSE_INFO[rc].short:''}</option>)}
+          </optgroup>
+        ))}
+      </select>
+      {info&&(
+        <div style={{marginTop:'6px',padding:'8px 10px',background:'#eff6ff',border:'1px solid #bfdbfe',borderRadius:'8px',fontSize:'12px',color:'#1e3a8a',lineHeight:1.45}}>
+          <b>{value}:</b> {info.desc}
+        </div>
+      )}
+      <button type="button" onClick={()=>setShowGuide(v=>!v)}
+        style={{marginTop:'6px',background:'none',border:'none',padding:0,color:'#2563eb',fontSize:'12px',fontWeight:600,cursor:'pointer'}}>
+        {showGuide?'▾ Hide root cause guide':'▸ Not sure? View root cause guide'}
+      </button>
+      {showGuide&&(
+        <div style={{marginTop:'6px',maxHeight:'260px',overflowY:'auto',border:'1px solid #e2e8f0',borderRadius:'8px',padding:'8px 10px',background:'#f8fafc'}}>
+          {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
+            <div key={group} style={{marginBottom:'8px'}}>
+              <div style={{fontSize:'12px',fontWeight:800,color:'#1e293b',marginBottom:'4px'}}>{group}</div>
+              {items.map(rc=>(
+                <div key={rc} onClick={()=>onChange(rc)} style={{fontSize:'12px',color:'#475569',padding:'3px 0',cursor:'pointer',lineHeight:1.4}}>
+                  <b style={{color:value===rc?'#2563eb':'#334155'}}>{rc}</b> – {ROOT_CAUSE_INFO[rc]?.desc}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 function toast(msg, type) {
   const el = document.createElement('div');
@@ -151,6 +226,38 @@ async function api(path, opts) {
   if (res.status===204) return null;
   return res.json();
 }
+
+// ── Resizable table columns ─────────────────────────────────────────────
+// Shared drag handler for the small handle in the right edge of a <th>.
+// Pure DOM manipulation (no React state) — on first drag it freezes every
+// column in that header row to its current rendered width and switches the
+// table to a fixed layout, so nothing else jumps; then only the dragged
+// column's width changes as the mouse moves. Widths reset when the page
+// component unmounts (switching CMMS pages), same as any other session UI
+// state — this isn't meant to persist across visits.
+function handleColResizeMouseDown(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  const th    = e.currentTarget.parentElement;
+  const table = th.closest('table');
+  const row   = th.parentElement;
+  if (table.style.tableLayout !== 'fixed') {
+    Array.from(row.children).forEach(cell => { cell.style.width = cell.offsetWidth + 'px'; });
+    table.style.tableLayout = 'fixed';
+  }
+  const startX     = e.clientX;
+  const startWidth = th.offsetWidth;
+  function onMove(ev) {
+    th.style.width = Math.max(50, startWidth + (ev.clientX - startX)) + 'px';
+  }
+  function onUp() {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+  }
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+const ColResizer = () => <span className="col-resizer" onMouseDown={handleColResizeMouseDown}/>;
 
 // ── Authenticated file download ────────────────────────────────────────────
 // Fetches a file with the JWT token in the header, then triggers browser download.
@@ -210,6 +317,22 @@ function Badge({value}) {
   const v=value||'';
   const cols=(BCOLS[v]||'#f1f5f9;#374151').split(';');
   return <span className="badge" style={{background:cols[0],color:cols[1]}}>{v.replace(/_/g,' ').replace(/^\w/,c=>c.toUpperCase())}</span>;
+}
+
+// Downtime badge that's aware of the General Facilities overlap rule
+// (see backend/routers/work_orders.py::_reconcile_gf_overlap). Falls back
+// to the plain Affected/Non-affected Badge when there's nothing to add.
+function DowntimeTypeBadge({wo}){
+  const isLive = !!wo.downtime_suppressed_by_id;   // currently suppressed, still open
+  const split = splitDowntime(wo);
+  const isSplit = wo.affected_downtime !== false && split.nonAffected > 0 && split.affected > 0;
+  if (isLive) {
+    return <span className="badge" style={{background:'#ede9fe',color:'#5b21b6'}} title="Currently non-affected — overlapping an active General Facilities work order">GF overlap (live)</span>;
+  }
+  if (isSplit) {
+    return <span className="badge" style={{background:'#fef3c7',color:'#92400e'}} title={`Split: ${split.affected}h affected, ${split.nonAffected}h overlapped a General Facilities failure`}>Split {split.affected}h / {split.nonAffected}h</span>;
+  }
+  return <Badge value={wo.affected_downtime===false?'non_affected':'affected'}/>;
 }
 
 function Modal({title,onClose,children,large}) {
@@ -337,6 +460,15 @@ function fmtDT(d){
   const dt = toUTC(d);
   return dt ? dt.toLocaleString('en-MY',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
 }
+// Converts a backend UTC timestamp (or a Date) into the "YYYY-MM-DDTHH:mm"
+// string a <input type="datetime-local"> expects, in the browser's local time.
+// (Slicing the raw UTC string instead would show UTC as if it were local time.)
+function toLocalInputValue(d){
+  const dt = d instanceof Date ? d : toUTC(d);
+  if (!dt || isNaN(dt)) return '';
+  const p = n => String(n).padStart(2,'0');
+  return dt.getFullYear()+'-'+p(dt.getMonth()+1)+'-'+p(dt.getDate())+'T'+p(dt.getHours())+':'+p(dt.getMinutes());
+}
 function relativeTime(iso){
   if(!iso) return 'Never';
   const dt=toUTC(iso);
@@ -425,6 +557,23 @@ function calcDowntime(from, to, heldHours = 0, holdStartedAt = null){
   const h = Math.floor(totalMins / 60);
   const m = totalMins % 60;
   return {hours: parseFloat((totalMins/60).toFixed(2)), display: `${h}h ${m}m`};
+}
+
+// Mirrors the backend's _wo_downtime_split (routers/analysis.py): total
+// downtime is unchanged, but gf_overlap_hours — the portion that overlapped
+// a General Facilities failure (see downtime_suppressed_by_id) — is carved
+// out of the affected total for display, whenever the work order is
+// currently marked affected. For display only; the backend's own numbers
+// (in analysis/report responses) are authoritative.
+function splitDowntime(wo){
+  const total = calcDowntime(wo.created_at, wo.completed_at, wo.held_hours, wo.status==='on_hold'?wo.hold_started_at:null);
+  const gfHours = wo.gf_overlap_hours || 0;
+  if (wo.affected_downtime === false || !total.hours) {
+    return {total: total.hours, affected: 0, nonAffected: total.hours, display: total.display};
+  }
+  const nonAffected = Math.min(gfHours, total.hours);
+  const affected = Math.max(total.hours - nonAffected, 0);
+  return {total: total.hours, affected: parseFloat(affected.toFixed(2)), nonAffected: parseFloat(nonAffected.toFixed(2)), display: total.display};
 }
 
 // ── Shared photo-tag helpers ──
@@ -595,20 +744,28 @@ function Login({onLogin}){
 
 // ── Dashboard ──────────────────────────────────────────────────────────────
 function Dashboard(){
+  const {user}=useAuth();
+  const isAdminOrManager=user&&(user.role==='admin'||user.role==='manager');
   const [kpi,setKpi]=useState(null);
   const [wos,setWos]=useState([]);
   const [technicians,setTechnicians]=useState([]);
   const [completedByMonth,setCompletedByMonth]=useState(null);
+  const [completedByTech,setCompletedByTech]=useState(null);
 
   async function load(){
     try{
-      const [k,w,t,c]=await Promise.all([
+      const calls=[
         api('/dashboard/kpi'),
         api('/work-orders/?limit=200'),
         api('/users/technicians'),
         api('/dashboard/completed-by-month'),
-      ]);
+      ];
+      // Per-technician completed-job counts are performance data — only
+      // fetch (and show) it for admin/manager, not other roles.
+      if(isAdminOrManager) calls.push(api('/dashboard/completed-by-technician'));
+      const [k,w,t,c,ct]=await Promise.all(calls);
       setKpi(k); setWos(w); setTechnicians(t); setCompletedByMonth(c);
+      if(isAdminOrManager) setCompletedByTech(ct);
     }catch(e){toast(e.message,'err');}
   }
   useEffect(()=>{load();},[]);
@@ -755,6 +912,34 @@ function Dashboard(){
                   </RC.PieChart>
                 </RC.ResponsiveContainer>
               ):<Empty msg="No completed cases yet"/>}
+            </div>
+          );
+        })()}
+
+        {/* Completed jobs by technician — who actually closed each job. Admin/manager only. */}
+        {RC&&isAdminOrManager&&(()=>{
+          const cT=completedByTech?.by_technician||[];
+          const chartHeight=Math.max(200,cT.length*42+40);
+          return (
+            <div className="card" style={{marginTop:'18px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px',flexWrap:'wrap',gap:'8px'}}>
+                <h3 style={{fontWeight:700,color:'#1e293b',fontSize:'14px',margin:0}}>🔧 Completed Jobs by Technician</h3>
+                <span style={{background:'#eff6ff',color:'#2563eb',border:'1px solid #bfdbfe',padding:'4px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>
+                  {completedByTech?.total_completed??0} completed to date
+                </span>
+              </div>
+              {cT.length>0?(
+                <RC.ResponsiveContainer width="100%" height={chartHeight}>
+                  <RC.BarChart data={cT} layout="vertical" margin={{left:10,right:24,top:4,bottom:4}}>
+                    <RC.XAxis type="number" allowDecimals={false} tick={{fontSize:12}}/>
+                    <RC.YAxis type="category" dataKey="technician" width={110} tick={{fontSize:12}}/>
+                    <RC.Tooltip formatter={v=>[v+' completed','Jobs']}/>
+                    <RC.Bar dataKey="count" radius={[0,6,6,0]} barSize={22}>
+                      {cT.map((_,i)=><RC.Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                    </RC.Bar>
+                  </RC.BarChart>
+                </RC.ResponsiveContainer>
+              ):<Empty msg="No completed jobs yet"/>}
             </div>
           );
         })()}
@@ -1283,11 +1468,15 @@ function TechnicianBoard(){
   const [holdReason,setHoldReason]=useState('');
   const [holdSubmitting,setHoldSubmitting]=useState(false);
   const [resumingId,setResumingId]=useState(null);
+  const [cancelling,setCancelling]=useState(null);  // wo currently being cancelled
+  const [cancelReason,setCancelReason]=useState('');
+  const [cancelSubmitting,setCancelSubmitting]=useState(false);
 
   // Completion form state
   const [rootCause,setRootCause]=useState('');
   const [actions,setActions]=useState('');
   const [actualHours,setActualHours]=useState('');
+  const [completedAt,setCompletedAt]=useState('');   // datetime-local value; '' = "now" (submit time)
   const [affectedDowntime,setAffectedDowntime]=useState(true);
   const [remarks,setRemarks]=useState('');
   const [usedParts,setUsedParts]=useState([]);
@@ -1316,18 +1505,34 @@ function TechnicianBoard(){
   useEffect(()=>{load();},[filterStatus]);
   useWS('work_orders',load);
 
-  // Live downtime timer while completion modal is open
+  // Auto-calculated downtime while the completion modal is open.
+  //  - Completed time left blank: live counter, request time -> now.
+  //  - Completed time filled in: fixed, request time -> that time.
+  // Either way it's only what gets saved when "Actual Downtime Hours" is blank.
   useEffect(()=>{
     if (!completing) return;
-    function tick(){ setAutoDowntime(calcDowntime(completing.created_at, null, completing.held_hours, completing.status==='on_hold'?completing.hold_started_at:null)); }
+    function tick(){
+      const endDate = completedAt ? new Date(completedAt) : null;
+      if (endDate && !isNaN(endDate)) {
+        // If completing straight out of on_hold, the hold window ends at the
+        // chosen completed time — mirrors the backend's hold handling.
+        let held = completing.held_hours || 0;
+        if (completing.status==='on_hold' && completing.hold_started_at) {
+          held += workingMsBetween(toUTC(completing.hold_started_at), endDate) / 3600000;
+        }
+        setAutoDowntime(calcDowntime(completing.created_at, endDate.toISOString(), held));
+      } else {
+        setAutoDowntime(calcDowntime(completing.created_at, null, completing.held_hours, completing.status==='on_hold'?completing.hold_started_at:null));
+      }
+    }
     tick();
-    timerRef.current = setInterval(tick, 60000);
+    if (!completedAt) timerRef.current = setInterval(tick, 60000);
     return ()=>clearInterval(timerRef.current);
-  },[completing]);
+  },[completing, completedAt]);
 
   function openComplete(wo){
     setCompleting(wo);
-    setRootCause('');setActions('');setActualHours('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);setPartsSearch('');
+    setRootCause('');setActions('');setActualHours('');setCompletedAt('');setAffectedDowntime(wo.affected_downtime!==false);setRemarks('');setUsedParts([]);setCompPhotos([]);setPartsSearch('');
     loadParts(wo.id);
   }
   // Maintenance tasks (admin-assigned planned work, title prefixed [TASK] at
@@ -1421,8 +1626,21 @@ function TechnicianBoard(){
   async function submitCompletion(){
     if(!isTaskCompletion && !rootCause){toast('Please select a root cause','err');return;}
     if(!actions.trim()){toast('Please describe actions taken','err');return;}
-    const hrs = parseFloat(actualHours) || autoDowntime.hours;
-    if(!hrs){toast('Please enter actual hours','err');return;}
+    // Job completed time: optional. Blank = the moment this form is submitted.
+    let completedISO = null;
+    if(completedAt){
+      const d = new Date(completedAt);
+      if(isNaN(d)){toast('Please enter a valid completed time','err');return;}
+      if(d < toUTC(completing.created_at)){toast('Completed time cannot be earlier than the request time ('+fmtDT(completing.created_at)+')','err');return;}
+      if(d.getTime() > Date.now()+5*60000){toast('Completed time cannot be in the future','err');return;}
+      completedISO = d.toISOString();
+    }
+    // Actual downtime is an optional override. Blank = the backend uses the
+    // auto-calculated downtime (request time -> completed time).
+    const manualHrs = parseFloat(actualHours);
+    if(actualHours.trim()!=='' && !(manualHrs>0)){toast('Actual downtime must be more than 0 — or leave it blank to use the auto-calculated value','err');return;}
+    const hasManual = manualHrs>0;
+    if(!hasManual && !autoDowntime.hours){toast('Auto-calculated downtime is 0h — please enter the actual downtime hours','err');return;}
     for(const p of usedParts){
       if(p.quantity_used>p.available){toast('Insufficient stock for '+p.name,'err');return;}
     }
@@ -1432,7 +1650,8 @@ function TechnicianBoard(){
       const photoData=compPhotos.map(p=>({filename:p.file.name,data:p.dataUrl,size:p.file.size}));
       const payload={
         actions_taken:actions,
-        actual_hours:hrs,
+        actual_hours:hasManual?manualHrs:null,
+        completed_at:completedISO,
         remarks:remarks||null,
         parts_used:usedParts.map(p=>({spare_part_id:p.spare_part_id,quantity_used:p.quantity_used})),
         completion_photos:photoData,
@@ -1448,7 +1667,28 @@ function TechnicianBoard(){
     }catch(e){toast(e.message,'err');}finally{setSubmitting(false);}
   }
 
-  async function updateStatus(id,status){try{await api('/work-orders/'+id,{method:'PATCH',body:JSON.stringify({status})});load();}catch(e){toast(e.message,'err');}}
+  async function updateStatus(id,status){
+    if(status==='cancelled'){
+      // Cancelling always needs a reason — open the modal instead of
+      // patching immediately. The <select> will snap back to the WO's
+      // real status once `wos` re-renders, since it's a controlled input.
+      const w=wos.find(x=>x.id===id);
+      if(w) openCancel(w);
+      return;
+    }
+    try{await api('/work-orders/'+id,{method:'PATCH',body:JSON.stringify({status})});load();}catch(e){toast(e.message,'err');}
+  }
+  function openCancel(w){ setCancelling(w); setCancelReason(''); }
+  async function submitCancel(){
+    if(!cancelReason.trim()) return;
+    setCancelSubmitting(true);
+    try{
+      await api('/work-orders/'+cancelling.id,{method:'PATCH',body:JSON.stringify({status:'cancelled',cancel_reason:cancelReason.trim()})});
+      toast('Work order cancelled');
+      setCancelling(null);load();
+    }catch(e){toast(e.message,'err');}
+    finally{setCancelSubmitting(false);}
+  }
 
   // ── Hold / resume ──
   function openHold(wo){ setHolding(wo); setHoldReason(''); }
@@ -1511,7 +1751,7 @@ function TechnicianBoard(){
                 <div style={{flex:1}}>
                   <div style={{display:'flex',gap:'6px',alignItems:'center',marginBottom:'8px',flexWrap:'wrap'}}>
                     <span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</span>
-                    <Badge value={w.priority}/><Badge value={w.status}/>{w.type&&<Badge value={w.type}/>}<Badge value={w.affected_downtime===false?'non_affected':'affected'}/>
+                    <Badge value={w.priority}/><Badge value={w.status}/>{w.type&&<Badge value={w.type}/>}<DowntimeTypeBadge wo={w}/>
                   </div>
                   <div style={{fontWeight:700,color:'#1e293b',fontSize:'15px',marginBottom:'4px'}}>{w.title}</div>
                   <div style={{fontSize:'12px',color:'#64748b',marginBottom:'6px'}}>
@@ -1570,6 +1810,21 @@ function TechnicianBoard(){
         </Modal>
       )}
 
+      {/* Cancel-with-reason modal */}
+      {cancelling&&(
+        <Modal title={'Cancel Work Order: '+cancelling.wo_number} onClose={()=>!cancelSubmitting&&setCancelling(null)}>
+          <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'14px'}}>This job won't be worked on. Explain why it's being cancelled — e.g. duplicate report, no longer needed, machine decommissioned — so it's clear later when reviewed in Deleted / Cancelled Work Orders.</p>
+          <div>
+            <label className="lbl">Reason <span style={{color:'#dc2626'}}>*</span></label>
+            <textarea className="inp" rows={4} autoFocus placeholder="Why is this work order being cancelled?" value={cancelReason} onChange={e=>setCancelReason(e.target.value)}/>
+          </div>
+          <div style={{display:'flex',gap:'10px',marginTop:'16px'}}>
+            <button className="btn btn-primary" style={{flex:1}} onClick={submitCancel} disabled={cancelSubmitting||!cancelReason.trim()}>{cancelSubmitting?'Cancelling...':'Confirm Cancel'}</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setCancelling(null)} disabled={cancelSubmitting}>Back</button>
+          </div>
+        </Modal>
+      )}
+
       {/* Parts availability modal */}
       {partsModal&&(
         <Modal title={'Spare Parts — '+partsModal.asset?.name} onClose={()=>setPartsModal(null)} large>
@@ -1605,17 +1860,33 @@ function TechnicianBoard(){
 
               {/* Auto-calculated downtime display */}
               <div className="dt-box">
-                <div className="dt-lbl">⏱ Auto-calculated downtime (from request time)</div>
+                <div className="dt-lbl">⏱ Auto-calculated downtime ({completedAt?'request time → completed time':'from request time'})</div>
                 <div className="dt-val">{autoDowntime.display}</div>
-                <div style={{fontSize:'11px',color:'#92400e',marginTop:'4px'}}>Request time: {fmtDT(completing.created_at)}</div>
+                <div style={{fontSize:'11px',color:'#92400e',marginTop:'4px'}}>
+                  Request time: {fmtDT(completing.created_at)}
+                  {completedAt&&<><br/>Completed time: {fmtDT(new Date(completedAt).toISOString())}</>}
+                </div>
               </div>
 
               <div>
-                <label className="lbl">Actual Downtime Hours <span style={{color:'#ef4444'}}>*</span></label>
+                <label className="lbl">Job Completed Time</label>
+                <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+                  <input type="datetime-local" className="inp" style={{flex:1}}
+                    value={completedAt}
+                    min={toLocalInputValue(completing.created_at)}
+                    max={toLocalInputValue(new Date())}
+                    onChange={e=>setCompletedAt(e.target.value)}/>
+                  {completedAt&&<button type="button" className="btn btn-secondary" style={{fontSize:'12px',padding:'7px 10px',whiteSpace:'nowrap'}} onClick={()=>setCompletedAt('')}>Use now</button>}
+                </div>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>{completedAt?'Downtime is counted from the request time to this time.':'Leave blank to use the time you submit this form.'}</div>
+              </div>
+
+              <div>
+                <label className="lbl">Actual Downtime Hours <span style={{color:'#94a3b8',fontWeight:400}}>(optional — overrides auto)</span></label>
                 <input type="number" step="0.5" min="0.5" className="inp"
-                  placeholder={'Auto: '+autoDowntime.hours+' hrs — override if needed'}
+                  placeholder={'Auto: '+autoDowntime.hours+' hrs'}
                   value={actualHours} onChange={e=>setActualHours(e.target.value)}/>
-                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>Leave blank to use auto-calculated value ({autoDowntime.hours}h)</div>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>{actualHours.trim()!==''?'This value will be used instead of the auto-calculated downtime.':'Leave blank to use the auto-calculated downtime ('+autoDowntime.hours+'h).'}</div>
               </div>
 
               {!isTaskCompletion&&(
@@ -1631,14 +1902,7 @@ function TechnicianBoard(){
               {!isTaskCompletion&&(
               <div>
                 <label className="lbl">Root Cause <span style={{color:'#ef4444'}}>*</span></label>
-                <select className="inp" value={rootCause} onChange={e=>setRootCause(e.target.value)}>
-                  <option value="">Select root cause…</option>
-                  {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
-                    <optgroup key={group} label={group}>
-                      {items.map(rc=><option key={rc} value={rc}>{rc}</option>)}
-                    </optgroup>
-                  ))}
-                </select>
+                <RootCauseSelect value={rootCause} onChange={setRootCause}/>
               </div>
               )}
 
@@ -1795,6 +2059,60 @@ function HistoryLog(){
   const [uptime,setUptime]=useState(null);
   const [hoursPerDay,setHoursPerDay]=useState(19);
   const [analysisTab,setAnalysisTab]=useState('uptime'); // 'uptime' | 'downtime' | 'by_machine' | 'by_root_cause' | 'mrr_summary' | 'mrr_autoline'
+  // ── Right-click "view work orders" drill-down, for cases/hours cells ──
+  const [drillMenu,setDrillMenu]=useState(null);     // {x,y,label,items?,fetchSpec?}
+  const [drillModal,setDrillModal]=useState(null);   // {label,items,loading}
+  // Group label (as shown in the MRR Summary table) -> the single raw Asset.location
+  // string it corresponds to, mirroring the backend's _LOCATION_GROUP_MAP. "Other"
+  // has no single matching location, so it's left out — not drillable.
+  const MRR_GROUP_TO_LOCATION={'Autoline 1':'Autoline 1','Autoline 2':'Autoline 2','ASS & General Facilities':'General Facilities','Supporting Line':'Supporting Line','Spray Paint Line':'Spray Paint Line'};
+  function monthRange(year,month){
+    const last=new Date(year,month,0).getDate();
+    const p=n=>String(n).padStart(2,'0');
+    return {dateFrom:`${year}-${p(month)}-01`,dateTo:`${year}-${p(month)}-${p(last)}`};
+  }
+  function monthsRange(year,fromMonth,toMonth){
+    return {dateFrom:monthRange(year,fromMonth).dateFrom,dateTo:monthRange(year,toMonth).dateTo};
+  }
+  function drillLocal(e,label,items){
+    e.preventDefault();e.stopPropagation();
+    if(!items||!items.length)return;
+    setDrillMenu({x:e.clientX,y:e.clientY,label,items});
+  }
+  // postFilter: optional extra client-side filter applied to the fetched
+  // work orders, for breakdowns the backend doesn't expose as a query
+  // param (e.g. Autoline process station, which is derived from asset name
+  // keywords rather than a stored column — see _autoline_station_group).
+  function drillFetch(e,label,fetchSpec,postFilter){
+    e.preventDefault();e.stopPropagation();
+    setDrillMenu({x:e.clientX,y:e.clientY,label,fetchSpec,postFilter});
+  }
+  async function openDrill(menu){
+    if(menu.items){setDrillModal({label:menu.label,items:menu.items});setDrillMenu(null);return;}
+    setDrillModal({label:menu.label,items:[],loading:true});setDrillMenu(null);
+    try{
+      const qs=[`date_from=${menu.fetchSpec.dateFrom}`,`date_to=${menu.fetchSpec.dateTo}`];
+      if(menu.fetchSpec.location)qs.push(`location=${encodeURIComponent(menu.fetchSpec.location)}`);
+      const res=await api('/analysis/work-orders?'+qs.join('&'));
+      let items=res.work_orders||[];
+      if(menu.postFilter)items=items.filter(menu.postFilter);
+      setDrillModal({label:menu.label,items});
+    }catch(e){toast(e.message,'err');setDrillModal(null);}
+  }
+  // Mirrors the backend's _autoline_station_group (routers/analysis.py) —
+  // Autoline 1/2 process-station breakdown is derived from asset-name
+  // keywords, not a stored column, so drilling into one station's cell
+  // needs the same keyword logic applied client-side after fetching.
+  function autolineStationGroup(assetName){
+    const n=(assetName||'').toLowerCase();
+    if(n.includes('buffer rack'))return'Buffer Rack';
+    if(n.includes('sorting'))return'Sorting';
+    if(n.includes('robot'))return'MHS';
+    if(n.includes('nesting'))return'Nesting Machine';
+    if(n.includes('edging'))return'Edging Machine';
+    if(n.includes('cnc'))return'CNC';
+    return null;
+  }
   // ── MRR monthly reports (Table 1: by location, Table 2: Autoline detail by station) ──
   const [mrrYear,setMrrYear]=useState(new Date().getFullYear());
   const [mrrSummary,setMrrSummary]=useState(null);
@@ -1822,7 +2140,11 @@ function HistoryLog(){
   // ── Deleted work orders (admin-only trash view) ──
   const [showDeleted,setShowDeleted]=useState(false);
   const [deletedWos,setDeletedWos]=useState([]);
+  const [cancelledWos,setCancelledWos]=useState([]);
   const [deletedLoading,setDeletedLoading]=useState(false);
+  const [deleting,setDeleting]=useState(null);      // wo currently being deleted
+  const [deleteReason,setDeleteReason]=useState('');
+  const [deleteSubmitting,setDeleteSubmitting]=useState(false);
   // ── Excel import (bulk historical work orders) ──
   const [importModal,setImportModal]=useState(false);
   const [importResult,setImportResult]=useState(null);
@@ -1996,10 +2318,11 @@ function HistoryLog(){
       status:           wo.status||'completed',
       actual_hours:     wo.actual_hours!=null?wo.actual_hours:'',
       affected_downtime:wo.affected_downtime!==false,
-      completed_at:     wo.completed_at?wo.completed_at.slice(0,16):'',
+      completed_at:     wo.completed_at?toLocalInputValue(wo.completed_at):'',
       description:      wo.description||'',
       root_cause:       rc==='—'?'':rc,
       actions_taken:    at==='—'?'':at,
+      cancel_reason:    wo.cancel_reason||'',
     });
   }
 
@@ -2010,8 +2333,15 @@ function HistoryLog(){
     setEditForm(f=>({...f, actions_taken:value, description:setDescField(f.description,'Actions taken',value)}));
   }
 
+  function isNewlyCancelling(){
+    return editForm.status==='cancelled' && editing && editing.status!=='cancelled';
+  }
   async function saveEdit(){
     if(!editing) return;
+    if(isNewlyCancelling() && !editForm.cancel_reason?.trim()){
+      toast('Enter a reason for cancelling this work order','err');
+      return;
+    }
     setSaving(true);
     try{
       const body={};
@@ -2019,9 +2349,11 @@ function HistoryLog(){
       if(editForm.asset_id && editForm.asset_id!==editing.asset?.id) body.asset_id=editForm.asset_id;
       if(editForm.priority)   body.priority=editForm.priority;
       if(editForm.status)     body.status=editForm.status;
+      if(isNewlyCancelling()) body.cancel_reason=editForm.cancel_reason.trim();
       body.affected_downtime=editForm.affected_downtime;
-      if(editForm.actual_hours!=='') body.actual_hours=parseFloat(editForm.actual_hours);
-      if(editForm.completed_at)      body.completed_at=new Date(editForm.completed_at).toISOString();
+      // Blank actual hours = clear the manual override -> auto-calculated downtime.
+      body.actual_hours = editForm.actual_hours!=='' ? parseFloat(editForm.actual_hours) : null;
+      if(editForm.completed_at && editForm.completed_at!==toLocalInputValue(editing.completed_at)) body.completed_at=new Date(editForm.completed_at).toISOString();
       if(editForm.description)       body.description=editForm.description;
       await api('/work-orders/'+editing.id,{method:'PATCH',body:JSON.stringify(body)});
       toast('Work order updated ✅');
@@ -2033,19 +2365,29 @@ function HistoryLog(){
 
   async function loadDeleted(){
     setDeletedLoading(true);
-    try{ setDeletedWos(await api('/work-orders/?deleted_only=true&limit=300')); }
+    try{
+      const [del,canc]=await Promise.all([
+        api('/work-orders/?deleted_only=true&limit=300'),
+        api('/work-orders/?status=cancelled&limit=300'),
+      ]);
+      setDeletedWos(del); setCancelledWos(canc);
+    }
     catch(e){toast(e.message,'err');}
     finally{setDeletedLoading(false);}
   }
   useEffect(()=>{ if(isAdmin) loadDeleted(); },[isAdmin]);
 
-  async function deleteWo(w){
-    if(!window.confirm('Delete work order '+w.wo_number+'? It will be hidden from every view but can be restored later from Deleted Work Orders.')) return;
+  function openDelete(w){ setDeleting(w); setDeleteReason(''); }
+  async function submitDelete(){
+    if(!deleteReason.trim()) return;
+    setDeleteSubmitting(true);
     try{
-      await api('/work-orders/'+w.id,{method:'DELETE'});
-      toast('Work order deleted — restore anytime from Deleted Work Orders');
+      await api('/work-orders/'+deleting.id,{method:'DELETE',body:JSON.stringify({reason:deleteReason.trim()})});
+      toast('Work order deleted — restore anytime from Deleted / Cancelled Work Orders');
+      setDeleting(null);
       load(); loadAnalysis(); loadDeleted();
     }catch(e){toast(e.message,'err');}
+    finally{setDeleteSubmitting(false);}
   }
   async function restoreWo(w){
     if(!window.confirm('Restore work order '+w.wo_number+'? It will reappear in History Log and wherever it was before.')) return;
@@ -2091,7 +2433,7 @@ function HistoryLog(){
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'20px'}}>
         <div><h1 style={{fontSize:'22px',fontWeight:800,color:'#1e293b',margin:0}}>History Log</h1><p style={{color:'#94a3b8',fontSize:'13px',margin:'4px 0 0'}}>Complete record of all work orders</p></div>
         <div style={{display:'flex',gap:'8px'}}>
-        {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>setShowDeleted(v=>!v)}>🗑️ Deleted Work Orders ({deletedWos.length})</button>}
+        {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>setShowDeleted(v=>!v)}>🗑️ Deleted / Cancelled ({deletedWos.length+cancelledWos.length})</button>}
         {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>{setDfModal(true);setDfSelected(null);setDfSearch('');}}>⚙️ Downtime Formula</button>}
         <label style={{cursor:'pointer'}}>
           <span className="btn btn-secondary" style={{fontSize:'13px',display:'inline-block'}}>
@@ -2109,36 +2451,55 @@ function HistoryLog(){
         </div>
       </div>
 
-      {showDeleted&&(
+      {showDeleted&&(()=>{
+        const merged=[
+          ...deletedWos.map(w=>({...w,_kind:'deleted'})),
+          ...cancelledWos.map(w=>({...w,_kind:'cancelled'})),
+        ].sort((a,b)=>new Date(b.deleted_at||b.updated_at||b.created_at)-new Date(a.deleted_at||a.updated_at||a.created_at));
+        return (
         <div className="card" style={{marginBottom:'16px',border:'1px solid #fecaca',background:'#fef2f2'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
             <div>
-              <div style={{fontSize:'16px',fontWeight:800,color:'#991b1b'}}>🗑️ Deleted Work Orders</div>
-              <div style={{fontSize:'12px',color:'#b91c1c',marginTop:'2px'}}>Hidden from every view (Alert Board, Technician Board, reports) until restored</div>
+              <div style={{fontSize:'16px',fontWeight:800,color:'#991b1b'}}>🗑️ Deleted / Cancelled Work Orders</div>
+              <div style={{fontSize:'12px',color:'#b91c1c',marginTop:'2px'}}>Deleted WOs are hidden from every view (Alert Board, Technician Board, reports) until restored. Cancelled WOs stay visible elsewhere as usual — this is just a combined record of both, with the reason given for each.</div>
             </div>
             <button className="btn btn-secondary" onClick={()=>setShowDeleted(false)}>Close</button>
           </div>
-          {deletedLoading?<Spinner/>:deletedWos.length===0?(
-            <Empty msg="No deleted work orders"/>
+          {deletedLoading?<Spinner/>:merged.length===0?(
+            <Empty msg="No deleted or cancelled work orders"/>
           ):(
-            <div className="ovf"><table>
-              <thead><tr>{['WO #','Machine','Title','Deleted By','Deleted At','Action'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+            <div className="ovf"><table className="resizable-table">
+              <thead><tr>{['WO #','Machine','Title','Type','Reason','By','When','Action'].map(h=><th key={h}>{h}<ColResizer/></th>)}</tr></thead>
               <tbody>
-                {deletedWos.map(w=>(
-                  <tr key={w.id}>
+                {merged.map(w=>{
+                  const isDeleted=w._kind==='deleted';
+                  const photos=extractPhotos(w);
+                  return (
+                  <tr key={w._kind+w.id}>
                     <td style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700}}>{w.wo_number}</td>
                     <td style={{fontWeight:600}}>{w.asset?.name||'—'}</td>
-                    <td style={{maxWidth:'220px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={w.title}>{w.title}</td>
-                    <td style={{color:'#64748b',fontSize:'12px'}}>{w.deleted_by||'—'}</td>
-                    <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{w.deleted_at?fmtDT(w.deleted_at):'—'}</td>
-                    <td><button className="btn btn-primary" style={{fontSize:'11px',padding:'4px 10px'}} onClick={()=>restoreWo(w)}>♻️ Restore</button></td>
+                    <td style={{maxWidth:'200px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={w.title}>{w.title}</td>
+                    <td>
+                      <span style={{fontSize:'11px',fontWeight:700,padding:'2px 8px',borderRadius:'999px',background:isDeleted?'#fee2e2':'#f1f5f9',color:isDeleted?'#991b1b':'#475569'}}>
+                        {isDeleted?'🗑️ Deleted':'🚫 Cancelled'}
+                      </span>
+                    </td>
+                    <td style={{maxWidth:'220px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontSize:'12px'}} title={(isDeleted?w.delete_reason:w.cancel_reason)||''}>{(isDeleted?w.delete_reason:w.cancel_reason)||'—'}</td>
+                    <td style={{color:'#64748b',fontSize:'12px'}}>{(isDeleted?w.deleted_by:null)||'—'}</td>
+                    <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{isDeleted?(w.deleted_at?fmtDT(w.deleted_at):'—'):fmtDT(w.updated_at||w.created_at)}</td>
+                    <td style={{display:'flex',gap:'6px'}}>
+                      <button className="btn btn-secondary" style={{fontSize:'11px',padding:'4px 10px'}} onClick={()=>setSelected({...w,_photos:photos})}>👁️ View Details</button>
+                      {isDeleted&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'4px 10px'}} onClick={()=>restoreWo(w)}>♻️ Restore</button>}
+                    </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table></div>
           )}
         </div>
-      )}
+        );
+      })()}
 
       {/* Filters */}
       <div style={{background:'#fff',borderRadius:'12px',padding:'16px',border:'1px solid #f1f5f9',marginBottom:'16px',display:'flex',gap:'12px',flexWrap:'wrap',alignItems:'flex-end'}}>
@@ -2195,6 +2556,48 @@ function HistoryLog(){
       </div>
 
       {/* ── Real-time Production Line Uptime ── */}
+      {drillMenu&&(
+        <>
+          <div onClick={()=>setDrillMenu(null)} onContextMenu={e=>{e.preventDefault();setDrillMenu(null);}} style={{position:'fixed',inset:0,zIndex:200}}/>
+          <div style={{position:'fixed',left:drillMenu.x,top:drillMenu.y,zIndex:201,background:'#fff',border:'1px solid #e2e8f0',borderRadius:'10px',boxShadow:'0 8px 24px rgba(0,0,0,0.15)',padding:'4px',minWidth:'200px'}}>
+            <button onClick={()=>openDrill(drillMenu)} style={{width:'100%',textAlign:'left',padding:'9px 12px',border:'none',background:'transparent',cursor:'pointer',fontSize:'13px',fontWeight:600,color:'#1e293b',borderRadius:'7px',display:'flex',alignItems:'center',gap:'7px'}}
+              onMouseEnter={e=>e.currentTarget.style.background='#f1f5f9'} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+              👁 View work orders{drillMenu.items?` (${drillMenu.items.length})`:''}
+            </button>
+          </div>
+        </>
+      )}
+      {drillModal&&(
+        <div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:300,padding:'20px'}} onClick={()=>setDrillModal(null)}>
+          <div className="card" style={{maxWidth:'860px',width:'100%',maxHeight:'80vh',overflow:'auto'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}}>
+              <div style={{fontSize:'15px',fontWeight:800,color:'#1e293b'}}>Work Orders — {drillModal.label}</div>
+              <button className="btn btn-secondary" style={{padding:'6px 12px'}} onClick={()=>setDrillModal(null)}>✕ Close</button>
+            </div>
+            {drillModal.loading?<Spinner/>:drillModal.items.length===0?<Empty msg="No work orders found for this cell"/>:(
+              <div className="ovf">
+                <table>
+                  <thead><tr><th>WO Number</th><th>Machine</th><th>Root Cause</th><th>Status</th><th>Downtime Type</th><th style={{textAlign:'right'}}>Hours</th><th>Completed</th></tr></thead>
+                  <tbody>
+                    {drillModal.items.map(w=>(
+                      <tr key={w.id}>
+                        <td style={{fontWeight:700}}>{w.wo_number}</td>
+                        <td>{w.asset_name}</td>
+                        <td>{w.root_cause||'—'}</td>
+                        <td><Badge value={w.status}/></td>
+                        <td><DowntimeTypeBadge wo={w}/></td>
+                        <td style={{textAlign:'right'}}>{w.downtime_hours!=null?w.downtime_hours+'h':'—'}</td>
+                        <td>{w.completed_at?fmtDT(w.completed_at):'—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {analysisTab==='uptime'&&!uptime&&(
         <div className="card" style={{marginBottom:'16px'}}><Spinner/></div>
       )}
@@ -2263,7 +2666,7 @@ function HistoryLog(){
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:'12px',marginBottom:'14px'}}>
           <div>
             <div style={{fontSize:'16px',fontWeight:800,color:'#1e293b'}}>Downtime Analysis</div>
-            <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Affected vs non-affected downtime for the selected date range and location</div>
+            <div style={{fontSize:'12px',color:'#64748b',marginTop:'2px'}}>Affected vs non-affected downtime for the selected date range and location — a case that overlapped a General Facilities failure has that portion excluded from its affected hours</div>
           </div>
           <span style={{background:'#f0fdf4',color:'#16a34a',border:'1px solid #bbf7d0',padding:'5px 12px',borderRadius:'999px',fontSize:'12px',fontWeight:700}}>Live</span>
         </div>
@@ -2422,14 +2825,20 @@ function HistoryLog(){
                       <React.Fragment key={g.group}>
                         <tr style={{background:'#f3d9f0'}}>
                           <td style={{fontWeight:800,color:'#1e293b'}}>{g.group}</td>
-                          {rcLocations.map(loc=><td key={loc} style={{fontWeight:800,color:'#1e293b',textAlign:'center'}}>{(g.by_location&&g.by_location[loc])||0}</td>)}
-                          <td style={{fontWeight:800,color:'#1e293b',textAlign:'center'}}>{g.total_cases}</td>
+                          {rcLocations.map(loc=>{
+                            const items=(rcAnalysis?.work_orders||[]).filter(w=>w.root_cause_group===g.group&&w.asset_location===loc);
+                            return <td key={loc} style={{fontWeight:800,color:'#1e293b',textAlign:'center',cursor:items.length?'context-menu':undefined}} onContextMenu={e=>drillLocal(e,`${g.group} — ${loc}`,items)}>{(g.by_location&&g.by_location[loc])||0}</td>;
+                          })}
+                          <td style={{fontWeight:800,color:'#1e293b',textAlign:'center',cursor:'context-menu'}} onContextMenu={e=>drillLocal(e,g.group,(rcAnalysis?.work_orders||[]).filter(w=>w.root_cause_group===g.group))}>{g.total_cases}</td>
                         </tr>
                         {g.items.map(item=>(
                           <tr key={item.root_cause}>
                             <td>{item.root_cause}</td>
-                            {rcLocations.map(loc=><td key={loc} style={{textAlign:'center'}}>{(item.by_location&&item.by_location[loc])||0}</td>)}
-                            <td style={{textAlign:'center'}}>{item.cases}</td>
+                            {rcLocations.map(loc=>{
+                              const items=(rcAnalysis?.work_orders||[]).filter(w=>w.root_cause===item.root_cause&&w.asset_location===loc);
+                              return <td key={loc} style={{textAlign:'center',cursor:items.length?'context-menu':undefined}} onContextMenu={e=>drillLocal(e,`${item.root_cause} — ${loc}`,items)}>{(item.by_location&&item.by_location[loc])||0}</td>;
+                            })}
+                            <td style={{textAlign:'center',cursor:'context-menu'}} onContextMenu={e=>drillLocal(e,item.root_cause,(rcAnalysis?.work_orders||[]).filter(w=>w.root_cause===item.root_cause))}>{item.cases}</td>
                           </tr>
                         ))}
                       </React.Fragment>
@@ -2438,9 +2847,10 @@ function HistoryLog(){
                       <td style={{fontWeight:800,color:'#fff'}}>Total</td>
                       {rcLocations.map(loc=>{
                         const locTotal=(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+((g.by_location&&g.by_location[loc])||0),0);
-                        return <td key={loc} style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{locTotal}</td>;
+                        const items=(rcAnalysis?.work_orders||[]).filter(w=>w.asset_location===loc);
+                        return <td key={loc} style={{fontWeight:800,color:'#fff',textAlign:'center',cursor:items.length?'context-menu':undefined}} onContextMenu={e=>drillLocal(e,loc,items)}>{locTotal}</td>;
                       })}
-                      <td style={{fontWeight:800,color:'#fff',textAlign:'center'}}>{(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+g.total_cases,0)}</td>
+                      <td style={{fontWeight:800,color:'#fff',textAlign:'center',cursor:'context-menu'}} onContextMenu={e=>drillLocal(e,'All root causes',rcAnalysis?.work_orders||[])}>{(rcAnalysis?.by_root_cause_grouped||[]).reduce((sum,g)=>sum+g.total_cases,0)}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -2529,27 +2939,37 @@ function HistoryLog(){
                   </tr>
                 </thead>
                 <tbody>
-                  {groups.map(g=>(
+                  {groups.map(g=>{
+                    const loc=MRR_GROUP_TO_LOCATION[g]; // undefined for "Other" — not drillable
+                    return (
                     <tr key={g}>
                       <td style={{fontWeight:700}}>{g}</td>
-                      {shownMonths.map(row=>(<React.Fragment key={row.month}>
-                        <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{row.groups[g].cases}</td>
-                        <td style={{textAlign:'right'}}>{row.groups[g].hours}h</td>
-                      </React.Fragment>))}
-                      <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc'}}>{rowTotals[g].cases}</td>
-                      <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc'}}>{Math.round(rowTotals[g].hours*100)/100}h</td>
+                      {shownMonths.map(row=>{
+                        const spec=loc?{...monthRange(mrrYear,row.month),location:loc}:null;
+                        const cur={cursor:spec?'context-menu':undefined};
+                        return (<React.Fragment key={row.month}>
+                          <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',...cur}} onContextMenu={spec?e=>drillFetch(e,`${g} — ${row.month_label}`,spec):undefined}>{row.groups[g].cases}</td>
+                          <td style={{textAlign:'right',...cur}} onContextMenu={spec?e=>drillFetch(e,`${g} — ${row.month_label}`,spec):undefined}>{row.groups[g].hours}h</td>
+                        </React.Fragment>);
+                      })}
+                      <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc',cursor:loc?'context-menu':undefined}} onContextMenu={loc?e=>drillFetch(e,`${g} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc}):undefined}>{rowTotals[g].cases}</td>
+                      <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc',cursor:loc?'context-menu':undefined}} onContextMenu={loc?e=>drillFetch(e,`${g} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc}):undefined}>{Math.round(rowTotals[g].hours*100)/100}h</td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
                 <tfoot>
                   <tr style={{fontWeight:800}}>
                     <td>{rangeLabel}</td>
-                    {shownMonths.map(row=>(<React.Fragment key={row.month}>
-                      <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{monthTotals[row.month].cases}</td>
-                      <td style={{textAlign:'right'}}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
-                    </React.Fragment>))}
-                    <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3'}}>{grandTotal.cases}</td>
-                    <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>{Math.round(grandTotal.hours*100)/100}h</td>
+                    {shownMonths.map(row=>{
+                      const spec=monthRange(mrrYear,row.month);
+                      return (<React.Fragment key={row.month}>
+                        <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,row.month_label,spec)}>{monthTotals[row.month].cases}</td>
+                        <td style={{textAlign:'right',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,row.month_label,spec)}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
+                      </React.Fragment>);
+                    })}
+                    <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,rangeLabel,monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month))}>{grandTotal.cases}</td>
+                    <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,rangeLabel,monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month))}>{Math.round(grandTotal.hours*100)/100}h</td>
                   </tr>
                 </tfoot>
               </table>
@@ -2652,27 +3072,39 @@ function HistoryLog(){
                       </tr>
                     </thead>
                     <tbody>
-                      {cats.map(c=>(
+                      {cats.map(c=>{
+                        const catFilter=STATION_LINES.includes(loc)?(w=>autolineStationGroup(w.asset_name)===c):(w=>w.asset_name===c);
+                        const postFilter=w=>catFilter(w)&&(mrrDetailView!=='affected'||w.affected_downtime===true);
+                        return (
                         <tr key={c}>
                           <td style={{fontWeight:700}}>{c}</td>
-                          {shownMonths.map(row=>{const cell=row[loc].categories[c];return(<React.Fragment key={row.month}>
-                            <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{cell[casesKey]}</td>
-                            <td style={{textAlign:'right'}}>{cell[hoursKey]}h</td>
-                          </React.Fragment>);})}
-                          <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc'}}>{rowTotals[c].cases}</td>
-                          <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc'}}>{Math.round(rowTotals[c].hours*100)/100}h</td>
+                          {shownMonths.map(row=>{
+                            const cell=row[loc].categories[c];
+                            const spec={...monthRange(mrrYear,row.month),location:loc};
+                            return(<React.Fragment key={row.month}>
+                              <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${c} — ${row.month_label}`,spec,postFilter)}>{cell[casesKey]}</td>
+                              <td style={{textAlign:'right',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${c} — ${row.month_label}`,spec,postFilter)}>{cell[hoursKey]}h</td>
+                            </React.Fragment>);
+                          })}
+                          <td style={{textAlign:'right',fontWeight:700,borderLeft:'2px solid #e2e8f0',background:'#f8fafc',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${c} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc},postFilter)}>{rowTotals[c].cases}</td>
+                          <td style={{textAlign:'right',fontWeight:700,background:'#f8fafc',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${c} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc},postFilter)}>{Math.round(rowTotals[c].hours*100)/100}h</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                     <tfoot>
                       <tr style={{fontWeight:800}}>
                         <td>{rangeLabel}</td>
-                        {shownMonths.map(row=>(<React.Fragment key={row.month}>
-                          <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{monthTotals[row.month].cases}</td>
-                          <td style={{textAlign:'right'}}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
-                        </React.Fragment>))}
-                        <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3'}}>{grandTotal.cases}</td>
-                        <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3'}}>{Math.round(grandTotal.hours*100)/100}h</td>
+                        {shownMonths.map(row=>{
+                          const spec={...monthRange(mrrYear,row.month),location:loc};
+                          const postFilter=mrrDetailView==='affected'?(w=>w.affected_downtime===true):undefined;
+                          return (<React.Fragment key={row.month}>
+                            <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${row.month_label}`,spec,postFilter)}>{monthTotals[row.month].cases}</td>
+                            <td style={{textAlign:'right',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${row.month_label}`,spec,postFilter)}>{Math.round(monthTotals[row.month].hours*100)/100}h</td>
+                          </React.Fragment>);
+                        })}
+                        <td style={{textAlign:'right',borderLeft:'2px solid #e2e8f0',background:'#eef2ff',color:'#3730a3',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc},mrrDetailView==='affected'?(w=>w.affected_downtime===true):undefined)}>{grandTotal.cases}</td>
+                        <td style={{textAlign:'right',background:'#eef2ff',color:'#3730a3',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${rangeLabel}`,{...monthsRange(mrrYear,shownMonths[0].month,shownMonths[shownMonths.length-1].month),location:loc},mrrDetailView==='affected'?(w=>w.affected_downtime===true):undefined)}>{Math.round(grandTotal.hours*100)/100}h</td>
                       </tr>
                     </tfoot>
                   </table>
@@ -2730,18 +3162,25 @@ function HistoryLog(){
                     {stations.map((s,i)=>(
                       <tr key={s} style={{background:i%2===1?'#f8fafc':'transparent'}}>
                         <td style={{fontWeight:700}}>{s}</td>
-                        {locs.map(loc=>(<React.Fragment key={loc}>
-                          <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9'}}>{mrrSnap.autoline[loc].groups[s].cases}</td>
-                          <td style={{textAlign:'right'}}>{mrrSnap.autoline[loc].groups[s].hours}h</td>
-                        </React.Fragment>))}
+                        {locs.map(loc=>{
+                          const spec={...monthRange(mrrSnapYear,mrrSnap.month),location:loc};
+                          const postFilter=w=>autolineStationGroup(w.asset_name)===s;
+                          return (<React.Fragment key={loc}>
+                            <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${s}`,spec,postFilter)}>{mrrSnap.autoline[loc].groups[s].cases}</td>
+                            <td style={{textAlign:'right',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${s}`,spec,postFilter)}>{mrrSnap.autoline[loc].groups[s].hours}h</td>
+                          </React.Fragment>);
+                        })}
                       </tr>
                     ))}
                     <tr style={{background:'#f1f5f9'}}>
                       <td style={{fontWeight:800}}>TOTAL</td>
-                      {locs.map(loc=>(<React.Fragment key={loc}>
-                        <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',borderLeft:'1px solid #e2e8f0'}}>{mrrSnap.autoline[loc].total.cases}</td>
-                        <td style={{textAlign:'right',fontWeight:800,color:'#dc2626'}}>{mrrSnap.autoline[loc].total.hours}h</td>
-                      </React.Fragment>))}
+                      {locs.map(loc=>{
+                        const spec={...monthRange(mrrSnapYear,mrrSnap.month),location:loc};
+                        return (<React.Fragment key={loc}>
+                          <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',borderLeft:'1px solid #e2e8f0',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,loc,spec)}>{mrrSnap.autoline[loc].total.cases}</td>
+                          <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,loc,spec)}>{mrrSnap.autoline[loc].total.hours}h</td>
+                        </React.Fragment>);
+                      })}
                     </tr>
                   </tbody>
                 </table>
@@ -2751,13 +3190,17 @@ function HistoryLog(){
                 <div className="ovf">
                   <table>
                     <tbody>
-                      {Object.entries(mrrSnap.other).map(([label,val],i)=>(
+                      {Object.entries(mrrSnap.other).map(([label,val],i)=>{
+                        const spec={...monthRange(mrrSnapYear,mrrSnap.month),location:'General Facilities'};
+                        const postFilter=label.startsWith('Automatic Storage System')?(w=>w.asset_name==='Automatic Storage System'):(w=>w.asset_name!=='Automatic Storage System');
+                        return (
                         <tr key={label} style={{background:i%2===1?'#f8fafc':'transparent'}}>
                           <td style={{fontWeight:700}}>{label}</td>
-                          <td style={{textAlign:'right',width:'90px'}}>{val.cases} case{val.cases===1?'':'s'}</td>
-                          <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',width:'90px'}}>{val.hours}h</td>
+                          <td style={{textAlign:'right',width:'90px',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,label,spec,postFilter)}>{val.cases} case{val.cases===1?'':'s'}</td>
+                          <td style={{textAlign:'right',fontWeight:800,color:'#dc2626',width:'90px',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,label,spec,postFilter)}>{val.hours}h</td>
                         </tr>
-                      ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -2797,9 +3240,9 @@ function HistoryLog(){
 
       {loading?<Spinner/>:filtered.length===0?<Empty msg="No records found"/>:(
         <div className="card" style={{padding:0}}>
-          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table>
+          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table className="resizable-table">
             <thead><tr>
-              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime Type','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h} style={h==='Details'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}</th>)}
+              {['WO #','Machine','Category / Title','Operator','Status','Root Cause','Downtime Type','Downtime','Request Date','Completed','Photos','Details'].map(h=><th key={h} style={h==='Details'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{filtered.map(w=>{
               const isReq=w.title.startsWith('[Request]');
@@ -2817,7 +3260,7 @@ function HistoryLog(){
                   <td style={{color:'#64748b',fontSize:'12px'}}>{operator||'—'}</td>
                   <td><Badge value={w.status}/></td>
                   <td style={{color:'#64748b',fontSize:'12px',maxWidth:'120px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={rootCause}>{rootCause}</td>
-                  <td><Badge value={w.affected_downtime===false?'non_affected':'affected'}/></td>
+                  <td><DowntimeTypeBadge wo={w}/></td>
                   <td style={{fontWeight:600,color:'#b45309'}}>{actualHrs}</td>
                   <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{fmtDate(w.created_at)}</td>
                   <td style={{color:'#64748b',fontSize:'12px',whiteSpace:'nowrap'}}>{w.completed_at?fmtDate(w.completed_at):'—'}</td>
@@ -2831,7 +3274,7 @@ function HistoryLog(){
                       <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>setSelected({...w,_photos:photos})}>View</button>
                       <button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>downloadFile('/work-orders/'+w.id+'/export/mrr','MRR_'+w.wo_number+'.xlsx')} title="Export as the official MRR form">📄 MRR</button>
                       {isAdmin&&<button className="btn btn-primary" style={{fontSize:'11px',padding:'3px 8px'}} onClick={()=>openEdit(w)}>✏️ Edit</button>}
-                      {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px',color:'#dc2626'}} onClick={()=>deleteWo(w)}>🗑️ Delete</button>}
+                      {isAdmin&&<button className="btn btn-secondary" style={{fontSize:'11px',padding:'3px 8px',color:'#dc2626'}} onClick={()=>openDelete(w)}>🗑️ Delete</button>}
                     </div>
                   </td>
                 </tr>
@@ -2847,6 +3290,12 @@ function HistoryLog(){
           <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'10px'}}>
             <button className="btn btn-secondary" style={{fontSize:'12px'}} onClick={()=>downloadFile('/work-orders/'+selected.id+'/export/mrr','MRR_'+selected.wo_number+'.xlsx')}>📄 Export MRR Form</button>
           </div>
+          {selected.is_deleted&&<div style={{background:'#fef2f2',border:'1px solid #fecaca',color:'#991b1b',borderRadius:'8px',padding:'10px 14px',fontSize:'13px',marginBottom:'14px'}}>
+            🗑️ <strong>Deleted</strong> by {selected.deleted_by||'—'} on {selected.deleted_at?fmtDT(selected.deleted_at):'—'}{selected.delete_reason&&<span> — “{selected.delete_reason}”</span>}
+          </div>}
+          {selected.status==='cancelled'&&<div style={{background:'#f1f5f9',border:'1px solid #e2e8f0',color:'#475569',borderRadius:'8px',padding:'10px 14px',fontSize:'13px',marginBottom:'14px'}}>
+            🚫 <strong>Cancelled</strong>{selected.cancel_reason&&<span> — “{selected.cancel_reason}”</span>}
+          </div>}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
             <div>
               <div className="section-title">Work Order Details</div>
@@ -2886,6 +3335,13 @@ function HistoryLog(){
         // (Non-affected downtime) while still having a genuine root cause
         // that should stay editable here.
         const isTaskEdit = (editing.title||'').startsWith('[TASK]');
+        // Auto-calculated downtime for the (possibly edited) completed time —
+        // what gets used when Actual Downtime Hours is left blank.
+        let editAutoDt = null;
+        if(editForm.completed_at){
+          const ce = new Date(editForm.completed_at);
+          if(!isNaN(ce)) editAutoDt = calcDowntime(editing.created_at, ce.toISOString(), editing.held_hours);
+        }
         return (
         <Modal title={'Edit: '+editing.wo_number+' — '+(editing.asset?.name||'—')} onClose={()=>setEditing(null)} large>
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'20px'}}>
@@ -2912,13 +3368,24 @@ function HistoryLog(){
                   {['open','in_progress','on_hold','completed','cancelled'].map(s=><option key={s} value={s}>{s.replace('_',' ')}</option>)}
                 </select>
               </div>
+              {isNewlyCancelling()&&(
+                <div>
+                  <label className="lbl">Cancellation reason <span style={{color:'#dc2626'}}>*</span></label>
+                  <textarea className="inp" rows={3} autoFocus placeholder="Why is this work order being cancelled?" value={editForm.cancel_reason} onChange={e=>setEditForm({...editForm,cancel_reason:e.target.value})}/>
+                </div>
+              )}
               <div>
-                <label className="lbl">Actual Hours</label>
-                <input type="number" step="0.5" min="0" className="inp" value={editForm.actual_hours} onChange={e=>setEditForm({...editForm,actual_hours:e.target.value})} placeholder="e.g. 2.5"/>
+                <label className="lbl">Actual Downtime Hours <span style={{color:'#94a3b8',fontWeight:400}}>(optional — overrides auto)</span></label>
+                <input type="number" step="0.5" min="0" className="inp" value={editForm.actual_hours} onChange={e=>setEditForm({...editForm,actual_hours:e.target.value})} placeholder={editAutoDt?('Auto: '+editAutoDt.hours+' hrs'):'e.g. 2.5'}/>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'4px'}}>
+                  {editForm.actual_hours!==''
+                    ? 'This value is used instead of the auto-calculated downtime. Clear it to go back to auto.'
+                    : (editAutoDt?'Blank — using auto-calculated downtime: '+editAutoDt.display+' (request time → completed time).':'Blank — downtime is auto-calculated once a completed time is set.')}
+                </div>
               </div>
               <div>
                 <label className="lbl">Completed At</label>
-                <input type="datetime-local" className="inp" value={editForm.completed_at} onChange={e=>setEditForm({...editForm,completed_at:e.target.value})}/>
+                <input type="datetime-local" className="inp" value={editForm.completed_at} min={toLocalInputValue(editing.created_at)} max={toLocalInputValue(new Date())} onChange={e=>setEditForm({...editForm,completed_at:e.target.value})}/>
               </div>
               {!isTaskEdit&&(
               <div>
@@ -2933,19 +3400,22 @@ function HistoryLog(){
                     </label>
                   ))}
                 </div>
+                {(editing.downtime_suppressed_by_id || editing.gf_overlap_hours>0) && (()=>{
+                  const split=splitDowntime(editing);
+                  return (
+                    <div style={{marginTop:'8px',padding:'8px 10px',background:'#f5f3ff',border:'1px solid #ddd6fe',borderRadius:'8px',fontSize:'11.5px',color:'#5b21b6'}}>
+                      {editing.downtime_suppressed_by_id
+                        ? 'Currently non-affected — overlapping an active General Facilities work order that hasn\'t been fixed yet. Will restore automatically once it\'s completed.'
+                        : `Split downtime: ${split.affected}h affected, ${split.nonAffected}h overlapped a General Facilities failure (excluded from affected totals in reports).`}
+                    </div>
+                  );
+                })()}
               </div>
               )}
               {!isTaskEdit&&(
               <div>
                 <label className="lbl">Root Cause</label>
-                <select className="inp" value={editForm.root_cause||''} onChange={e=>updateEditRootCause(e.target.value)}>
-                  <option value="">Select root cause…</option>
-                  {Object.entries(ROOT_CAUSE_GROUPS).map(([group,items])=>(
-                    <optgroup key={group} label={group}>
-                      {items.map(rc=><option key={rc} value={rc}>{rc}</option>)}
-                    </optgroup>
-                  ))}
-                </select>
+                <RootCauseSelect value={editForm.root_cause||''} onChange={updateEditRootCause}/>
               </div>
               )}
               <div>
@@ -2962,7 +3432,7 @@ function HistoryLog(){
                 ⚠️ Admin edit — changes are permanent and will be reflected in all reports.
               </div>
               <div style={{display:'flex',gap:'8px'}}>
-                <button className="btn btn-primary" style={{flex:1,padding:'11px'}} onClick={saveEdit} disabled={saving}>
+                <button className="btn btn-primary" style={{flex:1,padding:'11px'}} onClick={saveEdit} disabled={saving||(isNewlyCancelling()&&!editForm.cancel_reason?.trim())}>
                   {saving?'Saving…':'💾 Save Changes'}
                 </button>
                 <button className="btn btn-secondary" style={{flex:1,padding:'11px'}} onClick={()=>setEditing(null)}>Cancel</button>
@@ -2972,6 +3442,21 @@ function HistoryLog(){
         </Modal>
         );
       })()}
+
+      {/* Delete-with-reason modal */}
+      {deleting&&(
+        <Modal title={'Delete Work Order: '+deleting.wo_number} onClose={()=>!deleteSubmitting&&setDeleting(null)}>
+          <p style={{fontSize:'13px',color:'#64748b',marginTop:'-8px',marginBottom:'14px'}}>This hides it from every view (Alert Board, Technician Board, reports) — it isn't erased, and can be restored anytime from Deleted / Cancelled Work Orders. Explain why it's being deleted so that's clear on review — e.g. duplicate entry, created in error.</p>
+          <div>
+            <label className="lbl">Reason <span style={{color:'#dc2626'}}>*</span></label>
+            <textarea className="inp" rows={4} autoFocus placeholder="Why is this work order being deleted?" value={deleteReason} onChange={e=>setDeleteReason(e.target.value)}/>
+          </div>
+          <div style={{display:'flex',gap:'10px',marginTop:'16px'}}>
+            <button className="btn btn-primary" style={{flex:1,background:'#dc2626'}} onClick={submitDelete} disabled={deleteSubmitting||!deleteReason.trim()}>{deleteSubmitting?'Deleting...':'Confirm Delete'}</button>
+            <button className="btn btn-secondary" style={{flex:1}} onClick={()=>setDeleting(null)} disabled={deleteSubmitting}>Back</button>
+          </div>
+        </Modal>
+      )}
 
       {importModal&&(
         <Modal title="Work Order History Import" onClose={()=>setImportModal(false)}>
@@ -3265,8 +3750,8 @@ function Assets(){
 
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No assets found"/>:(
-          <div className="ovf"><table>
-            <thead><tr>{['Code','Name','Category','Location','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+          <div className="ovf"><table className="resizable-table">
+            <thead><tr>{['Code','Name','Category','Location','Status','Actions'].map(h=><th key={h}>{h}<ColResizer/></th>)}</tr></thead>
             <tbody>{filtered.map(a=>(
               <tr key={a.id}>
                 <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{a.asset_code}</span></td>
@@ -3377,8 +3862,8 @@ function Assets(){
               {bomItems.length===0?(
                 <Empty msg="No BOM items yet — add parts below, or seed from repair history."/>
               ):(
-                <div className="ovf" style={{marginBottom:'16px'}}><table>
-                  <thead><tr>{['Part','Qty Required','On Hand','Reorder Lvl','Notes',''].map(h=><th key={h}>{h}</th>)}</tr></thead>
+                <div className="ovf" style={{marginBottom:'16px'}}><table className="resizable-table">
+                  <thead><tr>{['Part','Qty Required','On Hand','Reorder Lvl','Notes',''].map(h=><th key={h}>{h}<ColResizer/></th>)}</tr></thead>
                   <tbody>{bomItems.map(item=>(
                     <tr key={item.id} style={item.low_stock?{background:'#fef2f2'}:{}}>
                       <td style={{fontWeight:600}}>{item.part_name}<div style={{fontFamily:'monospace',fontSize:'11px',color:'#94a3b8'}}>{item.part_code}</div></td>
@@ -3602,10 +4087,11 @@ function PartsAndScannerTab({canManage,isProduction}){
   async function save(){
     if(!canManage){toast('Only admins and managers can edit parts','err');return;}
     try{
+      const reorderInput=parseInt(form.reorder_level);
       const p={
         ...form,
         quantity_on_hand:parseInt(form.quantity_on_hand)||0,
-        reorder_level:parseInt(form.reorder_level)||5,
+        reorder_level:Number.isNaN(reorderInput)?5:reorderInput,
         unit_cost:form.unit_cost?parseFloat(form.unit_cost):null,
       };
       let savedPart;
@@ -3898,13 +4384,13 @@ function PartsAndScannerTab({canManage,isProduction}){
       {/* Table */}
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No parts found"/>:(
-          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table>
+          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table className="resizable-table">
             <thead><tr>
               {[
                 'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
                 ...(canManage?['Unit Price (RM)','Total (RM)']:[]),
                 'Barcode','Threshold','Last Checked','Status','Actions',
-              ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}</th>)}
+              ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
               const sev=p.stock_status||(p.is_low_stock?'low':'ok');
@@ -4842,9 +5328,9 @@ function StockHistoryTab(){
       {/* History table */}
       <div className="card" style={{padding:0}}>
         {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
-          <div className="ovf"><table>
+          <div className="ovf"><table className="resizable-table">
             <thead><tr>
-              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}</th>)}
+              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After','Reason','Reference','Performed By'].map(h=><th key={h}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{history.map((h,i)=>{
               const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
@@ -4910,8 +5396,8 @@ function PMSchedules(){
       </div>
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:schedules.length===0?<Empty msg="No PM schedules"/>:(
-          <div className="ovf"><table>
-            <thead><tr>{['Title','Asset','Frequency','Next Due','Est. Hours','Status','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+          <div className="ovf"><table className="resizable-table">
+            <thead><tr>{['Title','Asset','Frequency','Next Due','Est. Hours','Status','Actions'].map(h=><th key={h}>{h}<ColResizer/></th>)}</tr></thead>
             <tbody>{schedules.map(pm=>{
               const ov=isOD(pm.next_due),soon=isSoon(pm.next_due);
               return(<tr key={pm.id} style={ov?{background:'#fef2f2',borderLeft:'3px solid #ef4444'}:soon?{background:'#fefce8',borderLeft:'3px solid #f59e0b'}:{}}>
@@ -5018,8 +5504,8 @@ function UsersManagement(){
     </div>
 
     <div className="card" style={{padding:0}}>
-      {loading?<Spinner/>:users.length===0?<Empty msg="No users found"/>:<div className="ovf"><table>
-        <thead><tr>{['Name','Email','Role','Status','Present Today','Actions'].map(h=><th key={h}>{h}</th>)}</tr></thead>
+      {loading?<Spinner/>:users.length===0?<Empty msg="No users found"/>:<div className="ovf"><table className="resizable-table">
+        <thead><tr>{['Name','Email','Role','Status','Present Today','Actions'].map(h=><th key={h}>{h}<ColResizer/></th>)}</tr></thead>
         <tbody>{users.map(u=>(
           <tr key={u.id}>
             <td style={{fontWeight:700}}>{u.name}</td>

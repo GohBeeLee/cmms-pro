@@ -178,13 +178,6 @@ def _other_location_group(location: Optional[str], asset_name: Optional[str]) ->
 AFFECTED_DOWNTIME_MIN_HOURS = 0.5
 
 
-def _effective_affected(affected_downtime_flag: bool, downtime_hours: Optional[float]) -> bool:
-    """Reclassifies a work order as non-affected if its post-formula downtime
-    hours fall below AFFECTED_DOWNTIME_MIN_HOURS, even if it was originally
-    marked affected."""
-    return bool(affected_downtime_flag) and (downtime_hours or 0.0) >= AFFECTED_DOWNTIME_MIN_HOURS
-
-
 def _wo_downtime_hours(actual_hours, created_at, completed_at, held_hours, divisor: float = 1.0) -> float:
     """Same fallback used elsewhere: prefer the manually-entered actual_hours,
     otherwise derive it from elapsed working time for completed work orders.
@@ -197,6 +190,50 @@ def _wo_downtime_hours(actual_hours, created_at, completed_at, held_hours, divis
     else:
         return 0.0
     return hours / (divisor or 1.0)
+
+
+def _wo_downtime_split(
+    actual_hours, created_at, completed_at, held_hours,
+    gf_overlap_hours, affected_downtime_flag: bool, gf_locked: bool, divisor: float = 1.0,
+) -> tuple:
+    """
+    Total downtime is calculated exactly as _wo_downtime_hours always has —
+    nothing about the overall number changes. This additionally splits that
+    total into an affected portion and a non-affected portion for reporting,
+    and returns the single affected/non-affected classification a work order
+    counts as one "case" under.
+
+    affected_downtime_flag=False means two different things depending on
+    gf_locked, and they're handled differently:
+    - gf_locked=False: an admin's own deliberate non-affected choice (or the
+      work order was never touched by the General Facilities rule at all).
+      The whole total is non-affected; gf_overlap_hours isn't consulted.
+    - gf_locked=True: the General Facilities rule itself set this to False
+      because the work order completed while still overlapping an
+      unresolved failure (see _reconcile_gf_overlap in
+      routers/work_orders.py) — a permanent historical lock, not an admin
+      choice. gf_overlap_hours still only covers the portion that actually
+      overlapped; any time before that overlap started is still genuinely
+      affected downtime and must still be split out, not swept into
+      non-affected wholesale.
+
+    When affected_downtime_flag is True, or gf_locked is True, the split
+    always applies: gf_overlap_hours is carved out of the total into
+    non-affected, leaving the rest as affected. The work order counts as
+    one affected case only if the affected portion is the larger share
+    (ties go to affected) AND clears AFFECTED_DOWNTIME_MIN_HOURS — the same
+    minimum this codebase has always applied, now checked against the
+    affected portion specifically rather than the whole total.
+
+    Returns (total_hours, affected_hours, non_affected_hours, is_case_affected).
+    """
+    total = _wo_downtime_hours(actual_hours, created_at, completed_at, held_hours, divisor)
+    if not total or (not affected_downtime_flag and not gf_locked):
+        return (total, 0.0, total, False)
+    non_affected = min((gf_overlap_hours or 0.0) / (divisor or 1.0), total)
+    affected = max(total - non_affected, 0.0)
+    is_case_affected = affected >= non_affected and affected >= AFFECTED_DOWNTIME_MIN_HOURS
+    return (total, affected, non_affected, is_case_affected)
 
 
 @router.get("/work-orders")
@@ -221,6 +258,7 @@ async def analyse_work_orders(
     q = (
         select(
             WorkOrder.id,
+            WorkOrder.wo_number,
             WorkOrder.title,
             WorkOrder.description,
             WorkOrder.type,
@@ -232,6 +270,8 @@ async def analyse_work_orders(
             WorkOrder.created_at,
             WorkOrder.completed_at,
             WorkOrder.held_hours,
+            WorkOrder.gf_overlap_hours,
+            WorkOrder.downtime_suppressed_by_id,
             WorkOrder.due_date,
             Asset.name.label("asset_name"),
             Asset.category.label("asset_category"),
@@ -239,14 +279,21 @@ async def analyse_work_orders(
             Asset.downtime_divisor.label("asset_downtime_divisor"),
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
-        .where(WorkOrder.is_deleted == False)
+        .where(WorkOrder.is_deleted == False, WorkOrder.status != WorkOrderStatus.cancelled)
     )
 
     # ── Date filters ──────────────────────────────────────────────────────
+    # Filtered and grouped by completed_at, not created_at: a work order
+    # requested in August but only finished in September counts toward
+    # September's downtime, not August's — its downtime hours aren't final
+    # (or even fully known) until it's actually completed. A side effect of
+    # this: a still-open work order (completed_at is NULL) never matches
+    # any date range here, since its downtime hasn't been finalized yet —
+    # it simply doesn't appear in a period report until it completes.
     if date_from:
         try:
             dt_from = datetime.strptime(date_from, "%Y-%m-%d")
-            q = q.where(WorkOrder.created_at >= dt_from)
+            q = q.where(WorkOrder.completed_at >= dt_from)
         except ValueError:
             pass
 
@@ -255,7 +302,7 @@ async def analyse_work_orders(
             dt_to = datetime.strptime(date_to, "%Y-%m-%d")
             # include full day
             dt_to = dt_to.replace(hour=23, minute=59, second=59)
-            q = q.where(WorkOrder.created_at <= dt_to)
+            q = q.where(WorkOrder.completed_at <= dt_to)
         except ValueError:
             pass
 
@@ -274,21 +321,18 @@ async def analyse_work_orders(
     # ── Build work order list ─────────────────────────────────────────────
     work_orders = []
     for r in rows:
-        # Calculate actual downtime in hours
-        downtime = None
-        if r.actual_hours:
-            downtime = r.actual_hours
-        elif r.completed_at and r.created_at:
-            # held_hours excludes time the work order spent on_hold, so a
-            # pause doesn't count against its downtime.
-            downtime = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
-        if downtime is not None:
-            downtime = downtime / (r.asset_downtime_divisor or 1.0)
-
-        # Reclassify to non-affected if the formula-adjusted downtime is
-        # too small to count as production-affecting (see
-        # AFFECTED_DOWNTIME_MIN_HOURS above).
-        effective_affected = _effective_affected(r.affected_downtime, downtime)
+        # Total downtime, plus the affected/non-affected split (see
+        # _wo_downtime_split above — this is where the General Facilities
+        # overlap hours get carved out of the affected portion) and the
+        # single affected/non-affected classification the work order counts
+        # as one case under.
+        downtime, affected_hours, non_affected_hours, effective_affected = _wo_downtime_split(
+            r.actual_hours, r.created_at, r.completed_at, r.held_hours,
+            r.gf_overlap_hours, r.affected_downtime, r.downtime_suppressed_by_id is not None,
+            r.asset_downtime_divisor,
+        )
+        if downtime == 0.0 and not (r.actual_hours or (r.completed_at and r.created_at)):
+            downtime = None  # preserve the old "no downtime yet" (open WO) representation
 
         # The technician selects a Root Cause (e.g. "Bearing", "Motor") from
         # a fixed list when completing the work order — it's embedded in the
@@ -300,6 +344,7 @@ async def analyse_work_orders(
 
         work_orders.append({
             "id":             str(r.id),
+            "wo_number":      r.wo_number,
             "title":          r.title,
             "root_cause":     root_cause,
             "root_cause_group": _ROOT_CAUSE_GROUP_LOOKUP.get(root_cause, "Other"),
@@ -310,6 +355,11 @@ async def analyse_work_orders(
             "affected_downtime": effective_affected,
             "affected_downtime_original": bool(r.affected_downtime),
             "downtime_hours": downtime,
+            "affected_hours": round(affected_hours, 2),
+            "non_affected_hours": round(non_affected_hours, 2),
+            "gf_overlap_hours": round(r.gf_overlap_hours or 0.0, 2),
+            "downtime_suppressed_by_id": str(r.downtime_suppressed_by_id) if r.downtime_suppressed_by_id else None,
+            "held_hours":     r.held_hours or 0.0,
             "created_at":     r.created_at.isoformat() if r.created_at else None,
             "completed_at":   r.completed_at.isoformat() if r.completed_at else None,
             "asset_name":     r.asset_name,
@@ -337,10 +387,13 @@ async def analyse_work_orders(
         machine_summary[name]["total_cases"] += 1
         if wo["downtime_hours"]:
             machine_summary[name]["total_downtime"] += wo["downtime_hours"]
-            if wo["affected_downtime"]:
-                machine_summary[name]["affected_downtime"] += wo["downtime_hours"]
-            else:
-                machine_summary[name]["non_affected_downtime"] += wo["downtime_hours"]
+            # affected_hours/non_affected_hours are the split from
+            # _wo_downtime_split — not a blanket all-or-nothing bucketing —
+            # so a partially General-Facilities-overlapped case contributes
+            # to both totals in proportion, even though it counts as one
+            # case above under wo["affected_downtime"]'s majority rule.
+            machine_summary[name]["affected_downtime"] += wo["affected_hours"]
+            machine_summary[name]["non_affected_downtime"] += wo["non_affected_hours"]
         if wo["status"] == "completed":
             machine_summary[name]["completed"] += 1
         elif wo["status"] in ["open", "in_progress"]:
@@ -375,10 +428,8 @@ async def analyse_work_orders(
         root_cause_summary[rc]["total_cases"] += 1
         if wo["downtime_hours"]:
             root_cause_summary[rc]["total_downtime"] += wo["downtime_hours"]
-            if wo["affected_downtime"]:
-                root_cause_summary[rc]["affected_downtime"] += wo["downtime_hours"]
-            else:
-                root_cause_summary[rc]["non_affected_downtime"] += wo["downtime_hours"]
+            root_cause_summary[rc]["affected_downtime"] += wo["affected_hours"]
+            root_cause_summary[rc]["non_affected_downtime"] += wo["non_affected_hours"]
         root_cause_summary[rc]["machines"].add(wo["asset_name"])
 
     rc_list = []
@@ -446,8 +497,8 @@ async def analyse_work_orders(
 
     # ── Overall summary ───────────────────────────────────────────────────
     total_downtime = sum(wo["downtime_hours"] or 0 for wo in work_orders)
-    affected_downtime = sum((wo["downtime_hours"] or 0) for wo in work_orders if wo["affected_downtime"])
-    non_affected_downtime = sum((wo["downtime_hours"] or 0) for wo in work_orders if not wo["affected_downtime"])
+    affected_downtime = sum(wo["affected_hours"] for wo in work_orders)
+    non_affected_downtime = sum(wo["non_affected_hours"] for wo in work_orders)
     completed_count = sum(1 for wo in work_orders if wo["status"] == "completed")
     total_count = len(work_orders)
     affected_count = sum(1 for wo in work_orders if wo["affected_downtime"])
@@ -455,7 +506,7 @@ async def analyse_work_orders(
 
     daily_summary = {}
     for wo in work_orders:
-        day = (wo["created_at"] or "")[:10] or "Unknown"
+        day = (wo["completed_at"] or "")[:10] or "Unknown"
         if day not in daily_summary:
             daily_summary[day] = {
                 "date": day,
@@ -464,13 +515,10 @@ async def analyse_work_orders(
                 "total_downtime": 0.0,
                 "cases": 0,
             }
-        hours = wo["downtime_hours"] or 0
         daily_summary[day]["cases"] += 1
-        daily_summary[day]["total_downtime"] += hours
-        if wo["affected_downtime"]:
-            daily_summary[day]["affected_downtime"] += hours
-        else:
-            daily_summary[day]["non_affected_downtime"] += hours
+        daily_summary[day]["total_downtime"] += wo["downtime_hours"] or 0
+        daily_summary[day]["affected_downtime"] += wo["affected_hours"]
+        daily_summary[day]["non_affected_downtime"] += wo["non_affected_hours"]
 
     downtime_graph = []
     for row in daily_summary.values():
@@ -533,19 +581,21 @@ async def analyse_by_machine_timeline(
             Asset.downtime_divisor.label("asset_downtime_divisor"),
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
-        .where(WorkOrder.is_deleted == False)
+        .where(WorkOrder.is_deleted == False, WorkOrder.status != WorkOrderStatus.cancelled)
     )
 
+    # Filtered by completed_at, not created_at — see analyse_work_orders
+    # above for why: downtime belongs to the month it finished in.
     if date_from:
         try:
             dt_from = datetime.strptime(date_from, "%Y-%m-%d")
-            q = q.where(WorkOrder.created_at >= dt_from)
+            q = q.where(WorkOrder.completed_at >= dt_from)
         except ValueError:
             pass
     if date_to:
         try:
             dt_to = datetime.strptime(date_to, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
-            q = q.where(WorkOrder.created_at <= dt_to)
+            q = q.where(WorkOrder.completed_at <= dt_to)
         except ValueError:
             pass
 
@@ -576,7 +626,7 @@ async def analyse_by_machine_timeline(
             continue
         downtime = downtime / (r.asset_downtime_divisor or 1.0)
 
-        day = r.created_at.strftime("%Y-%m-%d") if r.created_at else "Unknown"
+        day = r.completed_at.strftime("%Y-%m-%d") if r.completed_at else "Unknown"
         name = r.asset_name
         machine_names.add(name)
 
@@ -632,13 +682,20 @@ async def get_uptime(
         month_end = datetime(yr, mo + 1, 1)
 
     q = (
-        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at, WorkOrder.held_hours, Asset.downtime_divisor)
+        select(WorkOrder.actual_hours, WorkOrder.affected_downtime, WorkOrder.created_at, WorkOrder.completed_at,
+               WorkOrder.held_hours, WorkOrder.gf_overlap_hours, WorkOrder.downtime_suppressed_by_id,
+               Asset.downtime_divisor)
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
-            WorkOrder.created_at >= month_start,
-            WorkOrder.created_at < month_end,
+            # completed_at, not created_at — a work order requested in one
+            # month but only finished in the next counts against the
+            # finishing month's uptime, and a still-open work order isn't
+            # counted anywhere yet (its downtime isn't final).
+            WorkOrder.completed_at >= month_start,
+            WorkOrder.completed_at < month_end,
             WorkOrder.affected_downtime == True,
             WorkOrder.is_deleted == False,
+            WorkOrder.status != WorkOrderStatus.cancelled,
         )
     )
     if location:
@@ -648,15 +705,19 @@ async def get_uptime(
 
     affected_downtime_hours = 0.0
     for r in rows:
-        h = r.actual_hours
-        if h is None and r.completed_at and r.created_at:
-            h = max(working_hours_between(r.created_at, r.completed_at) - (r.held_hours or 0), 0.0)
-        hrs = (h or 0) / (r.downtime_divisor or 1.0)
+        # affected_downtime==True was already required by the query above,
+        # so this is always the "flag True" branch of _wo_downtime_split —
+        # only the General Facilities overlap portion (if any) gets carved
+        # out into non-affected here.
+        _total, affected_hours, _non_affected, _is_case = _wo_downtime_split(
+            r.actual_hours, r.created_at, r.completed_at, r.held_hours,
+            r.gf_overlap_hours, True, r.downtime_suppressed_by_id is not None, r.downtime_divisor,
+        )
         # Below the minimum, the formula-adjusted downtime no longer counts
         # as production-affecting, so it's excluded here too (see
         # AFFECTED_DOWNTIME_MIN_HOURS).
-        if hrs >= AFFECTED_DOWNTIME_MIN_HOURS:
-            affected_downtime_hours += hrs
+        if affected_hours >= AFFECTED_DOWNTIME_MIN_HOURS:
+            affected_downtime_hours += affected_hours
 
     affected_downtime_hours = round(affected_downtime_hours, 2)
     uptime_pct = (
@@ -723,8 +784,11 @@ async def mrr_monthly_summary(
         .where(
             WorkOrder.type == WorkOrderType.corrective,
             WorkOrder.is_deleted == False,
-            WorkOrder.created_at >= year_start,
-            WorkOrder.created_at < year_end,
+            WorkOrder.status != WorkOrderStatus.cancelled,
+            # completed_at, not created_at: a case requested in one month
+            # but finished the next counts toward the finishing month.
+            WorkOrder.completed_at >= year_start,
+            WorkOrder.completed_at < year_end,
         )
     )
     rows = (await db.execute(q)).fetchall()
@@ -735,7 +799,7 @@ async def mrr_monthly_summary(
         for m in range(1, 13)
     }
     for r in rows:
-        m = r.created_at.month
+        m = r.completed_at.month
         g = _location_group(r.location)
         hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         months[m][g]["cases"] += 1
@@ -800,15 +864,19 @@ async def mrr_autoline_detail(
     q = (
         select(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
-            WorkOrder.held_hours, WorkOrder.affected_downtime,
+            WorkOrder.held_hours, WorkOrder.affected_downtime, WorkOrder.gf_overlap_hours,
+            WorkOrder.downtime_suppressed_by_id,
             Asset.location, Asset.name.label("asset_name"), Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
             WorkOrder.type == WorkOrderType.corrective,
             WorkOrder.is_deleted == False,
-            WorkOrder.created_at >= year_start,
-            WorkOrder.created_at < year_end,
+            WorkOrder.status != WorkOrderStatus.cancelled,
+            # completed_at, not created_at — downtime belongs to the month
+            # a case finished in, not the month it was requested.
+            WorkOrder.completed_at >= year_start,
+            WorkOrder.completed_at < year_end,
             Asset.location.in_(LINE_ORDER),
         )
     )
@@ -831,14 +899,19 @@ async def mrr_autoline_detail(
         if cat is None or cat not in line_categories.get(r.location, []):
             unclassified += 1
             continue
-        m = r.created_at.month
+        m = r.completed_at.month
         hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         cell = months[m][r.location][cat]
         cell["cases_all"] += 1
         cell["hours_all"] += hrs
-        if _effective_affected(r.affected_downtime, hrs):
+        _total, affected_hrs, _non_affected, is_case_affected = _wo_downtime_split(
+            r.actual_hours, r.created_at, r.completed_at, r.held_hours,
+            r.gf_overlap_hours, r.affected_downtime, r.downtime_suppressed_by_id is not None,
+            r.downtime_divisor,
+        )
+        if is_case_affected:
             cell["cases_affected"] += 1
-            cell["hours_affected"] += hrs
+        cell["hours_affected"] += affected_hrs
 
     out_months = []
     for m in range(1, 13):
@@ -895,8 +968,11 @@ async def mrr_month_snapshot(
         .where(
             WorkOrder.type == WorkOrderType.corrective,
             WorkOrder.is_deleted == False,
-            WorkOrder.created_at >= month_start,
-            WorkOrder.created_at < month_end,
+            WorkOrder.status != WorkOrderStatus.cancelled,
+            # completed_at, not created_at — same reasoning as the other
+            # downtime reports: a case belongs to the month it finished in.
+            WorkOrder.completed_at >= month_start,
+            WorkOrder.completed_at < month_end,
         )
     )
     rows = (await db.execute(q)).fetchall()

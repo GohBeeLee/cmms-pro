@@ -21,7 +21,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from db import engine, Base, get_db, settings
 from models import PMSchedule, User, UserRole
 from websocket_manager import ws_manager
-from auth import router as auth_router, hash_password, forbid_viewer
+from auth import router as auth_router, hash_password, forbid_viewer, require_roles
 from routers.assets import router as assets_router
 from routers.work_orders import router as wo_router
 from routers.inventory import router as inventory_router
@@ -82,6 +82,16 @@ async def ensure_schema_updates():
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN hold_started_at DATETIME"))
         if "held_hours" not in names:
             await conn.execute(text("ALTER TABLE work_orders ADD COLUMN held_hours FLOAT NOT NULL DEFAULT 0"))
+        if "delete_reason" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN delete_reason VARCHAR(500)"))
+        if "cancel_reason" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN cancel_reason VARCHAR(500)"))
+        if "downtime_suppressed_by_id" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN downtime_suppressed_by_id UUID"))
+        if "gf_overlap_hours" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN gf_overlap_hours FLOAT NOT NULL DEFAULT 0"))
+        if "gf_overlap_started_at" not in names:
+            await conn.execute(text("ALTER TABLE work_orders ADD COLUMN gf_overlap_started_at DATETIME"))
         asset_columns = (await conn.execute(text("PRAGMA table_info(assets)"))).mappings().all()
         asset_names = {col["name"] for col in asset_columns}
         if "downtime_divisor" not in asset_names:
@@ -279,6 +289,52 @@ async def get_completed_by_month(db: AsyncSession = Depends(get_db), current_use
     return {
         "total_completed": len(completed_ats),
         "by_month": by_month,
+    }
+
+
+# ── Dashboard: Completed jobs by technician ──────────────────────────────
+@app.get("/dashboard/completed-by-technician", tags=["dashboard"])
+async def get_completed_by_technician(
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(require_roles(UserRole.admin, UserRole.manager)),
+):
+    """
+    Every completed work order to date, grouped by who completed it —
+    parsed from the "Completed by : <name>" line every completion note
+    already carries (see complete_work_order in routers/work_orders.py).
+    This reflects who actually closed the job, which can differ from who
+    it was originally assigned to if it got reassigned along the way.
+    """
+    import re
+    from models import WorkOrder, WorkOrderStatus
+
+    descriptions = (
+        await db.execute(
+            select(WorkOrder.description).where(
+                WorkOrder.status == WorkOrderStatus.completed,
+                WorkOrder.is_deleted == False,
+            )
+        )
+    ).scalars().all()
+
+    counts: dict[str, int] = {}
+    for desc in descriptions:
+        name = None
+        if desc:
+            m = re.search(r"^Completed by\s*:\s*(.+)$", desc, re.MULTILINE)
+            if m:
+                name = m.group(1).strip()
+        name = name or "Unassigned"
+        counts[name] = counts.get(name, 0) + 1
+
+    by_technician = sorted(
+        ({"technician": name, "count": count} for name, count in counts.items()),
+        key=lambda x: x["count"], reverse=True,
+    )
+
+    return {
+        "total_completed": sum(counts.values()),
+        "by_technician": by_technician,
     }
 
 

@@ -2302,10 +2302,18 @@ function HistoryLog(){
   async function load(){
     setLoading(true);
     try{
-      let url='/work-orders/?limit=300';
-      if(statusFilter) url+='&status='+statusFilter;
-      const data=await api(url);
-      setWos(data.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)));
+      const pageSize=500;
+      let skip=0;
+      const all=[];
+      while(true){
+        let url=`/work-orders/?skip=${skip}&limit=${pageSize}`;
+        if(statusFilter) url+='&status='+encodeURIComponent(statusFilter);
+        const page=await api(url);
+        all.push(...page);
+        if(page.length<pageSize) break;
+        skip+=page.length;
+      }
+      setWos(all.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)));
     }catch(e){toast(e.message,'err');}finally{setLoading(false);}
   }
   async function loadAnalysis(){

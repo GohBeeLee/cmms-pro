@@ -148,6 +148,8 @@ def _part_summary(p: SparePart) -> dict:
         "location":         p.location,
         "barcode":          getattr(p, "barcode",       None),
         "used_on_asset":    getattr(p, "used_on_asset", None),
+        "kd_material_code": getattr(p, "kd_material_code", None),
+        "kd_material_name": getattr(p, "kd_material_name", None),
         "photo_thumb_url":  f"/photos/{p.photo_thumb_path}" if getattr(p, "photo_thumb_path", None) else None,
         "photo_full_url":   f"/photos/{p.photo_full_path}"  if getattr(p, "photo_full_path",  None) else None,
         "has_photo":        bool(getattr(p, "photo_thumb_path", None)),
@@ -220,12 +222,22 @@ async def scan_barcode(
 
     # Try barcode field first (new column)
     try:
-        result = await db.execute(
+        matches = (await db.execute(
             select(SparePart).where(SparePart.barcode == code)
-        )
-        part = result.scalar_one_or_none()
+        )).scalars().all()
     except Exception:
-        part = None
+        matches = []
+    if len(matches) > 1:
+        # Same barcode on several items (e.g. a manufacturer code shared by a
+        # product family) — can't tell which one was meant, so say so rather
+        # than crashing or silently picking one.
+        raise HTTPException(
+            409,
+            f"Barcode '{code}' is used by {len(matches)} items "
+            f"({', '.join(m.part_code for m in matches[:6])}{'…' if len(matches) > 6 else ''}). "
+            "Scan or type the item's Part No instead."
+        )
+    part = matches[0] if matches else None
 
     # Fallback: match part_code
     if not part:
@@ -233,6 +245,14 @@ async def scan_barcode(
             select(SparePart).where(SparePart.part_code == code)
         )
         part = result.scalar_one_or_none()
+
+    # Fallback: KD material code (only when it identifies exactly one item)
+    if not part:
+        kd_matches = (await db.execute(
+            select(SparePart).where(SparePart.kd_material_code == code)
+        )).scalars().all()
+        if len(kd_matches) == 1:
+            part = kd_matches[0]
 
     if not part:
         raise HTTPException(
@@ -512,34 +532,36 @@ async def get_history(
     params: dict = {"limit": limit}
 
     if part_id:
-        conditions.append("part_id = :part_id")
+        conditions.append("sm.part_id = :part_id")
         params["part_id"] = part_id
     if part_code:
-        conditions.append("part_code = :part_code")
+        conditions.append("sm.part_code = :part_code")
         params["part_code"] = part_code
     if movement:
-        conditions.append("movement = :movement")
+        conditions.append("sm.movement = :movement")
         params["movement"] = movement
     if date_from:
-        conditions.append("created_at >= :date_from")
+        conditions.append("sm.created_at >= :date_from")
         params["date_from"] = date_from
     if date_to:
-        conditions.append("created_at <= :date_to")
+        conditions.append("sm.created_at <= :date_to")
         params["date_to"] = date_to + "T23:59:59"
     if performed_by:
-        conditions.append("performed_by_name LIKE :performed_by")
+        conditions.append("sm.performed_by_name LIKE :performed_by")
         params["performed_by"] = f"%{performed_by}%"
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     sql   = f"""
-        SELECT id, part_id, part_code, part_name, movement,
-               quantity, qty_before, qty_after,
-               reason, reference,
-               performed_by_id, performed_by_name, created_at,
-               unit_price, avg_cost_before, avg_cost_after
-        FROM stock_movements
+        SELECT sm.id, sm.part_id, sm.part_code, sm.part_name, sm.movement,
+               sm.quantity, sm.qty_before, sm.qty_after,
+               sm.reason, sm.reference,
+               sm.performed_by_id, sm.performed_by_name, sm.created_at,
+               sm.unit_price, sm.avg_cost_before, sm.avg_cost_after,
+               p.kd_material_code, p.kd_material_name
+        FROM stock_movements sm
+        LEFT JOIN spare_parts p ON CAST(p.id AS TEXT) = sm.part_id
         {where}
-        ORDER BY created_at DESC
+        ORDER BY sm.created_at DESC
         LIMIT :limit
     """
     rows = (await db.execute(text(sql), params)).fetchall()
@@ -557,14 +579,16 @@ async def get_part_history(
     await _ensure_table(db)
     rows = (await db.execute(
         text("""
-            SELECT id, part_id, part_code, part_name, movement,
-                   quantity, qty_before, qty_after,
-                   reason, reference,
-                   performed_by_id, performed_by_name, created_at,
-                   unit_price, avg_cost_before, avg_cost_after
-            FROM stock_movements
-            WHERE part_id = :pid
-            ORDER BY created_at DESC
+            SELECT sm.id, sm.part_id, sm.part_code, sm.part_name, sm.movement,
+                   sm.quantity, sm.qty_before, sm.qty_after,
+                   sm.reason, sm.reference,
+                   sm.performed_by_id, sm.performed_by_name, sm.created_at,
+                   sm.unit_price, sm.avg_cost_before, sm.avg_cost_after,
+                   p.kd_material_code, p.kd_material_name
+            FROM stock_movements sm
+            LEFT JOIN spare_parts p ON CAST(p.id AS TEXT) = sm.part_id
+            WHERE sm.part_id = :pid
+            ORDER BY sm.created_at DESC
             LIMIT :limit
         """),
         {"pid": part_id, "limit": limit}
@@ -596,14 +620,20 @@ async def export_history_excel(
     await _ensure_table(db)
 
     conditions, params = [], {"limit": 5000}
-    if part_id:   conditions.append("part_id = :part_id");   params["part_id"] = part_id
-    if movement:  conditions.append("movement = :movement");  params["movement"] = movement
-    if date_from: conditions.append("created_at >= :df");     params["df"] = date_from
-    if date_to:   conditions.append("created_at <= :dt");     params["dt"] = date_to + "T23:59:59"
+    if part_id:   conditions.append("sm.part_id = :part_id");   params["part_id"] = part_id
+    if movement:  conditions.append("sm.movement = :movement");  params["movement"] = movement
+    if date_from: conditions.append("sm.created_at >= :df");     params["df"] = date_from
+    if date_to:   conditions.append("sm.created_at <= :dt");     params["dt"] = date_to + "T23:59:59"
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     rows  = (await db.execute(
-        text(f"SELECT * FROM stock_movements {where} ORDER BY created_at DESC LIMIT :limit"),
+        text(f"""
+            SELECT sm.*, p.kd_material_code, p.kd_material_name
+            FROM stock_movements sm
+            LEFT JOIN spare_parts p ON CAST(p.id AS TEXT) = sm.part_id
+            {where}
+            ORDER BY sm.created_at DESC LIMIT :limit
+        """),
         params
     )).fetchall()
 
@@ -614,14 +644,15 @@ async def export_history_excel(
     hfl  = PatternFill("solid", start_color="1E3A5F")
     df   = Font(name="Arial", size=10)
 
-    ws.merge_cells("A1:M1")
+    ws.merge_cells("A1:O1")
     ws["A1"] = f"CMMS Pro — Stock Movement History  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(rows)} records"
     ws["A1"].font = Font(name="Arial", bold=True, size=11, color="FFFFFF")
     ws["A1"].fill = hfl
     ws["A1"].alignment = Alignment(horizontal="center")
     ws.row_dimensions[1].height = 26
 
-    headers = ["Date/Time","Part Code","Part Name","Movement","Qty Change","Qty Before","Qty After","Reason","Reference","Performed By"]
+    headers = ["Date/Time","Part Code","Part Name","KD Material Code","KD Material Name",
+               "Movement","Qty Change","Qty Before","Qty After","Reason","Reference","Performed By"]
     show_cost = _can_view_cost(current_user)
     if show_cost:
         headers += ["Batch Unit Price (RM)","Avg Cost Before (RM)","Avg Cost After (RM)"]
@@ -642,6 +673,8 @@ async def export_history_excel(
             m["created_at"][:16].replace("T"," "),
             m["part_code"],
             m["part_name"],
+            m["kd_material_code"] or "",
+            m["kd_material_name"] or "",
             (m["movement"] or "").replace("_"," ").title(),
             f"{sign}{m['quantity']}",
             m["qty_before"],
@@ -658,7 +691,7 @@ async def export_history_excel(
             cell.alignment = Alignment(vertical="center")
         ws.row_dimensions[r].height = 18
 
-    for i, w in enumerate([18,12,28,14,12,12,12,24,18,18,20,20,20],1):
+    for i, w in enumerate([18,16,28,20,30,14,12,12,12,24,18,18,20,20,20],1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A3"
 

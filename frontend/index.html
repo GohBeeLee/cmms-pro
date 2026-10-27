@@ -10,6 +10,7 @@
 <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.23.10/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.12.3/dist/barcodes/JsBarcode.code128.min.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet"/>
 <style>
   *{box-sizing:border-box;}
@@ -42,6 +43,8 @@
   .col-resizer{position:absolute;right:0;top:0;bottom:0;width:6px;cursor:col-resize;user-select:none;z-index:5;}
   .col-resizer:hover,.col-resizer:active{background:rgba(37,99,235,0.4);}
   tr:last-child td{border-bottom:none;}
+  /* Inventory list: 12 columns, so slightly tighter cells to limit horizontal scrolling */
+  .inv-table th,.inv-table td{padding:9px 9px;}
   tr:hover td{background:#fafafa;}
   .spinner{border:3px solid #e2e8f0;border-top:3px solid #3b82f6;border-radius:50%;width:32px;height:32px;animation:spin 0.8s linear infinite;margin:48px auto;}
   @keyframes spin{to{transform:rotate(360deg);}}
@@ -484,6 +487,98 @@ function relativeTime(iso){
 // Strips all whitespace before comparing so "PFICV-4/-" matches
 // "PFICV - 4 / -", "PF 6-3/8" matches "PF6-3/8", etc.
 function normalizeSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,''); }
+
+// ── Barcode labels ─────────────────────────────────────────────────────────
+// Label layouts: w/h in mm. `sheet` layouts print several labels per A4 page
+// (Avery L7159-style 3×8 grid); the others print one label per page for a
+// thermal / label printer.
+const LABEL_LAYOUTS = {
+  a4:     {name:'A4 sticker sheet · 3×8 (63.5 × 33.9 mm)', w:63.5, h:33.9, sheet:true, cols:3, rows:8, gapX:2.5, padTop:12.9, padLeft:7.2, nameFs:9, smallFs:7, barH:8.5},
+  l60x40: {name:'Label printer · 60 × 40 mm',               w:60,   h:40,   nameFs:10, smallFs:7.5, barH:11},
+  l80x60: {name:'Label printer · 80 × 60 mm',               w:80,   h:60,   nameFs:12, smallFs:9, barH:18},
+  l50x30: {name:'Label printer · 50 × 30 mm',               w:50,   h:30,   nameFs:8.5, smallFs:6.5, barH:8},
+};
+
+function escHtml(s){
+  return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// The barcode is the KD material code throughout inventory label printing.
+function labelCodeFor(p){
+  return String(p.kd_material_code||'').trim();
+}
+
+// Code 128 barcode as an inline SVG string, stretched horizontally only
+// (valid for 1-D barcodes) so the bars use the full label width.
+function makeBarcodeSvg(value, maxWidthMm, heightMm){
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  JsBarcode(svg, value, {format:'CODE128', width:1, height:40, displayValue:false, margin:0, marginLeft:10, marginRight:10, background:'#ffffff'});
+  const w=parseFloat(svg.getAttribute('width'))||200, h=parseFloat(svg.getAttribute('height'))||40;
+  svg.removeAttribute('width'); svg.removeAttribute('height');
+  svg.setAttribute('viewBox','0 0 '+w+' '+h);
+  svg.setAttribute('preserveAspectRatio','none');
+  // Cap bar thickness (0.5 mm per module) so short codes aren't absurdly wide
+  const dispW=Math.min(maxWidthMm, w*0.5);
+  svg.setAttribute('style','width:'+dispW.toFixed(2)+'mm;height:'+heightMm+'mm;display:block;margin:0 auto');
+  return svg.outerHTML;
+}
+
+function buildLabelsHtml(items, layoutKey){
+  const L=LABEL_LAYOUTS[layoutKey]||LABEL_LAYOUTS.a4;
+  const pad=1.8;                       // mm inner padding
+  const innerW=L.w-pad*2;
+  const labels=items.map(p=>{
+    const value=labelCodeFor(p);
+    let bars='';
+    try{ bars=makeBarcodeSvg(value, innerW, L.barH); }
+    catch(e){ bars='<div class="bad">Cannot encode: '+escHtml(value)+'</div>'; }
+    return '<div class="label">'
+      +'<div class="name">'+escHtml(p.name)+'</div>'
+      +(p.description?'<div class="desc">'+escHtml(p.description)+'</div>':'')
+      +'<div class="bc">'+bars+'<div class="code">'+escHtml(value)+'</div></div>'
+      +'</div>';
+  });
+
+  let body='';
+  if(L.sheet){
+    const per=L.cols*L.rows;
+    for(let i=0;i<labels.length;i+=per){
+      body+='<div class="page">'+labels.slice(i,i+per).join('')+'</div>';
+    }
+  }else{
+    body=labels.map(l=>'<div class="page">'+l+'</div>').join('');
+  }
+
+  const css=`
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,Helvetica,sans-serif;color:#000;background:#e5e7eb}
+    .bar{position:sticky;top:0;z-index:5;background:#1e3a5f;color:#fff;padding:10px 16px;display:flex;gap:14px;align-items:center;font-size:13px}
+    .bar button{background:#16a34a;color:#fff;border:0;border-radius:6px;padding:8px 18px;font-size:14px;font-weight:700;cursor:pointer}
+    .label{width:${L.w}mm;height:${L.h}mm;padding:${pad}mm;overflow:hidden;display:flex;flex-direction:column;background:#fff;position:relative}
+    .name{font-size:${L.nameFs}pt;font-weight:700;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .desc,.use{font-size:${L.smallFs}pt;line-height:1.2;margin-top:0.6mm;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .use{-webkit-line-clamp:1}
+    .bc{margin-top:auto;text-align:center}
+    .code{font-family:"Courier New",monospace;font-size:${L.smallFs}pt;line-height:1.1;margin-top:0.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .bad{font-size:7pt;color:#b91c1c}
+    ${L.sheet?`
+    .page{width:210mm;height:297mm;padding:${L.padTop}mm 0 0 ${L.padLeft}mm;display:grid;grid-template-columns:repeat(${L.cols},${L.w}mm);grid-auto-rows:${L.h}mm;column-gap:${L.gapX}mm;align-content:start;background:#fff;page-break-after:always;break-after:page}
+    .label{outline:0.2mm dotted #bbb;outline-offset:-0.1mm}
+    @page{size:A4;margin:0}`:`
+    .page{width:${L.w}mm;height:${L.h}mm;page-break-after:always;break-after:page}
+    @page{size:${L.w}mm ${L.h}mm;margin:0}`}
+    @media screen{.page{margin:14px auto;box-shadow:0 2px 10px rgba(0,0,0,.25)}}
+    @media print{body{background:#fff}.bar{display:none}.page{margin:0;box-shadow:none}.page:last-child{page-break-after:auto;break-after:auto}.label{outline:none}}
+  `;
+  const html='<!DOCTYPE html><html><head><meta charset="utf-8"><title>Inventory labels</title><style>'+css+'</style></head><body>'
+    +'<div class="bar"><button onclick="window.print()">&#128424; Print</button><span>'+items.length+' label'+(items.length===1?'':'s')+' &middot; '+escHtml(L.name)
+    +' &middot; In the print dialog set Margins = None and Scale = 100%</span></div>'
+    +body+'</body></html>';
+  // Numeric entities for every non-ASCII character, so item names with symbols
+  // (e.g. the diameter sign) render correctly whatever charset the window uses.
+  return html.replace(/[^\x00-\x7e]/g,c=>'&#'+c.codePointAt(0)+';');
+}
+
 
 // Calculate downtime between two UTC timestamps
 // ── Production shift schedule (Malaysia local time, UTC+8, no DST) ──
@@ -1608,7 +1703,7 @@ function TechnicianBoard(){
     if(!decodedText) return;
     stopPartsCamera();
     const code=decodedText.trim().toLowerCase();
-    const match=parts.find(p=>(p.barcode||'').toLowerCase()===code||(p.part_code||'').toLowerCase()===code);
+    const match=parts.find(p=>(p.kd_material_code||'').toLowerCase()===code||(p.barcode||'').toLowerCase()===code||(p.part_code||'').toLowerCase()===code);
     if(!match){
       toast('No part found for "'+decodedText+'"','err');
       setPartsSearch(decodedText);
@@ -3953,41 +4048,44 @@ function InventoryAndStock(){
   );
 }
 
-// ── Auto-generated part codes, based on category ───────────────────────────
-// For a category with no existing parts yet, derive a short prefix from the
-// category name itself (e.g. "Bearing" -> "BEA", "Belt and Chain" -> "BAC").
-function derivePartCodePrefix(category){
-  const cleaned=category.replace(/\([^)]*\)/g,'').trim();
+// ── Auto-generated legacy codes, based on category ─────────────────────────
+const PART_CODE_PREFIXES={
+  'bearing':'BEA',
+  'belt':'BNC-BELT','belt and chain':'BNC-BELT',
+  'chain':'BNC-CHAIN',
+  'dust collector parts':'DUSTCP-DC',
+  'electrical components':'ELEC-EL',
+  'electronic components':'ELEC-EC',
+  'filter':'FIL',
+  'fastener and hardware':'FASAH',
+  'lubricants and grease':'LUBAG-LUB','lubricats and grease':'LUBAG-LUB',
+  'pneumatic components':'PNEU',
+  'pneumatic fitting':'P-FITTING',
+  'sensor and instrument':'SEN-INST','sensor and instrumentation':'SEN-INST',
+  'sensors and instrumentation':'SEN-INST',
+  'wear parts':'WEAR',
+  'production cutter (edging machine)':'PC-EDGING',
+  'production cutter':'PC',
+};
+function partCodePrefix(category,name=''){
+  const key=(category||'').trim().toLowerCase().replace(/\s+/g,' ');
+  if(key==='belt and chain') return /chain|link/i.test(name||'')?'BNC-CHAIN':'BNC-BELT';
+  if(PART_CODE_PREFIXES[key]) return PART_CODE_PREFIXES[key];
+  const cleaned=(category||'').replace(/\([^)]*\)/g,'').trim();
   const words=cleaned.split(/\s+/).filter(Boolean);
   if(words.length===0) return 'GEN';
   if(words.length===1) return words[0].slice(0,3).toUpperCase();
   return words.map(w=>w[0]).join('').slice(0,4).toUpperCase();
 }
-// Looks at the existing parts already in this category to find the prefix
-// pattern they use (e.g. spots "BEA-057" among Bearing parts) and continues
-// that sequence — rather than imposing a prefix of our own choosing. Only
-// falls back to a freshly-derived prefix if the category has no parts yet.
-function nextPartCode(category,parts){
-  const key=(category||'').trim().toLowerCase();
-  const sameCategory=parts.filter(p=>p.part_code&&(p.category||'').trim().toLowerCase()===key);
-
-  let prefix=null;
-  if(sameCategory.length){
-    const counts={};
-    for(const p of sameCategory){
-      const m=p.part_code.match(/^([A-Za-z]+)-(\d+)$/);
-      if(m) counts[m[1].toUpperCase()]=(counts[m[1].toUpperCase()]||0)+1;
-    }
-    const ranked=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
-    if(ranked.length) prefix=ranked[0][0]; // most common existing prefix in this category
-  }
-  if(!prefix) prefix=derivePartCodePrefix(category);
-
+function nextPartCode(category,parts,name=''){
+  const prefix=partCodePrefix(category,name);
   let max=0,width=3;
   for(const p of parts){
     if(!p.part_code) continue;
-    const m=p.part_code.match(new RegExp('^'+prefix+'-(\\d+)$','i'));
-    if(m){ max=Math.max(max,parseInt(m[1],10)); width=Math.max(width,m[1].length); }
+    const m=p.part_code.match(/^(.*?)-(\d+)$/);
+    if(m&&m[1].toUpperCase()===prefix.toUpperCase()){
+      max=Math.max(max,parseInt(m[2],10)); width=Math.max(width,m[2].length);
+    }
   }
   return prefix+'-'+String(max+1).padStart(width,'0');
 }
@@ -4032,6 +4130,8 @@ function PartsAndScannerTab({canManage,isProduction}){
   const [reference,setReference]=useState('');
   const [unitPrice,setUnitPrice]=useState(''); // price paid per unit for this stock-in batch (admin/manager only)
   // ── Spare part readiness popup ──
+  // ── Barcode label printing dialog ──
+  const [labelDlg,setLabelDlg]=useState(null); // null | {loading} | {all,shared,single,scope,layout}
   const [includeProdCutter,setIncludeProdCutter]=useState(true); // readiness popup: count the Production Cutter category or not
   const [readiness,setReadiness]=useState(null);       // null = closed, {loading} | {total,inStock,pct,scope} | {error}
   const [moveResult,setMoveResult]=useState(null);
@@ -4047,6 +4147,7 @@ function PartsAndScannerTab({canManage,isProduction}){
     part_code:'',name:'',category:'',description:'',unit:'pcs',
     quantity_on_hand:0,reorder_level:5,unit_cost:'',
     supplier:'',location:'',barcode:'',used_on_asset:'',is_critical:false,
+    kd_material_code:'',kd_material_name:'',
   };
   const [form,setForm]=useState(emptyForm);
   const [formPhoto,setFormPhoto]=useState(''); // preview: existing photo_thumb_url, or a fresh base64 data URL from a new pick
@@ -4156,7 +4257,7 @@ function PartsAndScannerTab({canManage,isProduction}){
   }
   function closePhotoModal(){setPhotoModal(null);setPhotoPreview('');setPhotoPreviewIsNew(false);}
 
-  function resizeImage(file,maxDim=800,quality=0.75){
+  function resizeImage(file,maxDim=800,quality=0.65){
     return new Promise((resolve,reject)=>{
       const reader=new FileReader();
       reader.onload=()=>{
@@ -4328,13 +4429,38 @@ function PartsAndScannerTab({canManage,isProduction}){
       let list=await api(url);
       if(search.trim()){
         const q=normalizeSearch(search);
-        list=list.filter(p=>normalizeSearch(p.name).includes(q)||normalizeSearch(p.part_code).includes(q)||normalizeSearch(p.description).includes(q)||normalizeSearch(p.barcode).includes(q));
+        list=list.filter(p=>normalizeSearch(p.name).includes(q)||normalizeSearch(p.part_code).includes(q)||normalizeSearch(p.kd_material_code).includes(q)||normalizeSearch(p.kd_material_name).includes(q)||normalizeSearch(p.description).includes(q)||normalizeSearch(p.barcode).includes(q));
       }
       setReadiness({list,
         scope:(catFilter||'All categories')+(search.trim()?` · Search: "${search.trim()}"`:'')});
     }catch(e){setReadiness({error:e.message});}
   }
   const isProdCutter=p=>(p.category||'').trim().toLowerCase()==='production cutter';
+
+  // Fetch the full inventory so the user can print all or filtered items.
+  async function openLabels(single){
+    setLabelDlg({loading:true});
+    try{
+      const all=await api('/inventory/?low_stock=false&critical_only=false&limit=2000');
+      setLabelDlg({all,single:single||null,scope:single?'single':'current',layout:'a4'});
+    }catch(e){toast(e.message,'err');setLabelDlg(null);}
+  }
+  function labelItemsFor(d){
+    if(d.scope==='single') return [d.single];
+    if(d.scope==='all') return d.all;
+    const ids=new Set(filtered.map(p=>p.id));
+    return d.all.filter(p=>ids.has(p.id));
+  }
+  // Must run synchronously inside the click handler so the browser allows the pop-up.
+  function printLabels(){
+    const items=labelItemsFor(labelDlg);
+    if(!items.length){toast('No items to print','err');return;}
+    if(typeof JsBarcode==='undefined'){toast('Barcode library failed to load — check your internet connection and reload the page','err');return;}
+    const html=buildLabelsHtml(items,labelDlg.layout);
+    const w=window.open('','_blank');
+    if(!w){toast('Pop-up blocked — allow pop-ups for this site, then try again','err');return;}
+    w.document.open(); w.document.write(html); w.document.close();
+  }
 
   function openScanner(prefillBarcode){
     setScanOpen(true);setScanPart(null);setMoveResult(null);setBarcode(prefillBarcode||'');setQty(1);setReason('');setReference('');setUnitPrice('');
@@ -4347,6 +4473,8 @@ function PartsAndScannerTab({canManage,isProduction}){
     const q=normalizeSearch(search);
     return normalizeSearch(p.name).includes(q)
       ||normalizeSearch(p.part_code).includes(q)
+      ||normalizeSearch(p.kd_material_code).includes(q)
+      ||normalizeSearch(p.kd_material_name).includes(q)
       ||normalizeSearch(p.description).includes(q)
       ||normalizeSearch(p.barcode).includes(q);
   });
@@ -4410,6 +4538,42 @@ function PartsAndScannerTab({canManage,isProduction}){
           })()}
         </Modal>
       )}
+      {labelDlg&&(
+        <Modal title="🏷️ Print Barcode Labels" onClose={()=>setLabelDlg(null)}>
+          {labelDlg.loading?<Spinner/>:(()=>{
+            const items=labelItemsFor(labelDlg);
+            const missingKdCode=items.filter(p=>!labelCodeFor(p)).length;
+            const opt=(val,label,disabled)=>(
+              <label key={val} style={{display:'flex',alignItems:'center',gap:'8px',fontSize:'13px',color:disabled?'#cbd5e1':'#334155',cursor:disabled?'default':'pointer',padding:'4px 0'}}>
+                <input type="radio" name="lblscope" disabled={disabled} checked={labelDlg.scope===val} onChange={()=>setLabelDlg({...labelDlg,scope:val})}/>{label}
+              </label>
+            );
+            return (
+              <div>
+                <div style={{fontSize:'12px',fontWeight:700,color:'#64748b',marginBottom:'4px'}}>Which items?</div>
+                {labelDlg.single
+                  ?<div style={{fontSize:'13px',color:'#334155',padding:'4px 0'}}>Single item: <strong>{labelDlg.single.name}</strong> <span style={{fontFamily:'monospace',color:'#2563eb'}}>{labelDlg.single.part_code}</span></div>
+                  :<>
+                    {opt('current','Current list ('+filtered.length+' items — follows the Category / Search filters)')}
+                    {opt('all','All inventory items ('+labelDlg.all.length+')')}
+                  </>}
+                <div style={{fontSize:'12px',fontWeight:700,color:'#64748b',margin:'12px 0 4px'}}>Label size / paper</div>
+                <select className="inp" value={labelDlg.layout} onChange={e=>setLabelDlg({...labelDlg,layout:e.target.value})}>
+                  {Object.entries(LABEL_LAYOUTS).map(([k,L])=><option key={k} value={k}>{L.name}</option>)}
+                </select>
+                <div style={{marginTop:'12px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:'8px',padding:'10px 12px',fontSize:'12px',color:'#475569',lineHeight:1.6}}>
+                  Each label shows: <strong>item name · description · barcode</strong> (Code 128).<br/>
+                  Barcode value: <strong>KD Material Code</strong>{missingKdCode>0&&<>. <strong style={{color:'#b45309'}}>{missingKdCode}</strong> selected item{missingKdCode===1?' has':'s have'} no KD Material Code and cannot be encoded.</>}
+                </div>
+                <button className="btn btn-primary" style={{width:'100%',marginTop:'14px',padding:'11px',fontWeight:700}} disabled={!items.length} onClick={printLabels}>
+                  🖨️ Preview &amp; Print ({items.length} label{items.length===1?'':'s'})
+                </button>
+                <div style={{fontSize:'11px',color:'#94a3b8',marginTop:'8px'}}>Opens a preview in a new tab — allow pop-ups if asked. In the print dialog set Margins to "None" and Scale to 100%.</div>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
       {/* Action bar */}
       <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'16px'}}>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
@@ -4420,6 +4584,9 @@ function PartsAndScannerTab({canManage,isProduction}){
             🔲 Scan to Stock In/Out
           </button>
           {canManage&&<>
+            <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>openLabels()} title="Print barcode labels">
+              🏷️ Labels
+            </button>
             <button className="btn btn-secondary" style={{fontSize:'13px'}} onClick={()=>downloadFile('/inventory/import/template','CMMS_Inventory_Import_Template.xlsx')}>
               📥 Template
             </button>
@@ -4469,13 +4636,14 @@ function PartsAndScannerTab({canManage,isProduction}){
       {/* Table */}
       <div className="card" style={{padding:0}}>
         {loading?<Spinner/>:filtered.length===0?<Empty msg="No parts found"/>:(
-          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table className="resizable-table">
+          <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table className="resizable-table inv-table">
             <thead><tr>
               {[
-                'No','Photo','Part Item','Category','Description','Qty','Rack No','Use at',
-                ...(canManage?['Avg Unit Price (RM)','Total (RM)']:[]),
-                'Barcode','Threshold','Last Checked','Status','Actions',
-              ].map(h=><th key={h} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}<ColResizer/></th>)}
+                'Legacy Code','Legacy Item Name','Photo','KD Material Code','KD Material Name',
+                'Quantity','Rack No','Use At',
+                ...(canManage?['Unit Price (RM)','Total Amount (RM)']:[]),
+                'Threshold Value','Actions',
+              ].map(h=><th key={h} title={h==='Unit Price (RM)'?'Weighted average of all stock-in batches':undefined} style={h==='Actions'?{position:'sticky',top:0,right:0,zIndex:3}:{position:'sticky',top:0,zIndex:1}}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{filtered.map(p=>{
               const sev=p.stock_status||(p.is_low_stock?'low':'ok');
@@ -4486,46 +4654,29 @@ function PartsAndScannerTab({canManage,isProduction}){
               return(
                 <tr key={p.id} style={{background:rowBg}}>
                   <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{p.part_code}</span></td>
-                  <td>
-                    {p.photo_thumb_url?(
-                      <img src={p.photo_thumb_url} alt={p.name} onClick={()=>setLightboxPhoto({url:p.photo_full_url||p.photo_thumb_url,name:p.name})}
-                        style={{width:'42px',height:'42px',objectFit:'cover',borderRadius:'6px',cursor:'pointer',border:'1px solid #e2e8f0'}}/>
-                    ):(
-                      <div onClick={()=>canManage&&openPhotoModal(p)} style={{
-                        width:'42px',height:'42px',borderRadius:'6px',background:'#f1f5f9',
-                        display:'flex',alignItems:'center',justifyContent:'center',fontSize:'16px',color:'#cbd5e1',
-                        cursor:canManage?'pointer':'default',
-                      }} title={canManage?'Add photo':''}>🖼️</div>
-                    )}
-                  </td>
                   <td style={{fontWeight:600}}>{p.name}{p.is_critical&&<span title="Always treated as critical when low" style={{marginLeft:'6px',fontSize:'11px'}}>📌</span>}</td>
-                  <td><span style={{fontSize:'11px',padding:'2px 8px',borderRadius:'999px',background:'#f1f5f9',color:'#374151'}}>{p.category||'—'}</span></td>
-                  <td style={{color:'#64748b',fontSize:'12px',maxWidth:'140px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={p.description||''}>{p.description||'—'}</td>
-                  <td style={{fontWeight:700,color:isCritical?'#dc2626':isTopup?'#ea580c':'#1e293b',textAlign:'right'}}>{p.quantity_on_hand}</td>
+                  <td style={{width:'48px',minWidth:'48px',textAlign:'center'}}>
+                    {p.photo_thumb_url?(
+                      <img src={p.photo_thumb_url} alt={p.name} title="View photo" onClick={()=>setLightboxPhoto({url:p.photo_full_url||p.photo_thumb_url,name:p.name})}
+                        style={{width:'34px',height:'34px',objectFit:'cover',borderRadius:'5px',border:'1px solid #e2e8f0',cursor:'zoom-in'}}/>
+                    ):canManage?(
+                      <button onClick={()=>openPhotoModal(p)} title="Add item photo" style={{width:'34px',height:'34px',border:'1px dashed #cbd5e1',borderRadius:'5px',background:'#f8fafc',color:'#64748b',cursor:'pointer'}}>＋</button>
+                    ):'—'}
+                  </td>
+                  <td style={{fontFamily:'monospace',fontSize:'12px',color:'#475569'}}>{p.kd_material_code||'—'}</td>
+                  <td style={{fontSize:'12px',color:'#334155'}}>{p.kd_material_name||'—'}</td>
+                  <td style={{fontWeight:700,color:isCritical?'#dc2626':isTopup?'#ea580c':'#1e293b',textAlign:'right'}} title={isCritical?'Critical — at/below threshold':isTopup?'Low — at/below threshold':''}>{p.quantity_on_hand}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.location||'—'}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.used_on_asset||'—'}</td>
                   {canManage&&<>
                     <td style={{color:'#64748b',textAlign:'right'}}>{p.unit_cost?'RM '+p.unit_cost.toFixed(2):'—'}</td>
                     <td style={{color:'#374151',fontWeight:500,textAlign:'right'}}>{total}</td>
                   </>}
-                  <td style={{color:'#64748b',fontSize:'11px',fontFamily:'monospace'}}>{p.barcode||'—'}</td>
                   <td style={{textAlign:'right',color:'#64748b'}}>{p.reorder_level}</td>
-                  <td>
-                    <span style={{
-                      fontSize:'12px',fontWeight:600,
-                      color:!p.last_stock_take_at?'#dc2626':relativeTime(p.last_stock_take_at).includes('month')?'#b45309':'#64748b',
-                    }}>{relativeTime(p.last_stock_take_at)}</span>
-                  </td>
-                  <td>
-                    <span style={{
-                      display:'inline-block',padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,
-                      background:isCritical?'#fee2e2':isTopup?'#fef9c3':'#dcfce7',
-                      color:isCritical?'#991b1b':isTopup?'#854d0e':'#166534',
-                    }}>{isCritical?'🔴 Critical':isTopup?'🟠 Low':'🟢 OK'}</span>
-                  </td>
                   <td style={{whiteSpace:'nowrap',position:'sticky',right:0,background:isCritical?'#fef2f2':isTopup?'#fefce8':'#fff',boxShadow:'-6px 0 6px -6px rgba(0,0,0,.12)'}}>
-                    <button onClick={()=>openScanner(p.barcode||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
+                    <button onClick={()=>openScanner(p.kd_material_code||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
+                      <button onClick={()=>openLabels(p)} title="Print barcode label" style={{color:'#0f766e',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Label</button>
                       <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.has_photo?'Photo':'+ Photo'}</button>
                       <button onClick={()=>{setEditPart(p);setForm({
                         part_code:p.part_code,name:p.name,category:p.category||'',
@@ -4534,6 +4685,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                         unit_cost:p.unit_cost||'',supplier:p.supplier||'',
                         location:p.location||'',barcode:p.barcode||'',
                         used_on_asset:p.used_on_asset||'',is_critical:!!p.is_critical,
+                        kd_material_code:p.kd_material_code||'',kd_material_name:p.kd_material_name||'',
                       });setFormPhoto(p.photo_thumb_url||p.photo_full_url||'');setFormPhotoIsNew(false);setModal(true);}} style={{color:'#2563eb',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Edit</button>
                       <button onClick={()=>del(p.id,p.name)} style={{color:'#dc2626',background:'none',border:'none',cursor:'pointer',fontSize:'12px'}}>Delete</button>
                     </>}
@@ -4576,7 +4728,7 @@ function PartsAndScannerTab({canManage,isProduction}){
             </div>
 
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">No (Part Code) *</label>
+              <div><label className="lbl">Legacy Code *</label>
                 <input className="inp" value={form.part_code}
                   onChange={e=>{setCodeManual(true);setForm({...form,part_code:e.target.value});}}
                   placeholder={editPart?'':'Pick a category to auto-generate…'}/>
@@ -4589,7 +4741,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                   setForm(f=>{
                     const nf={...f,category:cat};
                     if(!editPart&&!codeManual){
-                      nf.part_code=cat?nextPartCode(cat,allPartsForCode):'';
+                      nf.part_code=cat?nextPartCode(cat,allPartsForCode,form.name):'';
                     }
                     return nf;
                   });
@@ -4597,17 +4749,28 @@ function PartsAndScannerTab({canManage,isProduction}){
                 <datalist id="cat-options">{categories.map(c=><option key={c} value={c}/>)}</datalist>
               </div>
             </div>
-            <div><label className="lbl">Part Item (Name) *</label>
-              <input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/>
+            <div><label className="lbl">Legacy Item Name *</label>
+              <input className="inp" value={form.name} onChange={e=>setForm(f=>({
+                ...f,name:e.target.value,
+                ...(!editPart&&!codeManual&&f.category?{part_code:nextPartCode(f.category,allPartsForCode,e.target.value)}:{}),
+              }))}/>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 2fr',gap:'10px'}}>
+              <div><label className="lbl">KD Material Code</label>
+                <input className="inp" value={form.kd_material_code} onChange={e=>setForm({...form,kd_material_code:e.target.value})} placeholder="e.g. KD-100001"/>
+              </div>
+              <div><label className="lbl">KD Material Name</label>
+                <input className="inp" value={form.kd_material_name} onChange={e=>setForm({...form,kd_material_name:e.target.value})}/>
+              </div>
             </div>
             <div><label className="lbl">Description</label>
               <input className="inp" value={form.description} onChange={e=>setForm({...form,description:e.target.value})} placeholder="Spec, model number…"/>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
-              <div><label className="lbl">Rack No (Location)</label>
+              <div><label className="lbl">Rack No</label>
                 <input className="inp" value={form.location} onChange={e=>setForm({...form,location:e.target.value})} placeholder="e.g. Rack A1"/>
               </div>
-              <div><label className="lbl">Use at (Machine)</label>
+              <div><label className="lbl">Use At</label>
                 <input className="inp" value={form.used_on_asset} onChange={e=>setForm({...form,used_on_asset:e.target.value})} placeholder="e.g. Pump A"/>
               </div>
             </div>
@@ -4615,7 +4778,7 @@ function PartsAndScannerTab({canManage,isProduction}){
               <div><label className="lbl">Quantity</label>
                 <input type="number" className="inp" value={form.quantity_on_hand} onChange={e=>setForm({...form,quantity_on_hand:e.target.value})}/>
               </div>
-              <div><label className="lbl">Threshold</label>
+              <div><label className="lbl">Threshold Value</label>
                 <input type="number" className="inp" value={form.reorder_level} onChange={e=>setForm({...form,reorder_level:e.target.value})}/>
               </div>
               <div><label className="lbl">Unit Price (RM)</label>
@@ -4910,6 +5073,7 @@ function PartsAndScannerTab({canManage,isProduction}){
                     )}
                     <div style={{flex:1}}>
                       <div style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px',fontWeight:700,marginBottom:'4px'}}>{scanPart.part_code}</div>
+                      {(scanPart.kd_material_code||scanPart.kd_material_name)&&<div style={{fontSize:'12px',color:'#475569',marginBottom:'4px'}}>KD: <span style={{fontFamily:'monospace'}}>{scanPart.kd_material_code||'—'}</span>{scanPart.kd_material_name?' · '+scanPart.kd_material_name:''}</div>}
                       <div style={{fontWeight:800,color:'#1e293b',fontSize:'16px',marginBottom:'4px'}}>{scanPart.name}{scanPart.is_critical&&<span title="Always treated as critical when low" style={{marginLeft:'6px',fontSize:'12px'}}>📌</span>}</div>
                       <div style={{fontSize:'12px',color:'#64748b'}}>{scanPart.category}{scanPart.description&&' · '+scanPart.description}</div>
                     </div>
@@ -5442,7 +5606,7 @@ function StockHistoryTab(){
         {histLoading?<Spinner/>:history.length===0?<Empty msg="No movements found for selected filters"/>:(
           <div className="ovf"><table className="resizable-table">
             <thead><tr>
-              {['Date / Time','Part Code','Part Name','Type','Qty','Before','After',...(canSeeCost?['Batch Price (RM)','Avg Price (RM)']:[]),'Reason','Reference','Performed By'].map(h=><th key={h}>{h}<ColResizer/></th>)}
+              {['Date / Time','Part Code','Part Name','KD Material Code','KD Material Name','Type','Qty','Before','After',...(canSeeCost?['Batch Price (RM)','Avg Price (RM)']:[]),'Reason','Reference','Performed By'].map(h=><th key={h}>{h}<ColResizer/></th>)}
             </tr></thead>
             <tbody>{history.map((h,i)=>{
               const mc=moveColor[h.movement]||{bg:'#f1f5f9',color:'#374151',icon:'⚙️',label:h.movement};
@@ -5452,6 +5616,8 @@ function StockHistoryTab(){
                   <td style={{whiteSpace:'nowrap',fontSize:'12px',color:'#64748b'}}>{fmtDT(h.created_at)}</td>
                   <td><span style={{fontFamily:'monospace',color:'#2563eb',fontSize:'12px'}}>{h.part_code}</span></td>
                   <td style={{fontWeight:600}}>{h.part_name}</td>
+                  <td style={{fontFamily:'monospace',fontSize:'12px',color:'#475569'}}>{h.kd_material_code||'—'}</td>
+                  <td style={{fontSize:'12px',color:'#334155'}}>{h.kd_material_name||'—'}</td>
                   <td>
                     <span style={{background:mc.bg,color:mc.color,padding:'2px 10px',borderRadius:'999px',fontSize:'11px',fontWeight:700,whiteSpace:'nowrap'}}>
                       {mc.icon} {mc.label||h.movement}

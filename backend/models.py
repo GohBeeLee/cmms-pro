@@ -244,6 +244,10 @@ class SparePart(Base):
     location: Mapped[str | None] = mapped_column(String(100))
     barcode: Mapped[str | None] = mapped_column(String(100), index=True)
     used_on_asset: Mapped[str | None] = mapped_column(String(200))
+    # KD (new system) material code / name — kept alongside the legacy
+    # part_code / name, which stay the primary identifiers.
+    kd_material_code: Mapped[str | None] = mapped_column(String(100), index=True)
+    kd_material_name: Mapped[str | None] = mapped_column(String(300))
     # Manually-set escalation flag: when a part is at/below its reorder
     # point, this bumps it from "low" to "critical" severity regardless of
     # how close to zero it is — for parts an admin knows matter more than

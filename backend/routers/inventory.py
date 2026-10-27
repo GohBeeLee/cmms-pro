@@ -36,10 +36,11 @@ ROOM  = "inventory"
 # that don't match one of these are NOT discarded or forced into "Other" —
 # they're kept exactly as written and simply become additional categories.
 DEFAULT_CATEGORIES = [
-    "Bearing","Belt and Chain","Filter","Electrical Components",
-    "Electronic Components","Wear Parts","Fastener and Hardware",
-    "Lubricants and Grease","Pneumatic Components","Pneumatic Fitting",
-    "Sensor and Instrumentation",
+    "Bearing","Belt","Chain","Dust Collector Parts",
+    "Electrical Components","Electronic Components","Filter",
+    "Fastener and Hardware","Lubricants and Grease","Pneumatic Components",
+    "Pneumatic Fitting","Sensor and Instrument","Wear Parts",
+    "Production Cutter (Edging Machine)","Production Cutter",
 ]
 _CATEGORY_ORDER = {c: i for i, c in enumerate(DEFAULT_CATEGORIES)}
 
@@ -75,6 +76,8 @@ class PartIn(BaseModel):
     location:         Optional[str]   = None
     barcode:          Optional[str]   = None
     used_on_asset:    Optional[str]   = None
+    kd_material_code: Optional[str]   = None
+    kd_material_name: Optional[str]   = None
     unit:             Optional[str]   = "pcs"
     is_critical:      Optional[bool]  = None
 
@@ -96,6 +99,8 @@ def _dict(p: SparePart, show_cost: bool = True) -> dict:
         "location":         p.location,
         "barcode":          getattr(p, "barcode",        None),
         "used_on_asset":    getattr(p, "used_on_asset",  None),
+        "kd_material_code": getattr(p, "kd_material_code", None),
+        "kd_material_name": getattr(p, "kd_material_name", None),
         "photo_thumb_url":  f"/photos/{p.photo_thumb_path}" if getattr(p, "photo_thumb_path", None) else None,
         "photo_full_url":   f"/photos/{p.photo_full_path}"  if getattr(p, "photo_full_path",  None) else None,
         "has_photo":        bool(getattr(p, "photo_thumb_path", None)),
@@ -171,7 +176,7 @@ async def download_template(_: User = Depends(get_current_user)):
     hint_font= Font(name="Arial", italic=True, color="5A6A7A", size=9)
 
     # Row 1 title
-    ws.merge_cells("A1:L1")
+    ws.merge_cells("A1:J1")
     ws["A1"] = "CMMS Pro — Inventory Import Template"
     ws["A1"].font      = Font(name="Arial", bold=True, size=13, color="FFFFFF")
     ws["A1"].fill      = hdr_fill
@@ -179,10 +184,10 @@ async def download_template(_: User = Depends(get_current_user)):
     ws.row_dimensions[1].height = 30
 
     # Row 2 note
-    ws.merge_cells("A2:L2")
+    ws.merge_cells("A2:J2")
     ws["A2"] = (
-        "Required columns (*): category, No, Part Item, Quantity, Threshold.  "
-        "Leave 'Total Amount (RM)' and 'Status' blank — system calculates automatically."
+        "Required columns (*): Legacy Code, Legacy Item Name, Quantity, Threshold Value.  "
+        "Leave 'Total Amount (RM)' blank — system calculates automatically."
     )
     ws["A2"].font      = Font(name="Arial", italic=True, size=10, color="5A6A7A")
     ws["A2"].fill      = note_fill
@@ -190,22 +195,18 @@ async def download_template(_: User = Depends(get_current_user)):
     ws.row_dimensions[2].height = 18
     ws.row_dimensions[3].height = 6
 
-    # Headers row 4 — YOUR exact column names
+    # Headers row 4 — match the inventory table's requested import/export order.
     cols = [
-        ("category *",           True,  "Electrical / Mechanical / Pneumatic / Hydraulic / Consumable / Other"),
-        ("No *",                 True,  "Unique part number e.g. E-001, M-002  (must not duplicate)"),
-        ("Part Item *",          True,  "Full part name e.g. Bearing 6205, Fuse 10A"),
-        ("Description",          False, "Additional spec or model number (optional)"),
+        ("Legacy Code *",        True,  "Unique legacy part number e.g. E-001, M-002  (must not duplicate)"),
+        ("Legacy Item Name *",   True,  "Legacy part name e.g. Bearing 6205, Fuse 10A"),
+        ("KD Material Code",     False, "KD material code (optional)"),
+        ("KD Material Name",     False, "KD material name (optional)"),
         ("Quantity *",           True,  "Current stock on hand — number only"),
         ("Rack No",              False, "Storage location e.g. Rack A1, Shelf B3"),
-        ("Use at",               False, "Machine or asset name this part is used on"),
+        ("Use At",               False, "Machine or asset name this part is used on"),
         ("Unit Price (RM)",      False, "Cost per unit in RM e.g. 12.50"),
-        ("Total Amount(RM)",     False, "AUTO-CALCULATED — leave blank"),
-        ("Barcode",              False, "Barcode or QR number (optional)"),
-        ("Threshold *",          True,  "Min stock level — alert when Quantity ≤ Threshold"),
-        ("Status(Enough/Topup)", False, "AUTO-CALCULATED — leave blank"),
-        ("Old No",               False, "Only fill in to RENAME an existing part's code — put its CURRENT code here and the new code in 'No' above. Leave blank for normal add/update rows."),
-        ("Critical",             False, "Yes = always treat as critical once at/below Threshold, regardless of how much is left. Leave blank to not change this."),
+        ("Total Amount (RM)",    False, "AUTO-CALCULATED — leave blank"),
+        ("Threshold Value *",    True,  "Min stock level — alert when Quantity ≤ Threshold Value"),
     ]
     for c, (h, req, hint) in enumerate(cols, 1):
         cell = ws.cell(row=4, column=c, value=h)
@@ -222,33 +223,33 @@ async def download_template(_: User = Depends(get_current_user)):
     ws.row_dimensions[4].height = 24
     ws.row_dimensions[5].height = 40
 
-    # Sample rows
+    # Sample rows follow the same ten-column order as the import/export format.
     samples = [
-        ["Electrical","E-001","Fuse 10A",           "Glass fuse 10A 250V",   50,"Rack A1","All machines",    0.80,"","BC001001",10,"","",""],
-        ["Electrical","E-002","Fuse 16A",           "Glass fuse 16A 250V",   30,"Rack A1","Compressor",       1.20,"","BC001002",10,"","",""],
-        ["Electrical","E-003","Contactor 9A",       "LC1D09 24VDC coil",      5,"Rack A2","Conveyor Motor",  45.00,"","BC001003", 2,"","",""],
-        ["Mechanical","M-001","Bearing 6205",       "Deep groove 25x52mm",   20,"Shelf B1","Pump A",           8.50,"","BC002001", 5,"","",""],
-        ["Mechanical","M-002","Bearing 6206",       "Deep groove 30x62mm",   15,"Shelf B1","Motor #1",         9.20,"","BC002002", 5,"","",""],
-        ["Mechanical","M-003","V-Belt A42",         "Classical V-belt",        8,"Shelf B2","Compressor",     12.00,"","BC002003", 3,"","",""],
-        ["Pneumatic", "P-001","SMC Filter Element", "AF20-F02 element",        6,"Rack C1","Pneumatic line",  22.00,"","BC003001", 2,"","",""],
-        ["Pneumatic", "P-002","Solenoid Valve 5/2", "SY3120-5LZD-M5",          4,"Rack C2","Cylinder line",  85.00,"","BC003002", 2,"","",""],
-        ["Consumable","C-001","Cable Tie 300mm",    "Black nylon 300mm",     200,"Rack D1","General",          0.05,"","BC004001",50,"","",""],
-        ["Consumable","C-002","WD-40 Spray 400ml",  "Multi-use lubricant",    10,"Rack D2","General",         12.00,"","BC004002", 3,"","",""],
+        ["E-001","Fuse 10A",           "KD-100001","Fuse 10A 250V Glass",        50,"Rack A1","All machines",    0.80,"",10],
+        ["E-002","Fuse 16A",           "KD-100002","Fuse 16A 250V Glass",        30,"Rack A1","Compressor",       1.20,"",10],
+        ["E-003","Contactor 9A",       "KD-100003","Contactor LC1D09 24VDC",      5,"Rack A2","Conveyor Motor",  45.00,"", 2],
+        ["M-001","Bearing 6205",       "KD-200001","Bearing Deep Groove 6205",   20,"Shelf B1","Pump A",           8.50,"", 5],
+        ["M-002","Bearing 6206",       "KD-200002","Bearing Deep Groove 6206",   15,"Shelf B1","Motor #1",         9.20,"", 5],
+        ["M-003","V-Belt A42",         "KD-200003","V-Belt Classical A42",        8,"Shelf B2","Compressor",     12.00,"", 3],
+        ["P-001","SMC Filter Element", "KD-300001","Filter Element AF20-F02",     6,"Rack C1","Pneumatic line",  22.00,"", 2],
+        ["P-002","Solenoid Valve 5/2", "KD-300002","Solenoid Valve SY3120",       4,"Rack C2","Cylinder line",  85.00,"", 2],
+        ["C-001","Cable Tie 300mm",    "KD-400001","Cable Tie Nylon 300mm",     200,"Rack D1","General",          0.05,"",50],
+        ["C-002","WD-40 Spray 400ml",  "KD-400002","WD-40 Multi-use 400ml",      10,"Rack D2","General",         12.00,"", 3],
     ]
     alt = [PatternFill("solid",start_color="FFFFFF"), PatternFill("solid",start_color="F7FBFF")]
     for r, row in enumerate(samples, 6):
         for c, v in enumerate(row, 1):
             cell = ws.cell(row=r, column=c, value=v if v != "" else None)
             cell.font = data_font; cell.fill = alt[r%2]; cell.border = border
-            cell.alignment = Alignment(vertical="center", horizontal="right" if c in (5,8,9,11) else "left")
+            cell.alignment = Alignment(vertical="center", horizontal="right" if c in (5,8,9,10) else "left")
         ws.row_dimensions[r].height = 18
     for r in range(16, 56):
-        for c in range(1, 15):
+        for c in range(1, 11):
             ws.cell(row=r,column=c).fill = alt[r%2]
             ws.cell(row=r,column=c).border = border
         ws.row_dimensions[r].height = 18
 
-    for i, w in enumerate([16,10,28,32,10,14,24,14,16,16,12,18,14,10], 1):
+    for i, w in enumerate([16,28,18,30,10,14,24,14,16,16], 1):
         from openpyxl.utils import get_column_letter
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A6"
@@ -269,8 +270,8 @@ async def import_excel(
 ):
     """
     Import inventory from Excel. Accepts BOTH:
-      - a single flat sheet with an explicit "category" column (the
-        original import template format), and
+      - a flat import template without a category column (new items default
+        to "Other"; existing item categories are preserved), and
       - the exact multi-sheet layout produced by /export/excel — one
         sheet per category (category taken from the sheet name, since
         those sheets have no category column), plus a "Summary" sheet
@@ -296,17 +297,23 @@ async def import_excel(
     aliases = {
         "category":"category","category *":"category",
         "no":"part_code","no *":"part_code","part_code":"part_code",
+        "legacy code":"part_code","legacy code *":"part_code",
         "old no":"old_code","old code":"old_code","previous no":"old_code","previous code":"old_code",
+        "old legacy code":"old_code",
         "part item":"name","part item *":"name","name":"name",
+        "legacy item name":"name","legacy item name *":"name",
+        "kd material code":"kd_code","kd code":"kd_code",
+        "kd material name":"kd_name","kd name":"kd_name",
         "description":"description",
         "quantity":"quantity","quantity *":"quantity","qty":"quantity",
         "rack no":"location","rack":"location","location":"location",
         "use at":"used_on","used at":"used_on",
         "unit price (rm)":"unit_cost","unit price":"unit_cost","price (rm)":"unit_cost",
-        "total amount(rm)":"_skip","total amount (rm)":"_skip","total":"_skip",
+        "total amount(rm)":"_skip","total amount (rm)":"_skip","total amount":"_skip","total":"_skip",
         "barcode":"barcode",
         "threshold":"reorder_level","thereshold":"reorder_level",
         "threshold *":"reorder_level","min stock":"reorder_level",
+        "threshold value":"reorder_level","threshold value *":"reorder_level",
         "status(enough/topup)":"_skip","status":"_skip",
         "supplier":"supplier","unit":"unit",
         "critical":"is_critical","critical (yes/no)":"is_critical","always critical":"is_critical",
@@ -315,7 +322,8 @@ async def import_excel(
     def find_header_row(ws):
         for row in ws.iter_rows(min_row=1, max_row=10):
             vals = [str(c.value or "").strip().lower() for c in row]
-            if any(v in ("no","no *","part item","part item *","part_code") for v in vals):
+            if any(v in ("no","no *","part item","part item *","part_code",
+                         "legacy code","legacy code *","legacy item name","legacy item name *") for v in vals):
                 return row[0].row
         return None
 
@@ -347,14 +355,11 @@ async def import_excel(
     if not data_sheets:
         raise HTTPException(400,
             "Cannot find a valid header row in any sheet. Make sure a header row has "
-            "columns: No, Part Item, Quantity, Threshold — like the exported file or the import template.")
+            "columns: Legacy Code, Legacy Item Name, Quantity, Threshold Value — like the exported file or the import template.")
 
     existing = {p.part_code: p for p in (await db.execute(select(SparePart))).scalars().all()}
-    # Default categories — admin/manager-managed, shown first in dropdowns.
-    # Any category found in the Excel file that ISN'T in this list is not
-    # discarded or forced into "Other" — it's kept exactly as written and
-    # simply becomes a new category going forward (see matching logic below).
-    valid_cats = set(DEFAULT_CATEGORIES)
+    # Default categories are shown first in dropdowns. Unknown imported
+    # categories are retained as written and become additional options.
 
     inserted, updated, renamed, skipped = 0, 0, 0, []
 
@@ -373,7 +378,8 @@ async def import_excel(
         # the sheet itself IS the category (matches export's one-sheet-per-
         # category convention). Sheets from the flat import template DO have
         # a "category" column, which takes priority per row when present.
-        sheet_category_fallback = ws.title.strip() if "category" not in col_map else None
+        sheet_category_fallback = ("Other" if ws.title.strip().lower() == "inventory" else ws.title.strip()) if "category" not in col_map else None
+        has_category_context = "category" in col_map or ws.title.strip().lower() != "inventory"
 
         for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
             if all(v is None or str(v).strip()=='' for v in rv): continue
@@ -386,20 +392,31 @@ async def import_excel(
             # data-quality problem, it's just not a part row.
             if raw_no.strip().upper() == "TOTAL":
                 continue
+            # Skip the template's grey hint row ("Unique legacy part number e.g. ...")
+            # that sits right under the header — it is instructions, not a part.
+            if raw_no.strip().lower().startswith(("unique legacy part number","unique part number")):
+                continue
 
             if not raw_no:
-                skipped.append({"sheet":ws.title,"reason":"Missing part No"}); continue
+                skipped.append({"sheet":ws.title,"reason":"Missing Legacy Code"}); continue
             if not name:
-                skipped.append({"sheet":ws.title,"part_code":raw_no,"reason":"Missing Part Item name"}); continue
+                skipped.append({"sheet":ws.title,"part_code":raw_no,"reason":"Missing Legacy Item Name"}); continue
 
             cat_raw  = gcol(rv,col_map,"category") or sheet_category_fallback or "Other"
             category = cat_raw.strip()
-            for vc in valid_cats:
-                # If it's a close/fuzzy match to one of the default categories,
-                # normalize it to that exact default spelling (so "bearings"
-                # and "Bearing" don't become two different categories).
-                if vc.lower()==category.lower() or vc.lower() in category.lower():
-                    category=vc; break
+            category_key = category.lower()
+            if category_key == "belt and chain":
+                category = "Chain" if any(term in name.lower() for term in ("chain", "link")) else "Belt"
+            else:
+                category_aliases = {
+                    "lubricats and grease": "Lubricants and Grease",
+                    "sensors and instrumentation": "Sensor and Instrument",
+                    "sensor and instrumentation": "Sensor and Instrument",
+                    "bearings": "Bearing",
+                }
+                category = category_aliases.get(category_key, next(
+                    (vc for vc in DEFAULT_CATEGORIES if vc.lower() == category_key), category
+                ))
             # Anything that doesn't match a default category is kept exactly as
             # typed (or as named on the sheet) — it simply becomes a new
             # category that will show up everywhere (filters, dropdowns).
@@ -422,6 +439,8 @@ async def import_excel(
             location      = gcol(rv,col_map,"location")     or None
             used_on       = gcol(rv,col_map,"used_on")      or None
             barcode       = gcol(rv,col_map,"barcode")      or None
+            kd_code       = gcol(rv,col_map,"kd_code")      or None
+            kd_name       = gcol(rv,col_map,"kd_name")      or None
             supplier      = gcol(rv,col_map,"supplier")     or None
             unit          = gcol(rv,col_map,"unit")         or "pcs"
             critical_raw  = gcol(rv,col_map,"is_critical")  or ""
@@ -447,17 +466,23 @@ async def import_excel(
                 db.add(p)
                 action = "insert"
 
+            # Columns missing from the sheet leave the stored value alone
+            # (so re-importing a file that has fewer columns can't wipe data);
+            # a new part always gets the defaults.
+            is_new = action == "insert"
             p.name             = name
-            p.category         = category
-            p.description      = description
-            p.quantity_on_hand = qty
-            p.reorder_level    = reorder_level
+            if has_category_context or is_new: p.category = category
+            if "description" in col_map or is_new: p.description = description
+            if "quantity" in col_map or is_new:      p.quantity_on_hand = qty
+            if "reorder_level" in col_map or is_new: p.reorder_level = reorder_level
             if unit_cost  is not None: p.unit_cost = unit_cost
             if location:  p.location  = location
             if supplier:  p.supplier  = supplier
             p.unit = unit
-            _safe_set(p,"barcode",       barcode)
-            _safe_set(p,"used_on_asset", used_on)
+            if "barcode" in col_map or is_new:  _safe_set(p,"barcode",       barcode)
+            if "used_on" in col_map or is_new:  _safe_set(p,"used_on_asset", used_on)
+            if "kd_code" in col_map or is_new:  _safe_set(p,"kd_material_code", kd_code)
+            if "kd_name" in col_map or is_new:  _safe_set(p,"kd_material_name", kd_name)
             if critical_val is not None: _safe_set(p,"is_critical", critical_val)
             p.updated_at = datetime.utcnow()
             existing[part_code] = p
@@ -521,10 +546,10 @@ async def export_excel(
     wb = Workbook()
     wb.remove(wb.active)  # we'll add Summary first, then one sheet per category
 
-    headers = ["No","Part Item","Description","Quantity",
-               "Rack No","Use at","Unit Price (RM)","Total Amount(RM)",
-               "Barcode","Threshold","Status(Enough/Topup)"]
-    col_widths = [16,28,32,10,14,24,14,16,16,12,18]
+    headers = ["Legacy Code","Legacy Item Name","KD Material Code","KD Material Name",
+               "Quantity","Rack No","Use At","Unit Price (RM)","Total Amount (RM)",
+               "Threshold Value"]
+    col_widths = [16,28,18,30,10,14,24,14,16,16]
 
     sheet_refs: list[tuple[str, str, int]] = []  # (category, sheet_name, last_data_row) for the Summary sheet
 
@@ -538,7 +563,7 @@ async def export_excel(
 
         ws = wb.create_sheet(sheet_name)
 
-        ws.merge_cells("A1:K1")
+        ws.merge_cells("A1:J1")
         ws["A1"] = f"{cat}  |  CMMS Pro Inventory  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(cat_parts)} parts"
         ws["A1"].font = title_font
         ws["A1"].fill = hdr_fill
@@ -561,37 +586,37 @@ async def export_excel(
             else: enough_n+=1
             row_data = [
                 p.part_code, p.name,
-                p.description or "",
+                getattr(p,"kd_material_code",None) or "",
+                getattr(p,"kd_material_name",None) or "",
                 qty,
                 p.location or "",
                 getattr(p,"used_on_asset",None) or "",
-                p.unit_cost if p.unit_cost else "",
-                None,  # Total Amount(RM) — filled as a formula below
-                getattr(p,"barcode",None) or "",
-                reord, sts,
+                p.unit_cost if p.unit_cost else None,
+                None,  # Total Amount (RM) — filled as a formula below
+                reord,
             ]
-            fill = enough if sts=="Enough" else topup
+            fill = enough if sts=="Enough" else topup   # row colour = stock status
             for c,v in enumerate(row_data,1):
                 cell=ws.cell(row=r,column=c,value=v)
                 cell.font=data_font; cell.fill=fill; cell.border=border
-                cell.alignment=Alignment(vertical="center",horizontal="right" if c in(4,7,8,10) else "left")
-            # Total Amount(RM) = Quantity * Unit Price, as a live formula
-            ws.cell(row=r,column=8,value=f"=D{r}*G{r}").font=data_font
-            ws.cell(row=r,column=8).fill=fill
-            ws.cell(row=r,column=8).border=border
-            ws.cell(row=r,column=8).alignment=Alignment(vertical="center",horizontal="right")
+                cell.alignment=Alignment(vertical="center",horizontal="right" if c in(5,8,9,10) else "left")
+            # Total Amount (RM) = Quantity * Unit Price, as a live formula
+            ws.cell(row=r,column=9,value=f"=E{r}*H{r}").font=data_font
+            ws.cell(row=r,column=9).fill=fill
+            ws.cell(row=r,column=9).border=border
+            ws.cell(row=r,column=9).alignment=Alignment(vertical="center",horizontal="right")
             ws.row_dimensions[r].height=18
 
         last_data_row = first_data_row + len(cat_parts) - 1 if cat_parts else first_data_row - 1
         foot = last_data_row + 1
         ws.cell(row=foot,column=1,value="TOTAL").font=bold_font
         if cat_parts:
-            ws.cell(row=foot,column=4,value=f"=SUM(D{first_data_row}:D{last_data_row})").font=bold_font
-            ws.cell(row=foot,column=8,value=f"=SUM(H{first_data_row}:H{last_data_row})").font=bold_font
+            ws.cell(row=foot,column=5,value=f"=SUM(E{first_data_row}:E{last_data_row})").font=bold_font
+            ws.cell(row=foot,column=9,value=f"=SUM(I{first_data_row}:I{last_data_row})").font=bold_font
         else:
-            ws.cell(row=foot,column=4,value=0).font=bold_font
-            ws.cell(row=foot,column=8,value=0).font=bold_font
-        ws.cell(row=foot,column=11,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
+            ws.cell(row=foot,column=5,value=0).font=bold_font
+            ws.cell(row=foot,column=9,value=0).font=bold_font
+        ws.cell(row=foot,column=2,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
         ws.row_dimensions[foot].height=20
 
         for i,w in enumerate(col_widths,1):
@@ -621,8 +646,8 @@ async def export_excel(
         r = first_summary_row + i
         summary.cell(row=r,column=1,value=cat).font=data_font
         # Pull totals live from each category sheet via cross-sheet formula references
-        summary.cell(row=r,column=2,value=f"='{sheet_name}'!D{foot_row}").font=data_font
-        summary.cell(row=r,column=3,value=f"='{sheet_name}'!H{foot_row}").font=data_font
+        summary.cell(row=r,column=2,value=f"='{sheet_name}'!E{foot_row}").font=data_font
+        summary.cell(row=r,column=3,value=f"='{sheet_name}'!I{foot_row}").font=data_font
         summary.cell(row=r,column=4,value=len(by_category[cat])).font=data_font
         for c in (1,2,3,4):
             cell=summary.cell(row=r,column=c)
@@ -777,6 +802,8 @@ async def create_part(
     )
     _safe_set(p,"barcode",      body.barcode)
     _safe_set(p,"used_on_asset",body.used_on_asset)
+    _safe_set(p,"kd_material_code",(body.kd_material_code or "").strip() or None)
+    _safe_set(p,"kd_material_name",(body.kd_material_name or "").strip() or None)
     _safe_set(p,"is_critical",  bool(body.is_critical))
     db.add(p); await db.flush(); await db.refresh(p)
     await ws_manager.broadcast_event(ROOM,"inventory.created",{"id":str(p.id),"name":p.name})
@@ -802,7 +829,8 @@ async def update_part(
         if clash:
             raise HTTPException(400, f"Code '{new_code}' is already in use by {clash.name}")
     for k,v in updates.items():
-        if k in("barcode","used_on_asset"): _safe_set(p,k,v)
+        if k in("kd_material_code","kd_material_name"): _safe_set(p,k,(v or "").strip() or None)
+        elif k in("barcode","used_on_asset"): _safe_set(p,k,v)
         else:
             try: setattr(p,k,v)
             except: pass
@@ -858,7 +886,13 @@ async def upload_part_photo(
     _require_admin_or_manager(current_user)
     p = await _get(part_id, db)
 
-    saved = save_photo(body.data, f"parts/{part_id}")
+    # Inventory reference photos are compact: the lightbox image is capped at
+    # 800px and the table thumbnail at 240px to limit persistent disk usage.
+    saved = save_photo(
+        body.data, f"parts/{part_id}",
+        full_max_dim=800, full_quality=65,
+        thumb_max_dim=240, thumb_quality=55,
+    )
     if not saved:
         raise HTTPException(400, "Couldn't read that image — please try a different photo")
 

@@ -58,7 +58,14 @@ def _resized_jpeg_bytes(im: Image.Image, max_dim: int, quality: int) -> bytes:
     return buf.getvalue()
 
 
-def save_photo(data_url: str, subdir: str) -> Optional[dict]:
+def save_photo(
+    data_url: str,
+    subdir: str,
+    full_max_dim: int = FULL_MAX_DIM,
+    full_quality: int = FULL_QUALITY,
+    thumb_max_dim: int = THUMB_MAX_DIM,
+    thumb_quality: int = THUMB_QUALITY,
+) -> Optional[dict]:
     """
     Decodes a base64 data URL, writes a compressed full-size JPEG and a
     small thumbnail JPEG under PHOTOS_DIR/subdir/, and returns the relative
@@ -78,8 +85,8 @@ def save_photo(data_url: str, subdir: str) -> Optional[dict]:
     abs_dir = os.path.join(PHOTOS_DIR, rel_dir)
     os.makedirs(abs_dir, exist_ok=True)
 
-    full_bytes = _resized_jpeg_bytes(im, FULL_MAX_DIM, FULL_QUALITY)
-    thumb_bytes = _resized_jpeg_bytes(im, THUMB_MAX_DIM, THUMB_QUALITY)
+    full_bytes = _resized_jpeg_bytes(im, full_max_dim, full_quality)
+    thumb_bytes = _resized_jpeg_bytes(im, thumb_max_dim, thumb_quality)
 
     full_name  = f"{photo_id}_full.jpg"
     thumb_name = f"{photo_id}_thumb.jpg"

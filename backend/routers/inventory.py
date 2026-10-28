@@ -14,16 +14,15 @@ from datetime import datetime, timedelta
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from db import get_db
-from models import SparePart
-from auth import get_current_user, forbid_viewer
-from models import User
+from models import AssetBOMItem, PartsUsed, SparePart, User, UserRole
+from auth import get_current_user, forbid_viewer, verify_password
 from websocket_manager import ws_manager
 from photo_storage import save_photo, delete_photo_files
 from stock_status import compute_stock_status, weighted_avg_cost
@@ -80,6 +79,10 @@ class PartIn(BaseModel):
     kd_material_name: Optional[str]   = None
     unit:             Optional[str]   = "pcs"
     is_critical:      Optional[bool]  = None
+
+
+class DeleteAllInventoryRequest(BaseModel):
+    password: str
 
 
 def _dict(p: SparePart, show_cost: bool = True) -> dict:
@@ -149,6 +152,43 @@ def _safe_set(obj, field: str, value):
 # ══════════════════════════════════════════════════════════════════════════
 # STATIC ROUTES — must be declared BEFORE /{part_id}
 # ══════════════════════════════════════════════════════════════════════════
+
+@router.post("/delete-all")
+async def delete_all_inventory(
+    body: DeleteAllInventoryRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Permanently remove all inventory data after an admin password check."""
+    if current_user.role != UserRole.admin:
+        raise HTTPException(403, "Only admins can delete all inventory")
+    if not verify_password(body.password, current_user.hashed_password):
+        raise HTTPException(403, "Incorrect password")
+
+    parts = (await db.execute(select(SparePart))).scalars().all()
+    categories = {p.category for p in parts if p.category}
+    photo_paths = [
+        path
+        for p in parts
+        for path in (p.photo_thumb_path, p.photo_full_path)
+        if path
+    ]
+
+    usage_count = await db.execute(delete(PartsUsed))
+    bom_count = await db.execute(delete(AssetBOMItem))
+    await db.execute(delete(SparePart))
+    await db.flush()
+
+    if photo_paths:
+        background_tasks.add_task(delete_photo_files, *photo_paths)
+    await ws_manager.broadcast_event(ROOM, "inventory.purged", {"deleted": len(parts)})
+    return {
+        "deleted_items": len(parts),
+        "deleted_categories": len(categories),
+        "deleted_usage_records": usage_count.rowcount or 0,
+        "deleted_bom_entries": bom_count.rowcount or 0,
+    }
 
 @router.get("/import/template")
 async def download_template(_: User = Depends(get_current_user)):
@@ -690,12 +730,9 @@ async def list_categories(
     db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user),
 ):
     """
-    Always includes the default category list (so they're selectable even
-    before any part uses them yet), plus any additional categories that
-    already exist in the data — e.g. ones introduced by an Excel import
-    that didn't match a default category. Default categories are listed
-    first, in their defined order; anything extra is appended after,
-    alphabetically.
+    Includes the default category list while inventory exists, plus any
+    additional categories present on inventory records. Returns no categories
+    after a full inventory purge.
     """
     result = await db.execute(
         select(SparePart.category)
@@ -703,6 +740,9 @@ async def list_categories(
         .distinct()
     )
     existing = {row[0] for row in result.all()}
+    has_inventory = (await db.execute(select(SparePart.id).limit(1))).scalar_one_or_none()
+    if has_inventory is None:
+        return []
     extra = sorted(existing - set(DEFAULT_CATEGORIES))
     return DEFAULT_CATEGORIES + extra
 

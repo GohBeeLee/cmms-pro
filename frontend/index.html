@@ -4021,6 +4021,7 @@ function Assets(){
 function InventoryAndStock(){
   const {user}=useAuth();
   const canManage=user&&(user.role==='admin'||user.role==='manager');
+  const isAdmin=user&&user.role==='admin';
   const isProduction=user&&user.role==='production';
   const [tab,setTab]=useState('parts'); // 'parts' | 'stocktake' | 'history'
   return (
@@ -4049,7 +4050,7 @@ function InventoryAndStock(){
           ))}
         </div>
       </div>
-      {tab==='parts'&&<PartsAndScannerTab canManage={canManage} isProduction={isProduction}/>}
+      {tab==='parts'&&<PartsAndScannerTab canManage={canManage} isAdmin={isAdmin} isProduction={isProduction}/>}
       {tab==='stocktake'&&canManage&&<StockTakeTab/>}
       {tab==='history'&&<StockHistoryTab/>}
     </div>
@@ -4098,7 +4099,7 @@ function nextPartCode(category,parts,name=''){
   return prefix+'-'+String(max+1).padStart(width,'0');
 }
 
-function PartsAndScannerTab({canManage,isProduction}){
+function PartsAndScannerTab({canManage,isAdmin,isProduction}){
   const [parts,setParts]=useState([]);
   // Unfiltered, all-categories snapshot used ONLY for auto-generating the
   // next part code — `parts` above can be narrowed by catFilter, and using
@@ -4118,6 +4119,9 @@ function PartsAndScannerTab({canManage,isProduction}){
   const [importModal,setImportModal]=useState(false);
   const [importResult,setImportResult]=useState(null);
   const [importing,setImporting]=useState(false);
+  const [deleteAllOpen,setDeleteAllOpen]=useState(false);
+  const [deleteAllPassword,setDeleteAllPassword]=useState('');
+  const [deleteAllSubmitting,setDeleteAllSubmitting]=useState(false);
   const importRef=useRef(null);
   // ── Photo upload ──
   const [photoModal,setPhotoModal]=useState(null); // part being photographed
@@ -4233,6 +4237,19 @@ function PartsAndScannerTab({canManage,isProduction}){
     if(!confirm('Delete part "'+name+'"?')) return;
     try{await api('/inventory/'+id,{method:'DELETE'});toast('Deleted');load();}
     catch(e){toast(e.message,'err');}
+  }
+
+  async function deleteAllInventory(){
+    if(!isAdmin||!deleteAllPassword) return;
+    setDeleteAllSubmitting(true);
+    try{
+      const result=await api('/inventory/delete-all',{method:'POST',body:JSON.stringify({password:deleteAllPassword})});
+      toast(`Deleted ${result.deleted_items} items and ${result.deleted_categories} categories. Cleared ${result.deleted_usage_records} parts-used links and ${result.deleted_bom_entries} BOM entries; movement history was preserved.`);
+      setDeleteAllOpen(false);setDeleteAllPassword('');
+      setCatFilter('');setSearch('');setLowOnly(false);setCriticalOnly(false);
+      await load();
+    }catch(e){toast(e.message,'err');}
+    finally{setDeleteAllSubmitting(false);}
   }
 
   async function handleImport(e){
@@ -4582,6 +4599,23 @@ function PartsAndScannerTab({canManage,isProduction}){
           })()}
         </Modal>
       )}
+      {deleteAllOpen&&isAdmin&&(
+        <Modal title="Delete all inventory?" onClose={()=>{if(!deleteAllSubmitting){setDeleteAllOpen(false);setDeleteAllPassword('');}}}>
+          <div style={{fontSize:'13px',color:'#475569',lineHeight:1.6,marginBottom:'14px'}}>
+            This permanently deletes every inventory item and its category options, plus linked parts-used records and asset BOM entries. Stock movement history is preserved. This cannot be undone.
+          </div>
+          <label className="lbl">Admin password</label>
+          <input className="inp" type="password" autoComplete="current-password" value={deleteAllPassword}
+            onChange={e=>setDeleteAllPassword(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')deleteAllInventory();}}
+            placeholder="Enter your password to confirm"/>
+          <div style={{display:'flex',justifyContent:'flex-end',gap:'8px',marginTop:'16px'}}>
+            <button className="btn btn-secondary" disabled={deleteAllSubmitting} onClick={()=>{setDeleteAllOpen(false);setDeleteAllPassword('');}}>Cancel</button>
+            <button className="btn" style={{background:'#dc2626',color:'#fff',fontWeight:700}} disabled={!deleteAllPassword||deleteAllSubmitting} onClick={deleteAllInventory}>
+              {deleteAllSubmitting?'Deleting…':'Permanently Delete All'}
+            </button>
+          </div>
+        </Modal>
+      )}
       {/* Action bar */}
       <div style={{display:'flex',justifyContent:'flex-end',marginBottom:'16px'}}>
         <div style={{display:'flex',gap:'8px',flexWrap:'wrap'}}>
@@ -4608,6 +4642,9 @@ function PartsAndScannerTab({canManage,isProduction}){
                 const qs=(catFilter?'?category='+encodeURIComponent(catFilter):'')+(lowOnly?(catFilter?'&':'?')+'low_stock=true':'');
                 downloadFile('/inventory/export/excel'+qs,'Inventory.xlsx');
               }}>📊 Export Excel</button>
+            {isAdmin&&<button className="btn" style={{fontSize:'13px',background:'#fef2f2',color:'#b91c1c',border:'1px solid #fecaca',fontWeight:700}} onClick={()=>{setDeleteAllPassword('');setDeleteAllOpen(true);}}>
+              🗑️ Delete All Inventory
+            </button>}
             <button className="btn btn-primary" style={{fontSize:'13px'}} onClick={()=>{setEditPart(null);setForm(emptyForm);setFormPhoto('');setFormPhotoIsNew(false);setCodeManual(false);setModal(true);}}>
               + Add Part
             </button>

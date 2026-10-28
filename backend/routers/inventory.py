@@ -30,18 +30,42 @@ from stock_status import compute_stock_status, weighted_avg_cost
 router = APIRouter(prefix="/inventory", tags=["inventory"], dependencies=[Depends(forbid_viewer)])
 ROOM  = "inventory"
 
-# Default spare-part categories — always offered in dropdowns/filters even
-# before any part exists in them yet. Categories found in an Excel import
-# that don't match one of these are NOT discarded or forced into "Other" —
-# they're kept exactly as written and simply become additional categories.
+# Canonical spare-part categories and their legacy-code prefixes.
 DEFAULT_CATEGORIES = [
     "Bearing","Belt","Chain","Dust Collector Parts",
     "Electrical Components","Electronic Components","Filter",
     "Fastener and Hardware","Lubricants and Grease","Pneumatic Components",
-    "Pneumatic Fitting","Sensor and Instrument","Wear Parts",
-    "Production Cutter (Edging Machine)","Production Cutter",
+    "Pneumatic Fittings","Sensor and Instruments","Wear Parts",
+    "Production Cutter (EDGING)","Production Cutter (BIT)",
+    "Production Cutter (SAWBLADE)",
 ]
 _CATEGORY_ORDER = {c: i for i, c in enumerate(DEFAULT_CATEGORIES)}
+LEGACY_CODE_PREFIX_CATEGORIES = {
+    "BEA": "Bearing",
+    "BNC-BELT": "Belt",
+    "BNC-CHAIN": "Chain",
+    "DUSTC": "Dust Collector Parts",
+    "ELEC-EL": "Electrical Components",
+    "ELEC-EC": "Electronic Components",
+    "FIL": "Filter",
+    "FASAH": "Fastener and Hardware",
+    "LUB": "Lubricants and Grease",
+    "PNEU": "Pneumatic Components",
+    "P-FITTING": "Pneumatic Fittings",
+    "SEN-INST": "Sensor and Instruments",
+    "WEAR": "Wear Parts",
+    "PC-EDGING": "Production Cutter (EDGING)",
+    "PC-BIT": "Production Cutter (BIT)",
+    "PC-SB": "Production Cutter (SAWBLADE)",
+}
+
+
+def _category_from_legacy_code(code: str) -> Optional[str]:
+    normalized = (code or "").strip().upper()
+    for prefix, category in sorted(LEGACY_CODE_PREFIX_CATEGORIES.items(), key=lambda item: len(item[0]), reverse=True):
+        if re.fullmatch(re.escape(prefix) + r"-\d+", normalized):
+            return category
+    return None
 
 
 def _category_sort_key(category: str):
@@ -216,7 +240,7 @@ async def download_template(_: User = Depends(get_current_user)):
     hint_font= Font(name="Arial", italic=True, color="5A6A7A", size=9)
 
     # Row 1 title
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:K1")
     ws["A1"] = "CMMS Pro — Inventory Import Template"
     ws["A1"].font      = Font(name="Arial", bold=True, size=13, color="FFFFFF")
     ws["A1"].fill      = hdr_fill
@@ -224,7 +248,7 @@ async def download_template(_: User = Depends(get_current_user)):
     ws.row_dimensions[1].height = 30
 
     # Row 2 note
-    ws.merge_cells("A2:J2")
+    ws.merge_cells("A2:K2")
     ws["A2"] = (
         "Required columns (*): Legacy Code, Legacy Item Name, Quantity, Threshold Value.  "
         "Leave 'Total Amount (RM)' blank — system calculates automatically."
@@ -241,6 +265,7 @@ async def download_template(_: User = Depends(get_current_user)):
         ("Legacy Item Name *",   True,  "Legacy part name e.g. Bearing 6205, Fuse 10A"),
         ("KD Material Code",     False, "KD material code (optional)"),
         ("KD Material Name",     False, "KD material name (optional)"),
+        ("Description",          False, "Item specification or additional details (optional)"),
         ("Quantity *",           True,  "Current stock on hand — number only"),
         ("Rack No",              False, "Storage location e.g. Rack A1, Shelf B3"),
         ("Use At",               False, "Machine or asset name this part is used on"),
@@ -263,33 +288,33 @@ async def download_template(_: User = Depends(get_current_user)):
     ws.row_dimensions[4].height = 24
     ws.row_dimensions[5].height = 40
 
-    # Sample rows follow the same ten-column order as the import/export format.
+    # Sample rows follow the same eleven-column order as the import/export format.
     samples = [
-        ["E-001","Fuse 10A",           "KD-100001","Fuse 10A 250V Glass",        50,"Rack A1","All machines",    0.80,"",10],
-        ["E-002","Fuse 16A",           "KD-100002","Fuse 16A 250V Glass",        30,"Rack A1","Compressor",       1.20,"",10],
-        ["E-003","Contactor 9A",       "KD-100003","Contactor LC1D09 24VDC",      5,"Rack A2","Conveyor Motor",  45.00,"", 2],
-        ["M-001","Bearing 6205",       "KD-200001","Bearing Deep Groove 6205",   20,"Shelf B1","Pump A",           8.50,"", 5],
-        ["M-002","Bearing 6206",       "KD-200002","Bearing Deep Groove 6206",   15,"Shelf B1","Motor #1",         9.20,"", 5],
-        ["M-003","V-Belt A42",         "KD-200003","V-Belt Classical A42",        8,"Shelf B2","Compressor",     12.00,"", 3],
-        ["P-001","SMC Filter Element", "KD-300001","Filter Element AF20-F02",     6,"Rack C1","Pneumatic line",  22.00,"", 2],
-        ["P-002","Solenoid Valve 5/2", "KD-300002","Solenoid Valve SY3120",       4,"Rack C2","Cylinder line",  85.00,"", 2],
-        ["C-001","Cable Tie 300mm",    "KD-400001","Cable Tie Nylon 300mm",     200,"Rack D1","General",          0.05,"",50],
-        ["C-002","WD-40 Spray 400ml",  "KD-400002","WD-40 Multi-use 400ml",      10,"Rack D2","General",         12.00,"", 3],
+        ["BEA-001","Bearing 6205",          "KD-100001","Bearing Deep Groove 6205","25x52mm bearing",20,"Shelf B1","Pump A",          8.50,"", 5],
+        ["BNC-BELT-001","Timing Belt",      "KD-200001","Timing Belt 600mm","Rubber timing belt",8,"Shelf B2","Compressor",     12.00,"", 3],
+        ["BNC-CHAIN-001","Roller Chain",     "KD-300001","Roller Chain 08B","08B drive chain",6,"Shelf B3","Conveyor",       22.00,"", 2],
+        ["DUSTC-001","Filter Bag",           "KD-400001","Dust Collector Filter Bag","Polyester filter bag",10,"Rack C1","Dust Collector",45.00,"", 3],
+        ["ELEC-EL-001","Fuse 10A",           "KD-500001","Fuse 10A 250V Glass","Glass cartridge fuse",50,"Rack A1","All machines",    0.80,"",10],
+        ["ELEC-EC-001","Control Board",      "KD-600001","Electronic Control Board","CNC controller PCB",2,"Rack A2","CNC machine",   120.00,"", 1],
+        ["FIL-001","Air Filter",             "KD-700001","Air Filter Element","Replacement air filter",6,"Rack C2","Pneumatic line", 22.00,"", 2],
+        ["FASAH-001","Bolt M8",              "KD-800001","Hex Bolt M8 × 30","Stainless steel fastener",100,"Rack D1","General",         0.15,"",20],
+        ["LUB-001","Grease",                 "KD-900001","Multipurpose Grease","NLGI-2 multipurpose grease",5,"Rack D2","General",        18.00,"", 2],
+        ["PNEU-001","Solenoid Valve 5/2",     "KD-100002","Solenoid Valve SY3120","5/2-way pneumatic valve",4,"Rack C3","Cylinder line",  85.00,"", 2],
     ]
     alt = [PatternFill("solid",start_color="FFFFFF"), PatternFill("solid",start_color="F7FBFF")]
     for r, row in enumerate(samples, 6):
         for c, v in enumerate(row, 1):
             cell = ws.cell(row=r, column=c, value=v if v != "" else None)
             cell.font = data_font; cell.fill = alt[r%2]; cell.border = border
-            cell.alignment = Alignment(vertical="center", horizontal="right" if c in (5,8,9,10) else "left")
+            cell.alignment = Alignment(vertical="center", horizontal="right" if c in (6,9,10,11) else "left")
         ws.row_dimensions[r].height = 18
     for r in range(16, 56):
-        for c in range(1, 11):
+        for c in range(1, 12):
             ws.cell(row=r,column=c).fill = alt[r%2]
             ws.cell(row=r,column=c).border = border
         ws.row_dimensions[r].height = 18
 
-    for i, w in enumerate([16,28,18,30,10,14,24,14,16,16], 1):
+    for i, w in enumerate([16,28,18,30,34,10,14,24,14,16,16], 1):
         from openpyxl.utils import get_column_letter
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A6"
@@ -310,12 +335,11 @@ async def import_excel(
 ):
     """
     Import inventory from Excel. Accepts BOTH:
-      - a flat import template without a category column (new items default
-        to "Other"; existing item categories are preserved), and
+      - a flat import template, and
       - the exact multi-sheet layout produced by /export/excel — one
-        sheet per category (category taken from the sheet name, since
-        those sheets have no category column), plus a "Summary" sheet
-        that's skipped automatically.
+        sheet per category, plus a "Summary" sheet that's skipped
+        automatically. Category is always derived from the uploaded legacy
+        code prefix; worksheet category values and sheet names are ignored.
     This means a file exported from CMMS Pro can be edited and
     re-imported directly without reshaping it first.
     """
@@ -398,8 +422,8 @@ async def import_excel(
             "columns: Legacy Code, Legacy Item Name, Quantity, Threshold Value — like the exported file or the import template.")
 
     existing = {p.part_code: p for p in (await db.execute(select(SparePart))).scalars().all()}
-    # Default categories are shown first in dropdowns. Unknown imported
-    # categories are retained as written and become additional options.
+    # Default categories are shown first in dropdowns. Imported categories
+    # are derived from the legacy-code index, never from worksheet labels.
 
     inserted, updated, renamed, skipped = 0, 0, 0, []
 
@@ -414,13 +438,6 @@ async def import_excel(
         except: return default
 
     for ws, header_row, col_map in data_sheets:
-        # Sheets from the exported layout have no "category" column at all —
-        # the sheet itself IS the category (matches export's one-sheet-per-
-        # category convention). Sheets from the flat import template DO have
-        # a "category" column, which takes priority per row when present.
-        sheet_category_fallback = ("Other" if ws.title.strip().lower() == "inventory" else ws.title.strip()) if "category" not in col_map else None
-        has_category_context = "category" in col_map or ws.title.strip().lower() != "inventory"
-
         for rv in ws.iter_rows(min_row=header_row+1, values_only=True):
             if all(v is None or str(v).strip()=='' for v in rv): continue
 
@@ -442,24 +459,11 @@ async def import_excel(
             if not name:
                 skipped.append({"sheet":ws.title,"part_code":raw_no,"reason":"Missing Legacy Item Name"}); continue
 
-            cat_raw  = gcol(rv,col_map,"category") or sheet_category_fallback or "Other"
-            category = cat_raw.strip()
-            category_key = category.lower()
-            if category_key == "belt and chain":
-                category = "Chain" if any(term in name.lower() for term in ("chain", "link")) else "Belt"
-            else:
-                category_aliases = {
-                    "lubricats and grease": "Lubricants and Grease",
-                    "sensors and instrumentation": "Sensor and Instrument",
-                    "sensor and instrumentation": "Sensor and Instrument",
-                    "bearings": "Bearing",
-                }
-                category = category_aliases.get(category_key, next(
-                    (vc for vc in DEFAULT_CATEGORIES if vc.lower() == category_key), category
-                ))
-            # Anything that doesn't match a default category is kept exactly as
-            # typed (or as named on the sheet) — it simply becomes a new
-            # category that will show up everywhere (filters, dropdowns).
+            category = _category_from_legacy_code(raw_no)
+            if not category:
+                skipped.append({"sheet":ws.title,"part_code":raw_no,
+                    "reason":"Legacy Code does not match a configured category index"})
+                continue
 
             # Use the "No" column exactly as written in the spreadsheet as the
             # part_code — no auto-generated category prefix, no rewriting.
@@ -511,7 +515,7 @@ async def import_excel(
             # a new part always gets the defaults.
             is_new = action == "insert"
             p.name             = name
-            if has_category_context or is_new: p.category = category
+            p.category         = category
             if "description" in col_map or is_new: p.description = description
             if "quantity" in col_map or is_new:      p.quantity_on_hand = qty
             if "reorder_level" in col_map or is_new: p.reorder_level = reorder_level
@@ -587,9 +591,9 @@ async def export_excel(
     wb.remove(wb.active)  # we'll add Summary first, then one sheet per category
 
     headers = ["Legacy Code","Legacy Item Name","KD Material Code","KD Material Name",
-               "Quantity","Rack No","Use At","Unit Price (RM)","Total Amount (RM)",
-               "Threshold Value"]
-    col_widths = [16,28,18,30,10,14,24,14,16,16]
+               "Description","Quantity","Rack No","Use At","Unit Price (RM)",
+               "Total Amount (RM)","Threshold Value"]
+    col_widths = [16,28,18,30,34,10,14,24,14,16,16]
 
     sheet_refs: list[tuple[str, str, int]] = []  # (category, sheet_name, last_data_row) for the Summary sheet
 
@@ -603,7 +607,7 @@ async def export_excel(
 
         ws = wb.create_sheet(sheet_name)
 
-        ws.merge_cells("A1:J1")
+        ws.merge_cells("A1:K1")
         ws["A1"] = f"{cat}  |  CMMS Pro Inventory  |  {datetime.utcnow().strftime('%d %b %Y %H:%M')} UTC  |  {len(cat_parts)} parts"
         ws["A1"].font = title_font
         ws["A1"].fill = hdr_fill
@@ -628,6 +632,7 @@ async def export_excel(
                 p.part_code, p.name,
                 getattr(p,"kd_material_code",None) or "",
                 getattr(p,"kd_material_name",None) or "",
+                p.description or "",
                 qty,
                 p.location or "",
                 getattr(p,"used_on_asset",None) or "",
@@ -639,23 +644,23 @@ async def export_excel(
             for c,v in enumerate(row_data,1):
                 cell=ws.cell(row=r,column=c,value=v)
                 cell.font=data_font; cell.fill=fill; cell.border=border
-                cell.alignment=Alignment(vertical="center",horizontal="right" if c in(5,8,9,10) else "left")
+                cell.alignment=Alignment(vertical="center",horizontal="right" if c in(6,9,10,11) else "left")
             # Total Amount (RM) = Quantity * Unit Price, as a live formula
-            ws.cell(row=r,column=9,value=f"=E{r}*H{r}").font=data_font
-            ws.cell(row=r,column=9).fill=fill
-            ws.cell(row=r,column=9).border=border
-            ws.cell(row=r,column=9).alignment=Alignment(vertical="center",horizontal="right")
+            ws.cell(row=r,column=10,value=f"=F{r}*I{r}").font=data_font
+            ws.cell(row=r,column=10).fill=fill
+            ws.cell(row=r,column=10).border=border
+            ws.cell(row=r,column=10).alignment=Alignment(vertical="center",horizontal="right")
             ws.row_dimensions[r].height=18
 
         last_data_row = first_data_row + len(cat_parts) - 1 if cat_parts else first_data_row - 1
         foot = last_data_row + 1
         ws.cell(row=foot,column=1,value="TOTAL").font=bold_font
         if cat_parts:
-            ws.cell(row=foot,column=5,value=f"=SUM(E{first_data_row}:E{last_data_row})").font=bold_font
-            ws.cell(row=foot,column=9,value=f"=SUM(I{first_data_row}:I{last_data_row})").font=bold_font
+            ws.cell(row=foot,column=6,value=f"=SUM(F{first_data_row}:F{last_data_row})").font=bold_font
+            ws.cell(row=foot,column=10,value=f"=SUM(J{first_data_row}:J{last_data_row})").font=bold_font
         else:
-            ws.cell(row=foot,column=5,value=0).font=bold_font
-            ws.cell(row=foot,column=9,value=0).font=bold_font
+            ws.cell(row=foot,column=6,value=0).font=bold_font
+            ws.cell(row=foot,column=10,value=0).font=bold_font
         ws.cell(row=foot,column=2,value=f"Enough: {enough_n}   Topup: {topup_n}").font=Font(name="Arial",bold=True,color="1E3A5F")
         ws.row_dimensions[foot].height=20
 
@@ -686,8 +691,8 @@ async def export_excel(
         r = first_summary_row + i
         summary.cell(row=r,column=1,value=cat).font=data_font
         # Pull totals live from each category sheet via cross-sheet formula references
-        summary.cell(row=r,column=2,value=f"='{sheet_name}'!E{foot_row}").font=data_font
-        summary.cell(row=r,column=3,value=f"='{sheet_name}'!I{foot_row}").font=data_font
+        summary.cell(row=r,column=2,value=f"='{sheet_name}'!F{foot_row}").font=data_font
+        summary.cell(row=r,column=3,value=f"='{sheet_name}'!J{foot_row}").font=data_font
         summary.cell(row=r,column=4,value=len(by_category[cat])).font=data_font
         for c in (1,2,3,4):
             cell=summary.cell(row=r,column=c)

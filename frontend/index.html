@@ -493,10 +493,10 @@ function normalizeSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,''); }
 // (Avery L7159-style 3×8 grid); the others print one label per page for a
 // thermal / label printer.
 const LABEL_LAYOUTS = {
-  a4:     {name:'A4 sticker sheet · 3×8 (63.5 × 33.9 mm)', w:63.5, h:33.9, sheet:true, cols:3, rows:8, gapX:2.5, padTop:12.9, padLeft:7.2, nameFs:9, smallFs:7, barH:8.5},
-  l60x40: {name:'Label printer · 60 × 40 mm',               w:60,   h:40,   nameFs:10, smallFs:7.5, barH:11},
-  l80x60: {name:'Label printer · 80 × 60 mm',               w:80,   h:60,   nameFs:12, smallFs:9, barH:18},
-  l50x30: {name:'Label printer · 50 × 30 mm',               w:50,   h:30,   nameFs:8.5, smallFs:6.5, barH:8},
+  a4:     {name:'A4 sticker sheet · 3×8 (63.5 × 33.9 mm)', w:63.5, h:33.9, sheet:true, cols:3, rows:8, gapX:2.5, padTop:12.9, padLeft:7.2, nameFs:10.5, smallFs:7, barH:8.5},
+  l60x40: {name:'Label printer · 60 × 40 mm',               w:60,   h:40,   nameFs:12, smallFs:7.5, barH:11},
+  l80x60: {name:'Label printer · 80 × 60 mm',               w:80,   h:60,   nameFs:15, smallFs:9, barH:18},
+  l50x30: {name:'Label printer · 50 × 30 mm',               w:50,   h:30,   nameFs:9.5, smallFs:6.5, barH:8},
 };
 
 function escHtml(s){
@@ -534,6 +534,7 @@ function buildLabelsHtml(items, layoutKey){
     catch(e){ bars='<div class="bad">Cannot encode: '+escHtml(value)+'</div>'; }
     return '<div class="label">'
       +'<div class="name">'+escHtml(p.name)+'</div>'
+      +'<div class="legacy"><b>Legacy Code:</b> '+escHtml(p.part_code)+'</div>'
       +(p.description?'<div class="desc">'+escHtml(p.description)+'</div>':'')
       +'<div class="bc">'+bars+'<div class="code">'+escHtml(value)+'</div></div>'
       +'</div>';
@@ -556,6 +557,7 @@ function buildLabelsHtml(items, layoutKey){
     .bar button{background:#16a34a;color:#fff;border:0;border-radius:6px;padding:8px 18px;font-size:14px;font-weight:700;cursor:pointer}
     .label{width:${L.w}mm;height:${L.h}mm;padding:${pad}mm;overflow:hidden;display:flex;flex-direction:column;background:#fff;position:relative}
     .name{font-size:${L.nameFs}pt;font-weight:700;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .legacy{font-size:${L.smallFs}pt;line-height:1.1;margin-top:0.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .desc,.use{font-size:${L.smallFs}pt;line-height:1.2;margin-top:0.6mm;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .use{-webkit-line-clamp:1}
     .bc{margin-top:auto;text-align:center}
@@ -4062,19 +4064,20 @@ const PART_CODE_PREFIXES={
   'bearing':'BEA',
   'belt':'BNC-BELT','belt and chain':'BNC-BELT',
   'chain':'BNC-CHAIN',
-  'dust collector parts':'DUSTCP-DC',
+  'dust collector parts':'DUSTC',
   'electrical components':'ELEC-EL',
   'electronic components':'ELEC-EC',
   'filter':'FIL',
   'fastener and hardware':'FASAH',
-  'lubricants and grease':'LUBAG-LUB','lubricats and grease':'LUBAG-LUB',
+  'lubricants and grease':'LUB','lubricats and grease':'LUB',
   'pneumatic components':'PNEU',
-  'pneumatic fitting':'P-FITTING',
-  'sensor and instrument':'SEN-INST','sensor and instrumentation':'SEN-INST',
-  'sensors and instrumentation':'SEN-INST',
+  'pneumatic fitting':'P-FITTING','pneumatic fittings':'P-FITTING',
+  'sensor and instrument':'SEN-INST','sensor and instruments':'SEN-INST',
+  'sensor and instrumentation':'SEN-INST','sensors and instrumentation':'SEN-INST',
   'wear parts':'WEAR',
-  'production cutter (edging machine)':'PC-EDGING',
-  'production cutter':'PC',
+  'production cutter (edging)':'PC-EDGING','production cutter (edging machine)':'PC-EDGING',
+  'production cutter (bit)':'PC-BIT',
+  'production cutter (sawblade)':'PC-SB',
 };
 function partCodePrefix(category,name=''){
   const key=(category||'').trim().toLowerCase().replace(/\s+/g,' ');
@@ -4684,7 +4687,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
           <div style={{overflow:'auto',maxHeight:'calc(100vh - 320px)',minHeight:'200px'}}><table className="resizable-table inv-table">
             <thead><tr>
               {[
-                'Legacy Code','Legacy Item Name','Photo','KD Material Code','KD Material Name',
+                'Legacy Code','Legacy Item Name','Photo','KD Material Code','KD Material Name','Description',
                 'Quantity','Rack No','Use At',
                 ...(canManage?['Unit Price (RM)','Total Amount (RM)']:[]),
                 'Threshold Value','Actions',
@@ -4710,6 +4713,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
                   </td>
                   <td style={{fontFamily:'monospace',fontSize:'12px',color:'#475569'}}>{p.kd_material_code||'—'}</td>
                   <td style={{fontSize:'12px',color:'#334155'}}>{p.kd_material_name||'—'}</td>
+                  <td style={{fontSize:'12px',color:'#64748b',minWidth:'180px',maxWidth:'280px',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={p.description||''}>{p.description||'—'}</td>
                   <td style={{fontWeight:700,color:isCritical?'#dc2626':isTopup?'#ea580c':'#1e293b',textAlign:'right'}} title={isCritical?'Critical — at/below threshold':isTopup?'Low — at/below threshold':''}>{p.quantity_on_hand}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.location||'—'}</td>
                   <td style={{color:'#64748b',fontSize:'12px'}}>{p.used_on_asset||'—'}</td>

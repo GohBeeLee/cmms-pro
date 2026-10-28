@@ -493,11 +493,12 @@ function normalizeSearch(s){ return (s||'').toLowerCase().replace(/\s+/g,''); }
 // (Avery L7159-style 3×8 grid); the others print one label per page for a
 // thermal / label printer.
 const LABEL_LAYOUTS = {
-  a4:     {name:'A4 sticker sheet · 3×8 (63.5 × 33.9 mm)', w:63.5, h:33.9, sheet:true, cols:3, rows:8, gapX:2.5, padTop:12.9, padLeft:7.2, nameFs:10.5, smallFs:7, barH:8.5},
-  l60x40: {name:'Label printer · 60 × 40 mm',               w:60,   h:40,   nameFs:12, smallFs:7.5, barH:11},
-  l80x60: {name:'Label printer · 80 × 60 mm',               w:80,   h:60,   nameFs:15, smallFs:9, barH:18},
-  l50x30: {name:'Label printer · 50 × 30 mm',               w:50,   h:30,   nameFs:9.5, smallFs:6.5, barH:8},
+  a4:     {name:'A4 sticker sheet · 3×8 (63.5 × 33.9 mm)', w:63.5, h:33.9, sheet:true, cols:3, rows:8, gapX:2.5, padTop:12.9, padLeft:7.2, nameFs:12, smallFs:8, barH:8.5},
+  l60x40: {name:'Label printer · 60 × 40 mm',               w:60,   h:40,   nameFs:15, smallFs:9, barH:11},
+  l80x60: {name:'Label printer · 80 × 60 mm',               w:80,   h:60,   nameFs:20, smallFs:12, barH:20},
+  l50x30: {name:'Label printer · 50 × 30 mm',               w:50,   h:30,   nameFs:12, smallFs:8, barH:8},
 };
+const LABEL_DEFAULT_SETTINGS={nameFs:0,detailFs:0,codeFs:0,gapMm:1.1,paddingMm:1.1};
 
 function escHtml(s){
   return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -523,9 +524,13 @@ function makeBarcodeSvg(value, maxWidthMm, heightMm){
   return svg.outerHTML;
 }
 
-function buildLabelsHtml(items, layoutKey){
+function buildLabelsHtml(items, layoutKey, settings={}){
   const L=LABEL_LAYOUTS[layoutKey]||LABEL_LAYOUTS.a4;
-  const pad=1.8;                       // mm inner padding
+  const nameFs=Math.max(6,L.nameFs+(Number(settings.nameFs)||0));
+  const detailFs=Math.max(5,L.smallFs+(Number(settings.detailFs)||0));
+  const codeFs=Math.max(6,L.smallFs*1.3+(Number(settings.codeFs)||0));
+  const gapMm=Math.max(0,Math.min(4,Number(settings.gapMm??1.1)));
+  const pad=Math.max(0,Math.min(4,Number(settings.paddingMm??1.1)));
   const innerW=L.w-pad*2;
   const labels=items.map(p=>{
     const value=labelCodeFor(p);
@@ -556,12 +561,12 @@ function buildLabelsHtml(items, layoutKey){
     .bar{position:sticky;top:0;z-index:5;background:#1e3a5f;color:#fff;padding:10px 16px;display:flex;gap:14px;align-items:center;font-size:13px}
     .bar button{background:#16a34a;color:#fff;border:0;border-radius:6px;padding:8px 18px;font-size:14px;font-weight:700;cursor:pointer}
     .label{width:${L.w}mm;height:${L.h}mm;padding:${pad}mm;overflow:hidden;display:flex;flex-direction:column;background:#fff;position:relative}
-    .name{font-size:${L.nameFs}pt;font-weight:700;line-height:1.15;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-    .legacy{font-size:${L.smallFs}pt;line-height:1.1;margin-top:0.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-    .desc,.use{font-size:${L.smallFs}pt;line-height:1.2;margin-top:0.6mm;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .name{font-size:${nameFs}pt;font-weight:900;line-height:1.08;margin-bottom:${gapMm}mm;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+    .legacy{font-size:${detailFs}pt;font-weight:800;line-height:1.08;margin:0 0 ${gapMm}mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .desc,.use{font-size:${detailFs}pt;font-weight:700;line-height:1.12;margin-top:0.2mm;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
     .use{-webkit-line-clamp:1}
-    .bc{margin-top:auto;text-align:center}
-    .code{font-family:"Courier New",monospace;font-size:${L.smallFs}pt;line-height:1.1;margin-top:0.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .bc{margin-top:auto;text-align:center;width:100%}
+    .code{font-family:Arial,Helvetica,sans-serif;font-size:${codeFs}pt;font-weight:900;line-height:1.05;margin-top:0.4mm;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:0.15pt}
     .bad{font-size:7pt;color:#b91c1c}
     ${L.sheet?`
     .page{width:210mm;height:297mm;padding:${L.padTop}mm 0 0 ${L.padLeft}mm;display:grid;grid-template-columns:repeat(${L.cols},${L.w}mm);grid-auto-rows:${L.h}mm;column-gap:${L.gapX}mm;align-content:start;background:#fff;page-break-after:always;break-after:page}
@@ -4114,7 +4119,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
   const [categories,setCategories]=useState([]);
   const [loading,setLoading]=useState(true);
   const [search,setSearch]=useState('');
-  const [catFilter,setCatFilter]=useState(isProduction?'Production Cutter':'');
+  const [catFilter,setCatFilter]=useState(isProduction?'__production_cutter__':'');
   const [lowOnly,setLowOnly]=useState(false);
   const [criticalOnly,setCriticalOnly]=useState(false);
   const [modal,setModal]=useState(false);
@@ -4157,6 +4162,8 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
   const [cameraStarting,setCameraStarting]=useState(false);
   const html5QrRef=useRef(null);
   const cameraStartedRef=useRef(false);
+  const showAllProductionCategories=isProduction&&catFilter==='__production_cutter__';
+  const isProductionCutterCategory=category=>/^Production Cutter(?:\s*\(|$)/i.test((category||'').trim());
 
   const emptyForm={
     part_code:'',name:'',category:'',description:'',unit:'pcs',
@@ -4173,11 +4180,11 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
   async function load(){
     try{
       let url='/inventory/?low_stock='+lowOnly+'&critical_only='+criticalOnly+'&limit=2000';
-      if(catFilter) url+='&category='+encodeURIComponent(catFilter);
+      if(catFilter&&!showAllProductionCategories) url+='&category='+encodeURIComponent(catFilter);
       const calls=[api(url),api('/inventory/categories')];
       if(catFilter) calls.push(api('/inventory/?low_stock=false&limit=2000'));
       const [p,cats,allP]=await Promise.all(calls);
-      setParts(p);
+      setParts(showAllProductionCategories?p.filter(part=>isProductionCutterCategory(part.category)):p);
       setCategories(cats);
       setAllPartsForCode(catFilter?allP:p);
     }catch(e){toast(e.message,'err');}
@@ -4453,24 +4460,25 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
     setReadiness({loading:true});
     try{
       let url='/inventory/?low_stock=false&critical_only=false&limit=2000';
-      if(catFilter) url+='&category='+encodeURIComponent(catFilter);
+      if(catFilter&&!showAllProductionCategories) url+='&category='+encodeURIComponent(catFilter);
       let list=await api(url);
+      if(showAllProductionCategories) list=list.filter(part=>isProductionCutterCategory(part.category));
       if(search.trim()){
         const q=normalizeSearch(search);
         list=list.filter(p=>normalizeSearch(p.name).includes(q)||normalizeSearch(p.part_code).includes(q)||normalizeSearch(p.kd_material_code).includes(q)||normalizeSearch(p.kd_material_name).includes(q)||normalizeSearch(p.description).includes(q)||normalizeSearch(p.barcode).includes(q));
       }
       setReadiness({list,
-        scope:(catFilter||'All categories')+(search.trim()?` · Search: "${search.trim()}"`:'')});
+        scope:(showAllProductionCategories?'All Production Cutter categories':catFilter||'All categories')+(search.trim()?` · Search: "${search.trim()}"`:'')});
     }catch(e){setReadiness({error:e.message});}
   }
-  const isProdCutter=p=>(p.category||'').trim().toLowerCase()==='production cutter';
+  const isProdCutter=p=>isProductionCutterCategory(p.category);
 
   // Fetch the full inventory so the user can print all or filtered items.
   async function openLabels(single){
     setLabelDlg({loading:true});
     try{
       const all=await api('/inventory/?low_stock=false&critical_only=false&limit=2000');
-      setLabelDlg({all,single:single||null,scope:single?'single':'current',layout:'a4'});
+      setLabelDlg({all,single:single||null,scope:single?'single':'current',layout:'a4',settings:{...LABEL_DEFAULT_SETTINGS}});
     }catch(e){toast(e.message,'err');setLabelDlg(null);}
   }
   function labelItemsFor(d){
@@ -4484,7 +4492,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
     const items=labelItemsFor(labelDlg);
     if(!items.length){toast('No items to print','err');return;}
     if(typeof JsBarcode==='undefined'){toast('Barcode library failed to load — check your internet connection and reload the page','err');return;}
-    const html=buildLabelsHtml(items,labelDlg.layout);
+    const html=buildLabelsHtml(items,labelDlg.layout,labelDlg.settings);
     const w=window.open('','_blank');
     if(!w){toast('Pop-up blocked — allow pop-ups for this site, then try again','err');return;}
     w.document.open(); w.document.write(html); w.document.close();
@@ -4533,7 +4541,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
                 </label>
               ):(
                 <div style={{fontSize:'11px',color:'#94a3b8',marginBottom:'12px'}}>
-                  Category filter is set to "{catFilter}". Set it to "All categories" to choose whether Production Cutter is included.
+                  {showAllProductionCategories?'Showing all Production Cutter categories.':`Category filter is set to "${catFilter}". Set it to "All categories" to choose whether Production Cutter is included.`}
                 </div>
               )}
               <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'14px'}}>
@@ -4576,6 +4584,15 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
                 <input type="radio" name="lblscope" disabled={disabled} checked={labelDlg.scope===val} onChange={()=>setLabelDlg({...labelDlg,scope:val})}/>{label}
               </label>
             );
+            const currentLayout=LABEL_LAYOUTS[labelDlg.layout]||LABEL_LAYOUTS.a4;
+            const settings=labelDlg.settings||LABEL_DEFAULT_SETTINGS;
+            const adjust=(key,value)=>setLabelDlg({...labelDlg,settings:{...settings,[key]:Number(value)}});
+            const slider=(key,label,min,max,step,base,unit='pt')=>(
+              <label key={key} style={{display:'grid',gridTemplateColumns:'1fr auto',gap:'3px 10px',alignItems:'center',fontSize:'12px',fontWeight:600,color:'#334155'}}>
+                <span>{label}</span><span style={{fontVariantNumeric:'tabular-nums',color:'#64748b'}}>{(base+Number(settings[key]||0)).toFixed(1)} {unit}</span>
+                <input type="range" min={min} max={max} step={step} value={settings[key]??0} onChange={e=>adjust(key,e.target.value)} style={{gridColumn:'1 / -1',width:'100%',accentColor:'#2563eb'}}/>
+              </label>
+            );
             return (
               <div>
                 <div style={{fontSize:'12px',fontWeight:700,color:'#64748b',marginBottom:'4px'}}>Which items?</div>
@@ -4589,6 +4606,17 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
                 <select className="inp" value={labelDlg.layout} onChange={e=>setLabelDlg({...labelDlg,layout:e.target.value})}>
                   {Object.entries(LABEL_LAYOUTS).map(([k,L])=><option key={k} value={k}>{L.name}</option>)}
                 </select>
+                <div style={{marginTop:'12px',padding:'11px 12px',border:'1px solid #e2e8f0',borderRadius:'8px',background:'#fff'}}>
+                  <div style={{fontSize:'12px',fontWeight:800,color:'#334155',marginBottom:'9px'}}>Label appearance</div>
+                  <div style={{display:'grid',gap:'8px'}}>
+                    {slider('nameFs','Item name size',-3,12,0.5,currentLayout.nameFs)}
+                    {slider('detailFs','Legacy code / description size',-3,8,0.5,currentLayout.smallFs)}
+                    {slider('codeFs','Barcode number size',-2,10,0.5,currentLayout.smallFs*1.3)}
+                    {slider('gapMm','Space between text rows',0,4,0.1,0,'mm')}
+                    {slider('paddingMm','Label edge padding',0,4,0.1,0,'mm')}
+                  </div>
+                  <button className="btn btn-secondary" style={{marginTop:'9px',fontSize:'11px',padding:'5px 9px'}} onClick={()=>setLabelDlg({...labelDlg,settings:{...LABEL_DEFAULT_SETTINGS}})}>Reset appearance</button>
+                </div>
                 <div style={{marginTop:'12px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:'8px',padding:'10px 12px',fontSize:'12px',color:'#475569',lineHeight:1.6}}>
                   Each label shows: <strong>item name · description · barcode</strong> (Code 128).<br/>
                   Barcode value: <strong>KD Material Code</strong>{missingKdCode>0&&<>. <strong style={{color:'#b45309'}}>{missingKdCode}</strong> selected item{missingKdCode===1?' has':'s have'} no KD Material Code and cannot be encoded.</>}
@@ -4659,7 +4687,7 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
       <div style={{display:'flex',gap:'10px',marginBottom:'16px',alignItems:'center',flexWrap:'wrap'}}>
         <input className="inp" style={{maxWidth:'220px'}} placeholder="Search parts…" value={search} onChange={e=>setSearch(e.target.value)}/>
         {isProduction
-          ?<span className="inp" style={{maxWidth:'220px',display:'inline-flex',alignItems:'center',background:'#f1f5f9',color:'#334155',fontWeight:700,cursor:'default'}}>🏭 Production Cutter</span>
+          ?<span className="inp" style={{maxWidth:'280px',display:'inline-flex',alignItems:'center',background:'#f1f5f9',color:'#334155',fontWeight:700,cursor:'default'}}>🏭 All Production Cutter categories</span>
           :<select className="inp" style={{maxWidth:'180px'}} value={catFilter} onChange={e=>setCatFilter(e.target.value)}>
             <option value="">All categories</option>
             {categories.map(c=><option key={c} value={c}>{c}</option>)}

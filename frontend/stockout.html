@@ -61,6 +61,10 @@
     <div class="card">
       <h2>Item &amp; Quantity</h2>
       <div class="field">
+        <label>Production Cutter Category</label>
+        <select id="category-select"><option value="">All Production Cutter categories</option></select>
+      </div>
+      <div class="field">
         <label>Item <span class="req">*</span></label>
         <select id="part-select"><option value="">Loading items...</option></select>
         <div class="stock-hint" id="stock-hint"></div>
@@ -116,26 +120,45 @@
 <script>
 var API = '';
 var parts = [];
+var productionCategories = [];
 
 window.addEventListener('DOMContentLoaded', function() {
   fetch(API + '/public-stockout/parts').then(function(r){ return r.json(); }).then(function(list) {
-    parts = list;
-    var sel = document.getElementById('part-select');
-    sel.innerHTML = '<option value="">Select item...</option>';
-    list.forEach(function(p) {
+    parts = list.parts || [];
+    productionCategories = list.categories || [];
+    var catSel = document.getElementById('category-select');
+    productionCategories.forEach(function(category) {
       var opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.part_code + ' — ' + p.name + ' (' + p.quantity_on_hand + ' ' + p.unit + ' available)';
-      sel.appendChild(opt);
+      opt.value = category;
+      opt.textContent = category;
+      catSel.appendChild(opt);
     });
-    if (list.length === 0) {
-      sel.innerHTML = '<option value="">No Production Cutter items found</option>';
-    }
+    renderPartOptions();
   }).catch(function() {
     document.getElementById('part-select').innerHTML = '<option value="">Failed to load — please refresh</option>';
   });
   document.getElementById('part-select').addEventListener('change', updateStockHint);
+  document.getElementById('category-select').addEventListener('change', function() {
+    renderPartOptions();
+    updateStockHint();
+  });
 });
+
+function renderPartOptions() {
+  var sel = document.getElementById('part-select');
+  var category = document.getElementById('category-select').value;
+  var visible = parts.filter(function(p){ return !category || p.category === category; });
+  sel.innerHTML = '<option value="">Select item...</option>';
+  visible.forEach(function(p) {
+    var opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.part_code + ' — ' + p.name + ' (' + p.quantity_on_hand + ' ' + p.unit + ' available)';
+    sel.appendChild(opt);
+  });
+  if (visible.length === 0) {
+    sel.innerHTML = '<option value="">No items in this category</option>';
+  }
+}
 
 function updateStockHint() {
   var id = document.getElementById('part-select').value;
@@ -191,7 +214,9 @@ function openScanner() {
 function onScanSuccess(decodedText) {
   var code = (decodedText || '').trim().toLowerCase();
   var match = parts.filter(function (p) {
-    return (p.barcode && p.barcode.toLowerCase() === code) || (p.part_code && p.part_code.toLowerCase() === code);
+    return (p.kd_material_code && p.kd_material_code.toLowerCase() === code)
+      || (p.barcode && p.barcode.toLowerCase() === code)
+      || (p.part_code && p.part_code.toLowerCase() === code);
   })[0];
 
   if (!match) {
@@ -199,6 +224,8 @@ function onScanSuccess(decodedText) {
     return; // keep the camera running so they can retry
   }
 
+  document.getElementById('category-select').value = match.category;
+  renderPartOptions();
   document.getElementById('part-select').value = match.id;
   updateStockHint();
   closeScanner();
@@ -275,6 +302,9 @@ function resetForm() {
   document.getElementById('used-on').value = '';
   document.getElementById('remarks').value = '';
   document.getElementById('stock-hint').textContent = '';
+  document.getElementById('category-select').value = '';
+  renderPartOptions();
+  document.getElementById('part-select').value = '';
   window.scrollTo(0, 0);
 }
 </script>

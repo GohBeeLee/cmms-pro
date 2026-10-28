@@ -4,9 +4,9 @@ deduct Production Cutter inventory via a QR-code-linked form, the same way
 routers/requests.py lets an operator submit a repair request without
 logging in.
 
-Deliberately scoped to a single category (Production Cutter) so this public
-surface can only ever touch that slice of inventory — a part_id for any
-other category is rejected even if someone crafts the request by hand.
+Deliberately scoped to Production Cutter categories so this public surface
+can only ever touch that slice of inventory — a part_id for any other
+category is rejected even if someone crafts the request by hand.
 """
 from datetime import datetime
 from types import SimpleNamespace
@@ -26,6 +26,11 @@ from routers.stock import _ensure_table, _log_movement
 router = APIRouter(prefix="/public-stockout", tags=["public-stockout"])
 
 PUBLIC_CATEGORY = "Production Cutter"
+PUBLIC_CATEGORIES = (
+    "Production Cutter (EDGING)",
+    "Production Cutter (BIT)",
+    "Production Cutter (SAWBLADE)",
+)
 
 
 class StockOutRequest(BaseModel):
@@ -45,20 +50,23 @@ class StockOutResponse(BaseModel):
 
 @router.get("/parts")
 async def get_public_stockout_parts(db: AsyncSession = Depends(get_db)):
-    """Production Cutter parts for the QR form dropdown. No auth required."""
+    """Production Cutter categories and parts for the QR form. No auth required."""
     result = await db.execute(
         select(SparePart)
-        .where(SparePart.category == PUBLIC_CATEGORY)
-        .order_by(SparePart.part_code)
+        .where(SparePart.category.in_(PUBLIC_CATEGORIES))
+        .order_by(SparePart.category, SparePart.part_code)
     )
-    return [
+    parts = [
         {
             "id": str(p.id), "part_code": p.part_code, "name": p.name,
+            "category": p.category,
             "quantity_on_hand": p.quantity_on_hand, "unit": p.unit,
             "barcode": getattr(p, "barcode", None),
+            "kd_material_code": getattr(p, "kd_material_code", None),
         }
         for p in result.scalars().all()
     ]
+    return {"categories": list(PUBLIC_CATEGORIES), "parts": parts}
 
 
 @router.post("/submit", response_model=StockOutResponse)
@@ -84,7 +92,7 @@ async def submit_public_stockout(body: StockOutRequest, db: AsyncSession = Depen
         raise HTTPException(404, "Item not found")
     # Defensive category check — keeps this public, unauthenticated endpoint
     # scoped to Production Cutter no matter what part_id is passed in.
-    if (part.category or "") != PUBLIC_CATEGORY:
+    if (part.category or "") not in PUBLIC_CATEGORIES:
         raise HTTPException(403, "This item isn't available for operator stock-out")
     if body.quantity > part.quantity_on_hand:
         raise HTTPException(400, f"Only {part.quantity_on_hand} {part.unit} available for {part.name}")

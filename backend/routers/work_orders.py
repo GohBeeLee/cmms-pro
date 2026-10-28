@@ -114,6 +114,12 @@ def _embed_photos(photos: list[PhotoEntry], tag: str, max_kb: int = 250) -> str:
 # ── WO dict serializer ─────────────────────────────────────────────────────
 
 def _wo_dict(wo: WorkOrder) -> dict:
+    divisor = wo.asset.downtime_divisor if wo.asset else 1.0
+    _total_hours, affected_hours, _non_affected_hours, is_affected_case = _wo_downtime_split(
+        wo.actual_hours, wo.created_at, wo.completed_at, getattr(wo, "held_hours", 0.0),
+        getattr(wo, "gf_overlap_hours", 0.0), getattr(wo, "affected_downtime", True),
+        getattr(wo, "downtime_suppressed_by_id", None) is not None, divisor,
+    )
     return {
         "id":           str(wo.id),
         "wo_number":    wo.wo_number,
@@ -123,6 +129,9 @@ def _wo_dict(wo: WorkOrder) -> dict:
         "priority":     wo.priority.value if wo.priority else None,
         "status":       wo.status.value  if wo.status   else None,
         "actual_hours": wo.actual_hours,
+        # Current formula result (kept derived so divisor changes are reflected
+        # without rewriting the work order's original description).
+        "processed_affected_hours": round(affected_hours if is_affected_case else 0.0, 3),
         "estimated_hours": wo.estimated_hours,
         "affected_downtime": bool(getattr(wo, "affected_downtime", True)),
         # Set only when the General Facilities overlap rule (not a person)

@@ -124,29 +124,28 @@ def _location_group(location: Optional[str]) -> str:
     return _LOCATION_GROUP_MAP.get(location or "", "Other")
 
 
-# Rolls each Autoline asset's name up into its process-station group, by
-# keyword match (checked in this order so overlapping substrings resolve to
-# the right station — e.g. "Sorting Robot" contains "robot" but should be
-# "Sorting", not "MHS").
-# NEEDS CONFIRMATION: "MHS" (Multi Handling System) is still placeholder-
-# mapped to any asset with "robot" in its name. In the reference report MHS
-# is one of the biggest categories, so it likely refers to a specific named
-# machine/conveyor per Autoline rather than the (currently zero-case) Nesting
-# Robot — update this mapping once that's confirmed.
-def _autoline_station_group(asset_name: Optional[str]) -> Optional[str]:
+# MHS assets are identified by their asset category. Assets categorized as
+# Machine are grouped by station keywords in their names.
+def _autoline_station_group(asset_name: Optional[str], asset_category: Optional[str] = None) -> Optional[str]:
+    category = (asset_category or "").strip().lower()
+    if category in {"mhs", "multi handling system", "multi handling system (mhs)"}:
+        return "MHS"
+    if category == "robot":
+        return "MHS"  # retain the legacy Robot category mapping
+
     n = (asset_name or "").lower()
     if "buffer rack" in n:
         return "Buffer Rack"
     if "sorting" in n:
         return "Sorting"
-    if "robot" in n:
-        return "MHS"
     if "nesting" in n:
         return "Nesting Machine"
     if "edging" in n:
         return "Edging Machine"
     if "cnc" in n:
         return "CNC"
+    if "robot" in n and category != "machine":
+        return "MHS"  # fallback for older assets without a category
     return None  # not one of the tracked Autoline stations
 
 # Backwards-compatible alias (used by the month-snapshot endpoint below).
@@ -872,7 +871,7 @@ async def mrr_autoline_detail(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
             WorkOrder.held_hours, WorkOrder.affected_downtime, WorkOrder.gf_overlap_hours,
             WorkOrder.downtime_suppressed_by_id,
-            Asset.location, Asset.name.label("asset_name"), Asset.downtime_divisor,
+            Asset.location, Asset.name.label("asset_name"), Asset.category.label("asset_category"), Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
@@ -899,7 +898,7 @@ async def mrr_autoline_detail(
     unclassified = 0
     for r in rows:
         if r.location in STATION_LINES:
-            cat = _autoline_station_group(r.asset_name)
+            cat = _autoline_station_group(r.asset_name, r.asset_category)
         else:
             cat = r.asset_name  # Supporting Line / Spray Paint Line: by machine name
         if cat is None or cat not in line_categories.get(r.location, []):
@@ -917,7 +916,12 @@ async def mrr_autoline_detail(
         )
         if is_case_affected:
             cell["cases_affected"] += 1
-        cell["hours_affected"] += affected_hrs
+            # Keep affected hours aligned with the same processed rule used
+            # to include the case: only count the formula-derived affected
+            # portion when the case qualifies as affected. This excludes
+            # sub-threshold cases and cases whose affected portion is not the
+            # majority after General Facilities overlap is removed.
+            cell["hours_affected"] += affected_hrs
 
     out_months = []
     for m in range(1, 13):
@@ -968,7 +972,8 @@ async def mrr_month_snapshot(
     q = (
         select(
             WorkOrder.actual_hours, WorkOrder.created_at, WorkOrder.completed_at,
-            WorkOrder.held_hours, Asset.location, Asset.name.label("asset_name"), Asset.downtime_divisor,
+            WorkOrder.held_hours, Asset.location, Asset.name.label("asset_name"),
+            Asset.category.label("asset_category"), Asset.downtime_divisor,
         )
         .join(Asset, WorkOrder.asset_id == Asset.id)
         .where(
@@ -991,7 +996,7 @@ async def mrr_month_snapshot(
     for r in rows:
         hrs = _wo_downtime_hours(r.actual_hours, r.created_at, r.completed_at, r.held_hours, r.downtime_divisor)
         if r.location in AUTOLINES:
-            grp = _autoline_asset_group(r.asset_name)
+            grp = _autoline_asset_group(r.asset_name, r.asset_category)
             if grp is None:
                 unclassified += 1
                 continue

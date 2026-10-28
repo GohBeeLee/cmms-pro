@@ -2186,8 +2186,7 @@ function HistoryLog(){
   }
   // postFilter: optional extra client-side filter applied to the fetched
   // work orders, for breakdowns the backend doesn't expose as a query
-  // param (e.g. Autoline process station, which is derived from asset name
-  // keywords rather than a stored column — see _autoline_station_group).
+  // param (e.g. Autoline process station, derived from asset category/name).
   function drillFetch(e,label,fetchSpec,postFilter){
     e.preventDefault();e.stopPropagation();
     setDrillMenu({x:e.clientX,y:e.clientY,label,fetchSpec,postFilter});
@@ -2204,18 +2203,18 @@ function HistoryLog(){
       setDrillModal({label:menu.label,items});
     }catch(e){toast(e.message,'err');setDrillModal(null);}
   }
-  // Mirrors the backend's _autoline_station_group (routers/analysis.py) —
-  // Autoline 1/2 process-station breakdown is derived from asset-name
-  // keywords, not a stored column, so drilling into one station's cell
-  // needs the same keyword logic applied client-side after fetching.
-  function autolineStationGroup(assetName){
+  // Mirrors _autoline_station_group in routers/analysis.py for MRR drilldowns.
+  function autolineStationGroup(assetName,assetCategory){
+    const category=(assetCategory||'').trim().toLowerCase();
+    if(['mhs','multi handling system','multi handling system (mhs)'].includes(category))return'MHS';
+    if(category==='robot')return'MHS';
     const n=(assetName||'').toLowerCase();
     if(n.includes('buffer rack'))return'Buffer Rack';
     if(n.includes('sorting'))return'Sorting';
-    if(n.includes('robot'))return'MHS';
     if(n.includes('nesting'))return'Nesting Machine';
     if(n.includes('edging'))return'Edging Machine';
     if(n.includes('cnc'))return'CNC';
+    if(n.includes('robot')&&category!=='machine')return'MHS';
     return null;
   }
   // ── MRR monthly reports (Table 1: by location, Table 2: Autoline detail by station) ──
@@ -2268,9 +2267,10 @@ function HistoryLog(){
       await api('/assets/'+dfSelected.id,{method:'PATCH',body:JSON.stringify({downtime_divisor:val})});
       toast('Downtime formula updated for '+dfSelected.name,'ok');
       await loadAssetsList();
-      // Downtime figures for this asset changed — refresh whichever
-      // analysis tabs are already loaded so numbers stay in sync.
-      loadAnalysis(); loadRootCauseAnalysis();
+      // Downtime figures for this asset changed — refresh every report that
+      // caches values derived from the asset divisor, including MRR detail.
+      loadAnalysis(); loadRootCauseAnalysis(); loadUptime();
+      loadMrrSummary(); loadMrrAutoline(); loadMrrSnap();
       setDfModal(false);
     }catch(e){toast(e.message,'err');}
     finally{setDfSaving(false);}
@@ -3186,7 +3186,7 @@ function HistoryLog(){
                     </thead>
                     <tbody>
                       {cats.map(c=>{
-                        const catFilter=STATION_LINES.includes(loc)?(w=>autolineStationGroup(w.asset_name)===c):(w=>w.asset_name===c);
+                        const catFilter=STATION_LINES.includes(loc)?(w=>autolineStationGroup(w.asset_name,w.asset_category)===c):(w=>w.asset_name===c);
                         const postFilter=w=>catFilter(w)&&(mrrDetailView!=='affected'||w.affected_downtime===true);
                         return (
                         <tr key={c}>
@@ -3277,7 +3277,7 @@ function HistoryLog(){
                         <td style={{fontWeight:700}}>{s}</td>
                         {locs.map(loc=>{
                           const spec={...monthRange(mrrSnapYear,mrrSnap.month),location:loc};
-                          const postFilter=w=>autolineStationGroup(w.asset_name)===s;
+                          const postFilter=w=>autolineStationGroup(w.asset_name,w.asset_category)===s;
                           return (<React.Fragment key={loc}>
                             <td style={{textAlign:'right',borderLeft:'1px solid #f1f5f9',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${s}`,spec,postFilter)}>{mrrSnap.autoline[loc].groups[s].cases}</td>
                             <td style={{textAlign:'right',cursor:'context-menu'}} onContextMenu={e=>drillFetch(e,`${loc} — ${s}`,spec,postFilter)}>{mrrSnap.autoline[loc].groups[s].hours}h</td>
@@ -3426,6 +3426,11 @@ function HistoryLog(){
               <div className="section-title">Full Description</div>
               <div style={{background:'#f8fafc',borderRadius:'10px',padding:'14px',fontSize:'13px',color:'#374151',whiteSpace:'pre-line',lineHeight:1.7}}>
                 {stripPhotoTags(selected.description)||'No description'}
+                {selected.type==='corrective'&&selected.status==='completed'&&(
+                  <div style={{marginTop:'10px',paddingTop:'8px',borderTop:'1px solid #e2e8f0',whiteSpace:'normal'}}>
+                    <strong>Formula-processed affected downtime:</strong> {Number(selected.processed_affected_hours||0).toFixed(3).replace(/\.?0+$/,'')}h
+                  </div>
+                )}
               </div>
             </div>
             <div>
@@ -4754,7 +4759,6 @@ function PartsAndScannerTab({canManage,isAdmin,isProduction}){
                     <button onClick={()=>openScanner(p.kd_material_code||p.part_code)} style={{color:'#16a34a',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Scan</button>
                     {canManage&&<>
                       <button onClick={()=>openLabels(p)} title="Print barcode label" style={{color:'#0f766e',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>Label</button>
-                      <button onClick={()=>openPhotoModal(p)} style={{color:'#7c3aed',background:'none',border:'none',cursor:'pointer',fontSize:'12px',marginRight:'6px'}}>{p.has_photo?'Photo':'+ Photo'}</button>
                       <button onClick={()=>{setEditPart(p);setForm({
                         part_code:p.part_code,name:p.name,category:p.category||'',
                         description:p.description||'',unit:p.unit||'pcs',
